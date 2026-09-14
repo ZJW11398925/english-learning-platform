@@ -36,6 +36,8 @@ const FAKE_KEY = 'sk-test-DO-NOT-LOG-0123456789abcdef';
 let app;
 let origin;
 let port;
+/** 子进程测试必须清理干净，否则套件会留下孤儿进程。每个子进程注册进来，after 里兜底全杀。 */
+const liveChildren = new Set();
 
 before(async () => {
   app = createApp();
@@ -48,6 +50,9 @@ before(async () => {
 });
 
 after(async () => {
+  // 兜底：任何还没退出的子进程在这里再杀一次（正常路径已在用例内 kill 掉）。
+  for (const child of liveChildren) { try { child.kill('SIGKILL'); } catch { /* 已退出 */ } }
+  liveChildren.clear();
   // fetch 默认复用 keep-alive 连接，只 close() 会等空闲连接超时；先断开再关，套件不吊着不退出。
   app.closeAllConnections();
   await new Promise((resolve, reject) => app.close((err) => (err ? reject(err) : resolve())));
@@ -69,6 +74,74 @@ function rawGet(target) {
     sock.on('error', reject);
     sock.setTimeout(CHILD_TIMEOUT_MS, () => { sock.destroy(); reject(new Error(`裸请求超时：${target}`)); });
   });
+}
+
+/**
+ * 往**任意**端口发原始 target 的裸请求（rawGet 的端口参数版）。
+ *
+ * 畸形 target 必须走裸 socket：`fetch`/`URL` 在发送前就把它归一化/拒绝了，到不了服务端；
+ * 而且畸形请求的正确结局是「服务端回 4xx」——裸 socket 能明确区分三种结局：
+ *   ① 拿到响应 → 回的就是响应原文；② 连接被重置；③ 一直没人应答（超时）。
+ * 超时不是"慢"，而是**请求被丢弃**（服务端抛异常后 res 从未 end），调用方要按失败处理。
+ */
+function rawGetOn(p, target, timeoutMs = CHILD_TIMEOUT_MS) {
+  return new Promise((resolve, reject) => {
+    const sock = connect(p, '127.0.0.1', () => {
+      sock.write(`GET ${target} HTTP/1.1\r\nHost: 127.0.0.1:${p}\r\nConnection: close\r\n\r\n`);
+    });
+    let buf = '';
+    sock.setEncoding('utf8');
+    sock.on('data', (c) => { buf += c; });
+    sock.on('end', () => resolve(buf));
+    // 连接被重置也把已读到的内容交回去：进程猝死时客户端通常看到的就是 ECONNRESET，
+    // 让断言自己去看"有没有 400"，而不是在辅助函数里就抛掉证据。
+    sock.on('error', () => resolve(buf));
+    sock.setTimeout(timeoutMs, () => { sock.destroy(); reject(new Error(`裸请求超时（未收到任何响应）：${target}`)); });
+  });
+}
+
+/** 从原始响应文本里取状态码（响应不是 HTTP 时返回 null）。 */
+function statusOf(raw) {
+  const m = /^HTTP\/1\.[01] (\d{3})/.exec(raw);
+  return m ? Number(m[1]) : null;
+}
+
+/**
+ * 起一个**真实子进程**服务：`node server/index.mjs`，端口显式给（`PORT=0` 会被 loadEnv 判非法）。
+ * 输出只能重定向到文件描述符——本环境不允许 piped stdio（见本文件顶部注释与
+ * `scripts/mutation-probe.mjs` 护栏 3），所以用 spawnLogged。
+ */
+async function startChildServer(label, extraEnv = {}) {
+  const p = await freePort();
+  const spawned = spawnLogged(['server/index.mjs'], cleanEnv({
+    DEEPSEEK_API_KEY: FAKE_KEY,
+    DEEPSEEK_API_BASE: 'https://api.deepseek.com',
+    DEEPSEEK_MODEL: 'deepseek-flash',
+    PORT: String(p),
+    ...extraEnv,
+  }), label);
+  liveChildren.add(spawned.child);
+  const originUrl = `http://127.0.0.1:${p}`;
+
+  // 不能只看日志就宣布"活着"：日志出现后再打一个正常请求，确认它真能应答。
+  await waitForLog(spawned.read, `listening on http://localhost:${p}`, label);
+  const deadline = Date.now() + CHILD_TIMEOUT_MS;
+  for (;;) {
+    const exited = await Promise.race([
+      spawned.done.then((r) => r),
+      new Promise((r) => setTimeout(() => r(null), 100)),
+    ]);
+    if (exited) {
+      throw new Error(`子进程在起来之后、应答正常请求之前就退出了：code=${exited.code} signal=${exited.signal}\n${exited.text}`);
+    }
+    try {
+      const res = await fetch(`${originUrl}/nope.js`);
+      const ok = res.status === 404;
+      await res.arrayBuffer();
+      if (ok) return { ...spawned, origin: originUrl, port: p };
+    } catch { /* 还没起来，重试 */ }
+    if (Date.now() > deadline) throw new Error(`子进程起来了但不应答（${label}）：${JSON.stringify(spawned.read())}`);
+  }
 }
 
 /** 取一个空闲端口（绑 0 再释放）。子进程要真实端口，因为 PORT=0 会被 loadEnv 判非法。 */
@@ -208,6 +281,121 @@ test('越界守卫谓词：web/ 之外的路径一律判假（含"同前缀兄�
     false,
     'server/env.mjs 在 web/ 之外',
   );
+});
+
+// ─────────────────────────────────────────────────────────── 畸形 request-target（不得打死进程）
+
+/**
+ * 这几条用例钉的是一个**已验证的远程崩溃**（Task 5 修复轮 2，详见 task-5-report.md）：
+ * `serveStatic` 曾直接 `new URL(req.url, 'http://localhost')`，而 `req.url` 完全由对端控制。
+ * target `//`（空 host）让 `new URL` 抛 `TypeError [ERR_INVALID_URL]`；异常从 async listener
+ * 里逃出去成为 unhandled rejection → Node 默认 `--unhandled-rejections=throw` → **整个进程退出（code 1）**。
+ * 从 Task 6 起服务要经隧道暴露到公网 HTTPS（getUserMedia 要求安全上下文），于是这就是一条
+ * 任何人都能触发的 DoS：一个请求换一条命。
+ *
+ * 修复后的契约：畸形 target → `400 {"error":"bad_request"}`，且**服务继续活着**。
+ * 因此每条用例都是"两段式"：先发畸形请求断言 400，再发一个正常请求断言仍然 200——
+ * 只断言 400 是不够的，那证明不了进程没死。
+ */
+test('畸形 target `//`：回 400 bad_request 而不是打死进程，且随后正常请求仍成功', async () => {
+  // 走裸 socket：`fetch`/`URL` 会在发送前把 `//` 归一化，根本到不了服务端。
+  const raw = await rawGet('//');
+  assert.equal(
+    statusOf(raw),
+    400,
+    `畸形 target 必须是 400（响应原文前 80 字：${JSON.stringify(raw.slice(0, 80))}）——` +
+    '若这里超时或收到 ECONNRESET，说明服务端把请求丢了/进程死了',
+  );
+  assert.match(raw, /"error":"bad_request"/, '错误体形状要与本服务既有 JSON 错误一致');
+  // 不断言"body 恰好是这 23 字节"、也不把传输细节算进契约：实测响应是 chunked
+  // （`17\r\n{"error":"bad_request"}\r\n0`），逐字相等会把分块帧格式一起钉死（今天换个
+  // `res.end(s)` 的实现就假红）。这里断言的是"body 就是这一个 JSON 对象"。
+  assert.match(raw.split('\r\n\r\n')[1] ?? '', /^\S+\r?\n?(\{"error":"bad_request"\})/, 'body 应就是该 JSON');
+
+  // 关键断言：进程还活着、还在服务。
+  const res = await fetch(`${origin}/units/store.mjs`);
+  assert.equal(res.status, 200, '畸形请求之后服务必须仍然正常应答（进程没被打死）');
+  assert.equal(await res.text(), fs.readFileSync(STORE_MJS, 'utf8'));
+});
+
+test('另一个畸形 target `///`：同样 400 + 进程存活（不是只给 `//` 打的补丁）', async () => {
+  const raw = await rawGet('///');
+  assert.equal(statusOf(raw), 400, `响应原文前 80 字：${JSON.stringify(raw.slice(0, 80))}`);
+  assert.match(raw, /"error":"bad_request"/);
+  const res = await fetch(`${origin}/nope.js`);
+  assert.equal(res.status, 404, '畸形请求之后服务必须仍然正常应答');
+});
+
+test('正常请求不受影响：路由/405/两个桩端点在该守卫落地后逐字未变', async () => {
+  // 与前面各用例有意重叠：守卫若写错（例如把所有请求都判成畸形），会在**这里**响。
+  const ok = await fetch(`${origin}/units/store.mjs`);
+  assert.equal(ok.status, 200);
+  assert.equal(ok.headers.get('content-type'), 'text/javascript; charset=utf-8');
+  await ok.arrayBuffer();
+
+  const missing = await fetch(`${origin}/nope.js`);
+  assert.equal(missing.status, 404);
+  assert.deepEqual(await missing.json(), { error: 'not_found' });
+
+  const wrongMethod = await fetch(`${origin}/`, { method: 'PUT' });
+  assert.equal(wrongMethod.status, 405);
+  assert.deepEqual(await wrongMethod.json(), { error: 'method_not_allowed' });
+
+  for (const path of ['/api/recognize', '/api/feedback']) {
+    const stub = await fetch(`${origin}${path}`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ probe: true }),
+    });
+    assert.equal(stub.status, 200);
+    assert.deepEqual(await stub.json(), { ok: false, error: 'not_implemented_until_task_8' });
+  }
+});
+
+test('进程级回归闸：真实子进程 `node server/index.mjs` 被畸形请求打过之后仍然活着', async () => {
+  // 为什么要有这条：上面的用例证明的是"同一个进程里响应是 400"，而**这个缺陷的危害正是进程死亡**。
+  // 只有起真实子进程、发畸形请求、再确认它既没退出也仍能应答，才真正钉住"进程不死"。
+  // 输出重定向到文件描述符（本环境不允许 piped stdio），子进程在 finally 里必杀。
+  const srv = await startChildServer('malformed-target');
+  try {
+    const before = await fetch(`${srv.origin}/nope.js`);
+    assert.equal(before.status, 404);
+    await before.arrayBuffer();
+
+    const raw = await rawGetOn(srv.port, '//');
+    assert.equal(statusOf(raw), 400, `响应原文前 80 字：${JSON.stringify(raw.slice(0, 80))}`);
+
+    const exited = await Promise.race([
+      srv.done.then((r) => r),
+      new Promise((r) => setTimeout(() => r(null), 400)),
+    ]);
+    assert.equal(
+      exited,
+      null,
+      `发完 GET // 之后子进程退出了：code=${exited?.code} signal=${exited?.signal}\n${exited?.text ?? ''}`,
+    );
+
+    const after = await fetch(`${srv.origin}/units/store.mjs`);
+    assert.equal(after.status, 200, '畸形请求之后子进程必须仍然正常应答');
+    assert.equal(await after.text(), fs.readFileSync(STORE_MJS, 'utf8'));
+    assert.ok(!srv.read().includes(FAKE_KEY), '密钥绝不能被打印出来');
+
+    // 两个 400 **不是同一件事**，这条断言就是用来分开它们的：
+    //   · 期望路径：parseTarget() 认出畸形 target → 直接 400，handleRequest 的兜底 catch 不参与；
+    //   · 退化路径：守卫没了 → `new URL` 抛异常 → 兜底 catch 接住 → 也回 400（进程同样不死）
+    //     ——但兜底 catch 会往 stderr 写一行 `request handler error:`。
+    // 因此"stderr 干净"正是"守卫真的在岗"的可观测证据。没有这条断言时，把守卫整条删掉
+    // 测试仍然全绿（实测 G1 MISSED）——那样套件就分不清"被防住了"和"被兜底接住了"。
+    const stderr = srv.read();
+    assert.ok(
+      !stderr.includes('request handler error'),
+      `畸形 target 应由 parseTarget 的守卫直接处理，不该落到兜底 catch：\n${stderr}`,
+    );
+  } finally {
+    srv.child.kill('SIGKILL');
+    await srv.done;
+    liveChildren.delete(srv.child);
+  }
 });
 
 // ─────────────────────────────────────────────────────────── 端点占位与未知方法

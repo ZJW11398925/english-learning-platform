@@ -45,6 +45,33 @@ const json = (res, code, body) => {
   res.end(s);
 };
 
+/**
+ * request-target → URL 的**唯一**解析入口，解析失败返回 `null`。
+ *
+ * 为什么必须有这层：`req.url` 完全由对端控制，而 `new URL` 对某些 target 会**抛异常**。
+ * 已验证（Node v24.13.0）：`GET // HTTP/1.1` 的 target `//`（空 host）抛
+ * `TypeError [ERR_INVALID_URL]`；`///`、`http://` 同样抛。修复前 `serveStatic` 直接
+ * `new URL(req.url, 'http://localhost')`，异常从 async listener 逃出去成为 unhandled
+ * rejection，Node 默认按 throw 处理 → **整个进程退出（code 1）**，而这条请求还留在
+ * 半空中（从未 `res.end`），对端看到的是挂死/ECONNRESET。
+ *
+ * 这是远程 DoS：Task 6 起本服务要经内网穿透暴露到公网 HTTPS（getUserMedia 要求安全上下文），
+ * 任何扫描器一条请求就能打死全部在线用户的服务。所以畸形 target 的结局是 400，不是崩溃。
+ *
+ * 只抛出型失败返回 `null`——解析成功但语义古怪的 target（如 `/..%2f..%2f.env`）仍走原路，
+ * 由既有的越界检查处理，行为一字不变。
+ */
+function parseTarget(url) {
+  try {
+    return new URL(url, 'http://localhost');
+  } catch {
+    return null;
+  }
+}
+
+/** 畸形 request-target 的统一应答：400，形状与既有 JSON 错误体一致。 */
+const badRequest = (res) => json(res, 400, { error: 'bad_request' });
+
 const readBody = (req) => new Promise((resolve, reject) => {
   const chunks = [];
   req.on('data', (c) => chunks.push(c));
@@ -53,7 +80,9 @@ const readBody = (req) => new Promise((resolve, reject) => {
 });
 
 async function serveStatic(req, res) {
-  const url = new URL(req.url, 'http://localhost');
+  const url = parseTarget(req.url);
+  // 畸形 target 是**客户端的错**，不是 500、更不是崩进程
+  if (url === null) return badRequest(res);
   const rel = url.pathname === '/' ? '/index.html' : url.pathname;
   const full = join(WEB_ROOT, normalize(rel).replace(/^([/\\])+/, ''));
   // 目录穿越属于拒绝，不是 500：web/ 之外的文件一律不给
@@ -71,17 +100,29 @@ async function serveStatic(req, res) {
 
 /** 请求处理：路由与拆分前逐字相同。 */
 async function handleRequest(req, res) {
-  if (req.method === 'POST' && req.url === '/api/recognize') {
-    // 密钥只在服务端注入；客户端永远拿不到
-    readBody(req).catch(() => {});
-    return json(res, 200, { ok: false, error: 'not_implemented_until_task_8' });
+  // 路由比较是 `req.url` 与字面量的**字符串相等**，畸形 target 只会不匹配（不解析、不抛异常），
+  // 落到最后一行 405——不需要额外守卫。真正解析 target 的只有 serveStatic 一处，已走 parseTarget()。
+  try {
+    if (req.method === 'POST' && req.url === '/api/recognize') {
+      // 密钥只在服务端注入；客户端永远拿不到
+      readBody(req).catch(() => {});
+      return json(res, 200, { ok: false, error: 'not_implemented_until_task_8' });
+    }
+    if (req.method === 'POST' && req.url === '/api/feedback') {
+      readBody(req).catch(() => {});
+      return json(res, 200, { ok: false, error: 'not_implemented_until_task_8' });
+    }
+    if (req.method === 'GET' || req.method === 'HEAD') return await serveStatic(req, res);
+    return json(res, 405, { error: 'method_not_allowed' });
+  } catch (err) {
+    // 纵深防御（兜底，不是本次崩溃的修复路径）：本函数是 async listener，任何逃出去的异常
+    // 都是 unhandled rejection = 进程退出。具体输入的修复在 parseTarget()；这层保证
+    // **将来**新加的代码即使抛了，也只坏这一个请求，不会打死全世界。
+    // 打印到 stderr：绝不做"静默吞掉"，否则下一次真故障会没有线索。
+    process.stderr.write(`request handler error: ${err?.stack ?? err}\n`);
+    if (!res.headersSent) return badRequest(res);
+    try { res.end(); } catch { /* 连响应都发不出去了，只能就此打住 */ }
   }
-  if (req.method === 'POST' && req.url === '/api/feedback') {
-    readBody(req).catch(() => {});
-    return json(res, 200, { ok: false, error: 'not_implemented_until_task_8' });
-  }
-  if (req.method === 'GET' || req.method === 'HEAD') return serveStatic(req, res);
-  return json(res, 405, { error: 'method_not_allowed' });
 }
 
 /** 造一个**未监听**的服务实例。生产入口与测试用同一个工厂，避免"测的不是跑的那份"。 */
