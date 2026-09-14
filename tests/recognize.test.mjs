@@ -16,7 +16,13 @@ import fs from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import {
   recognize, recognizeWithFallback, RECOGNIZE_FAIL_REASONS, MANUAL_PICK_SCENE_WORDS,
+  RECOGNIZE_REQUEST_TIMEOUT_MS,
 } from '../web/units/recognize.mjs';
+// 只为了钉住"客户端那条腿必须比服务端那条腿长"这条**跨模块**不变量（见下面的超时用例）。
+// 本文件其余部分不碰服务端代码。
+import { UPSTREAM_TIMEOUT_MS } from '../server/recognize-upstream.mjs';
+// 看门狗：让"该在上限内收口却没有"表现为一次干净的断言失败，而不是把文件挂死。
+import { settlesWithin } from './helpers/watchdog.mjs';
 
 const sets = { mug: ['mug', 'cup'], kettle: ['kettle'] };
 const okFetch = async () => ({
@@ -311,6 +317,66 @@ test('judgeFrame 抛的 RangeError 原样往上冒：绝不 catch 成一次"这�
       acceptableSets: sets, exclude: [], fetchImpl: okFetch,
     }),
     RangeError,
+  );
+});
+
+// ───────────────────────────────── 超时闸（Task 7 修复轮 · Critical 2）─────────────────────────────────
+//
+// `fetch` 默认**没有**超时：上游连接半开（不回、也不断）时这个 Promise 永久 pending，
+// 界面卡在 capturing、每多点一次快门就多挂一个请求，而且**一条事件都不会落**（判据 B 连这一轮
+// 都统计不到）。下面两条钉的就是"必须在注入的上限内收口成一次普通失败"。
+
+/**
+ * 一个永远不回话、但**如实遵守 signal 契约**的 fetch —— 真实 `fetch` 在半开连接上就是这个行为。
+ * （只让 Promise 永久 pending 而不理 signal 的假 fetch 无法被任何调用方中止，测不出这条性质。）
+ */
+const stalledFetch = (url, init) => new Promise((_, reject) => {
+  init.signal.addEventListener('abort', () => reject(init.signal.reason));
+});
+
+test('识物请求有上限：上游永不回话时必须在上限内抛 request_failed，绝不永久挂住', async () => {
+  const started = Date.now();
+  await assert.rejects(
+    () => settlesWithin(
+      recognize(new Blob(['x']), { fetchImpl: stalledFetch, timeoutMs: 30 }),
+      2000, '识物请求',
+    ),
+    (err) => err.code === RECOGNIZE_FAIL_REASONS.REQUEST_FAILED && /超时|timeout/i.test(String(err.message)),
+    '超时要按"请求失败"报，且消息里说清是超时（不是"响应结构非法"）',
+  );
+  const elapsed = Date.now() - started;
+  assert.ok(elapsed < 2000, `必须在注入的上限（30ms）内收口，实测 ${elapsed}ms——挂住就等于界面卡死`);
+});
+
+test('超时在降级链路上也是一档普通失败：mode=manual + reason=request_failed（attempts 如实为 2）', async () => {
+  // 看门狗：把超时闸拆掉时这条会**干净地失败**，而不是把整个测试文件挂死
+  // （挂死会被变异探针记成 TIMEOUT，读不出"没被抓到"）。
+  const r = await settlesWithin(recognizeWithFallback({
+    grab: goodGrab, acceptableSets: sets, exclude: [], fetchImpl: stalledFetch, timeoutMs: 30,
+  }), 3000, '降级链路');
+  assert.equal(r.mode, 'manual');
+  assert.equal(r.word, null, '超时同样不许假造词');
+  assert.equal(r.reason, RECOGNIZE_FAIL_REASONS.REQUEST_FAILED);
+  assert.equal(r.attempts, 2, '两次尝试都在上限内收口（不是第一次挂到天荒地老）');
+});
+
+test('识物请求带上 signal（没有它，客户端这一腿根本无从收口）', async () => {
+  const seen = [];
+  await recognize(new Blob(['x']), {
+    fetchImpl: async (url, init) => { seen.push(init); return okFetch(); },
+  });
+  assert.ok(seen[0].signal instanceof AbortSignal, '客户端 fetch 必须带 signal');
+});
+
+test('两条腿的上限关系：客户端 > 服务端（上游慢但活着时，由服务端先如实报自己的失败）', () => {
+  // 若客户端先超时，我们只会知道"我等烦了"，永远分不清是模型慢、服务端挂了还是网络断了；
+  // 服务端先超时则会回它自己的错误形状（502 upstream_failed）→ 客户端看到 HTTP 错误
+  // → recognize_failed{reason:'request_failed'}。这条不变量跨两个模块，只有断言能拦住。
+  assert.ok(Number.isInteger(RECOGNIZE_REQUEST_TIMEOUT_MS) && RECOGNIZE_REQUEST_TIMEOUT_MS > 0);
+  assert.ok(Number.isInteger(UPSTREAM_TIMEOUT_MS) && UPSTREAM_TIMEOUT_MS > 0);
+  assert.ok(
+    RECOGNIZE_REQUEST_TIMEOUT_MS > UPSTREAM_TIMEOUT_MS,
+    `客户端上限 ${RECOGNIZE_REQUEST_TIMEOUT_MS}ms 必须 > 服务端上游上限 ${UPSTREAM_TIMEOUT_MS}ms`,
   );
 });
 

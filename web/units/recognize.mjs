@@ -17,6 +17,11 @@
 //    绝不把模型给的 top-1 或上位词塞进 `word` 冒充取词成功（`pickWord` 也是同一立场：
 //    `null` 是它唯一的失败表达）。手选的活由用户来做，界面回归 `MANUAL_PICK_SCENE_WORDS`。
 //
+// 4. **这一腿有上限**（`RECOGNIZE_REQUEST_TIMEOUT_MS`）。`fetch` 默认不超时：上游半开时
+//    Promise 永久 pending，界面卡在 capturing、每点一次快门多挂一个请求，而且**一条事件都不落**
+//    （判据 B 连这一轮都统计不到）。上限的取值理由、以及"客户端那条腿必须比服务端长"的关系
+//    写在那个常量的注释里。
+//
 // 纯逻辑模块：零浏览器 API（`fetch` / `grab` / `frameQC` 全是注入点），可在 Node 中直接测。
 import { judgeFrame } from './frame-qc.mjs';
 import { pickWord } from './pick-word.mjs';
@@ -53,6 +58,31 @@ export const RECOGNIZE_FAIL_REASONS = Object.freeze({
 const REASON_CODES = new Set(Object.values(RECOGNIZE_FAIL_REASONS));
 
 /**
+ * 客户端这一腿的请求上限（毫秒）——**首轮设定值**，不是定论：第一周用真实弱网数据标定，
+ * 每次调整都要记入变更记录（与 `frame-qc.mjs` 的 `DARK_THRESHOLD` / `BLUR_THRESHOLD` 同一条纪律）。
+ *
+ * 为什么必须有它：`fetch` 默认**没有**超时。上游连接半开（服务端不回、也不断）时这个 Promise
+ * 会永久 pending——界面卡在 `capturing`、快门按钮还在、每多点一次就多挂一个请求，
+ * 而且**一条事件都不会落**（判据 B 连这一轮都统计不到）。这正是本项目反复出现的
+ * "挂死而不是失败"。
+ *
+ * 与服务端那条腿的关系（**硬要求，有跨模块用例钉住**）：本值必须**大于**服务端的
+ * `UPSTREAM_TIMEOUT_MS`（`server/recognize-upstream.mjs`，8000ms）。上游慢但活着时，
+ * 应当由服务端先超时、先如实返回它自己的失败形状（`502 {ok:false,error:'upstream_failed'}`），
+ * 客户端只是收到一个 HTTP 非 2xx → 落 `recognize_failed{reason:'request_failed'}`。
+ * 若客户端先超时，我们只会知道"我等烦了"，永远分不清是模型慢、服务端挂了还是网络断了。
+ * 12s / 8s 之间留的 4s 用于服务端把响应写回来。
+ *
+ * 调大 = 用户干等更久；调小 = 真实模型偶发变慢就被误报成失败（`request_failed` 偏高，判据 B 同样失真）。
+ * 标定依据：实弹探针实测端到端 1.8s / 3.0s（task-7-report §3.1），本值约有 4 倍余量。
+ * 最坏情形：同一帧两次尝试都在上限处收口，用户最多等 `2 × 本值`——真机标定时一并复核。
+ *
+ * 可在调用处覆盖（`recognize(blob, { timeoutMs })` / `recognizeWithFallback({ timeoutMs })`），
+ * 测试用一个小值即可，不必真等生产上限。
+ */
+export const RECOGNIZE_REQUEST_TIMEOUT_MS = 12000;
+
+/**
  * 降级到 `mode: 'manual'` 时给用户手挑的场景词包（设计文档 §5.1「退到场景词包手选」）。
  *
  * **它是预声明的，不是"模型候选的兜底"**：后者会把上位词（`container`、`vessel`）放回界面，
@@ -77,26 +107,38 @@ const detailOf = (err) => String(err?.message ?? err);
  * 把一帧发给自己的服务端识物，返回服务端给的候选（原样，不选词——选词是 `pickWord` 的事）。
  *
  * @param {Blob} blob 一张 JPEG（`camera.grabFrame` 产出的那一帧）
- * @param {{ fetchImpl?: typeof fetch }} [options]
+ * @param {{ fetchImpl?: typeof fetch, timeoutMs?: number }} [options]
  *   `fetchImpl` 是注入点；**缺省在调用时**取全局 `fetch`（不是模块加载时绑定的那份），
  *   于是"谁是网络出口"始终只有一个决定点，浏览器与测试看到的都是同一个全局。
+ *   `timeoutMs` 是这一腿的上限（默认 `RECOGNIZE_REQUEST_TIMEOUT_MS`），测试用小值即可。
  * @returns {Promise<{ candidates: Array<{label: string, score: number, scene: string}> }>}
- * @throws {Error} `code === 'request_failed'`：HTTP 非 2xx，或 fetch 自身抛（断网/被中断）
+ * @throws {Error} `code === 'request_failed'`：HTTP 非 2xx，或 fetch 自身抛（断网 / 超时 / 被中断）
  * @throws {Error} `code === 'response_invalid'`：响应不是合法 JSON，或结构不是 `{ ok: true, candidates: [] }`
  *   这两种失败**必须抛出**：返回空候选会看起来像"识物成功但没认出东西"，
  *   把"服务不可用"记成"模型能力不足"（全局约束 3）。
+ * @throws {TypeError} `timeoutMs` 非法（例如 NaN）时由 `AbortSignal.timeout` 抛出。
+ *   它**在 try 之外**发生，所以不会被包装成一次"请求失败"——参数写错是编程错误，不是用户情形。
  */
-export async function recognize(blob, { fetchImpl = null } = {}) {
+export async function recognize(blob, { fetchImpl = null, timeoutMs = RECOGNIZE_REQUEST_TIMEOUT_MS } = {}) {
   const doFetch = fetchImpl ?? globalThis.fetch;
   const form = new FormData();
   form.append('image', blob, 'frame.jpg');
 
+  // 上限在这里就装好（不放进下面的 try）：参数非法要响亮地成为 TypeError，
+  // 而不是被 catch 成"识物请求发不出去"。
+  const signal = AbortSignal.timeout(timeoutMs);
+
   let res;
   try {
-    res = await doFetch('/api/recognize', { method: 'POST', body: form });
+    res = await doFetch('/api/recognize', { method: 'POST', body: form, signal });
   } catch (err) {
     // 网络层失败（断网、请求被浏览器中断）也要带上 code，否则调用方分不清它与"响应结构非法"。
-    const wrapped = new Error(`识物请求发不出去：${String(err?.message ?? err)}`);
+    // 超时单独说清楚：`AbortSignal.timeout` 触发时 fetch 会以 `TimeoutError` 拒绝
+    // （部分实现报 `AbortError`），这两种都不是"发不出去"，而是"等太久了"。
+    const timedOut = err?.name === 'TimeoutError' || err?.name === 'AbortError';
+    const wrapped = new Error(timedOut
+      ? `识物请求超时（${timeoutMs}ms 未返回，已主动中止）：${String(err?.message ?? err)}`
+      : `识物请求发不出去：${String(err?.message ?? err)}`);
     wrapped.code = RECOGNIZE_FAIL_REASONS.REQUEST_FAILED;
     throw wrapped;
   }
@@ -138,6 +180,8 @@ export async function recognize(blob, { fetchImpl = null } = {}) {
  *   - `grab()`：取帧，返回 `{ blob, stats }`（`camera.grabFrame` 的形状）
  *   - `acceptableSets` / `exclude`：透传给 `pickWord`
  *   - `fetchImpl`：透传给 `recognize`
+ *   - `timeoutMs`：这一次请求的上限，透传给 `recognize`（缺省用 `RECOGNIZE_REQUEST_TIMEOUT_MS`；
+ *     两次尝试各自计时，所以最坏等待是它的两倍）
  *   - `frameQC`：帧质检模块注入点（默认 `./frame-qc.mjs`），只为测试能数"判了几次"
  * @returns {Promise<{
  *   mode: 'ok'|'manual'|'frame_rejected', word: string|null,
@@ -148,7 +192,7 @@ export async function recognize(blob, { fetchImpl = null } = {}) {
  * @throws {Error} `grab()` 自身的错误（例如 `VIDEO_NOT_READY`：用户按快门太早，属用户情形）
  */
 export async function recognizeWithFallback({
-  grab, acceptableSets, exclude, fetchImpl, frameQC = { judgeFrame },
+  grab, acceptableSets, exclude, fetchImpl, timeoutMs, frameQC = { judgeFrame },
 }) {
   const { blob, stats } = await grab();
   const verdict = frameQC.judgeFrame(stats);
@@ -163,7 +207,7 @@ export async function recognizeWithFallback({
   for (let i = 0; i < 2; i += 1) {
     attempts += 1;
     try {
-      const { candidates } = await recognize(blob, { fetchImpl });
+      const { candidates } = await recognize(blob, { fetchImpl, timeoutMs });
       lastCandidates = candidates;
       const picked = pickWord({ candidates, acceptableSets, exclude });
       if (picked !== null) return { mode: 'ok', word: picked.word, candidates, attempts };

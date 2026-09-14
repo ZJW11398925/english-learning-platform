@@ -3,11 +3,12 @@
  *
  * 用途：把 review 轮（`rv3-probe.mjs`）枚举的 18 个变异体 + Task 4 的 12 个变异体 + Task 5 修复轮
  * 的 3 个环境校验变异体 + Task 6 的 26 个（状态机 13 + 相机/灰度 13）+ Task 7 的 8 个识物变异体
- * 固化成仓库内可复跑的证据——逐个"把实现改坏"，跑 `tests/` 下被登记的那 9 个测试文件，报告每个
+ * + Task 7 修复轮的 12 个（轮次/判据 B 口径 6 + 上游响应校验与超时 6）
+ * 固化成仓库内可复跑的证据——逐个"把实现改坏"，跑 `tests/` 下被登记的那 11 个测试文件，报告每个
  * 变异体是被测试抓到（DETECTED）还是溜过去了（MISSED），只要有该抓没抓到的就以非零码退出。
  *
  * 用法（在仓库根）：
- *   node scripts/mutation-probe.mjs            # 全部 67 个变异体
+ *   node scripts/mutation-probe.mjs            # 全部 79 个变异体
  *   node scripts/mutation-probe.mjs --only=M2  # 只跑 M2（`--only=F` = 整个 F 系列；规则见下）
  *   KEEP_TMP=1 node scripts/mutation-probe.mjs # 保留临时工作树以便排查
  *
@@ -15,7 +16,8 @@
  * `F12_messageDropsValue` → `F12`）：
  *   1. 先按 ID **全串相等**——`--only=M1` 只跑 M1（不再连带 M10–M14），`--only=F12` 只跑 F12；
  *   2. 没有精确命中时退化为**族匹配**（ID 以该串开头）——`--only=F` 跑 F1…F12，`--only=Q` 跑 Q1…Q4，
- *      `--only=S` 跑 Task 6 的状态机 13 条，`--only=C` 跑相机/灰度 13 条，`--only=R` 跑 Task 7 的 8 条；
+ *      `--only=S` 跑 Task 6 的状态机 13 条，`--only=C` 跑相机/灰度 13 条，
+ *      `--only=R` 跑 Task 7 的 14 条（R1–R14），`--only=U` 跑上游响应校验与超时的 6 条（U1–U6）；
  *   3. 两者皆空即当场 FAIL（并列出全部可用 ID），绝不"跑 0 个然后 PASS"。
  * 这修掉了原先的子串匹配：那时 `--only=F` 会把 `M9_terminalNoFlag`、`Q2_topScoreFirst`、
  * `Q4_hypernymFallback` 一起选中（14 个而不是 11 个），选中的集合与"只看 F 系列"的意图不符。
@@ -41,7 +43,10 @@
  * Task 4：12/12 可抓变异体 DETECTED，见 `task-4-report.md`；
  * Task 5 修复轮：N1–N3 → 3/3 DETECTED，见 `task-5-report.md` 修复轮一节；
  * Task 6：S1–S13 与 C1–C13 → 26/26 DETECTED，见 `task-6-report.md`；
- * Task 7：R1–R8 → 8/8 DETECTED，见 `task-7-report.md`）。
+ * Task 7：R1–R8 → 8/8 DETECTED，见 `task-7-report.md`；
+ * Task 7 修复轮：R9–R14 与 U1–U6 → 12/12 DETECTED，见 `task-7-report.md` 修复轮一节——
+ * 这一轮同时把 `server/recognize-upstream.mjs` 接进了探针（此前它的响应校验规则没有变异证据），
+ * 仍**未接入**的是 `server/index.mjs`（路由层与魔数/超时守卫），理由见 TEST_FILES 上方注释）。
  */
 import { spawn } from 'node:child_process';
 import { createHash } from 'node:crypto';
@@ -72,6 +77,8 @@ const MODULE_FILES = {
   'event-log': 'web/units/event-log.mjs',
   app: 'web/app.mjs',
   recognize: 'web/units/recognize.mjs',
+  rounds: 'web/units/rounds.mjs',
+  'recognize-upstream': 'server/recognize-upstream.mjs',
 };
 const TEST_FILES = [
   'tests/scheduler.test.mjs',
@@ -83,17 +90,26 @@ const TEST_FILES = [
   'tests/app-mount.test.mjs',
   'tests/recognize.test.mjs',
   'tests/recognize-mount.test.mjs',
+  // Task 7 修复轮接入的两份：`rounds`（判据 B 在事件流上的口径）与 `recognize-upstream`
+  // （上游响应的逐条校验/截断/超时）。后者**进得来**：它是零 import 的纯逻辑模块，
+  // 测试也只 import 它自己（不像 server/index.mjs 那样写死了 `../web/` 的绝对路径、
+  // 也不起子进程），所以接进来既不假红也不拖慢。
+  'tests/rounds.test.mjs',
+  'tests/recognize-upstream.test.mjs',
 ];
 // `tests/index-html.test.mjs` **有意不进这张表**：它读 `web/index.html` 这个真实文件，
 // 而临时树只复制模块与测试，进来会因缺文件而假红。它由 `node --test` 全量套件守着。
 //
-// `tests/recognize-upstream.test.mjs` / `tests/recognize-endpoint.test.mjs` / `tests/server.test.mjs`
-// 同样**有意不进**（Task 7）：它们 import `server/recognize-upstream.mjs` / `server/index.mjs`，
-// 而后者的路由表里写死了 `../web/` 的绝对路径（`fileURLToPath(new URL('../web/', import.meta.url))`）
-// ——在临时树里那会指向**临时树的 web/**，静态托管用例会对不上。要让它们进来，得先让临时树
-// 复制整个 `web/` 与 `server/`，而这两份测试里还有子进程 + 15s 超时闸的用例：
-// 单次变异体可能要跑一分钟以上，59+8 个变异体就是小时级。探针的价值在于**快**（现在一轮 < 1 分钟），
-// 因此这里只接纯逻辑模块，服务层由 `node --test` 全量套件守着。
+// `tests/recognize-endpoint.test.mjs` / `tests/server.test.mjs` 同样**有意不进**（Task 7 起）：
+// 它们 import `server/index.mjs`，而后者的路由表里写死了 `../web/` 的绝对路径
+// （`fileURLToPath(new URL('../web/', import.meta.url))`）——在临时树里那会指向**临时树的 web/**，
+// 静态托管用例会对不上。要让它们进来，得先让临时树复制整个 `web/` 与 `server/`，
+// 而这两份测试里还有子进程 + 15s 超时闸的用例：单次变异体可能要跑一分钟以上。
+// 探针的价值在于**快**（现在一轮 < 2 分钟），因此这里只接纯逻辑模块，
+// 那两个服务层文件由 `node --test` 全量套件守着。
+// **未被变异证据覆盖的服务层代码（如实记，别当成没这回事）**：`server/index.mjs` 的
+// multipart 解析、错误分档、图片魔数校验、超时与半开连接守卫，以及 `createApp()` 的注入点——
+// 它们由 tests/recognize-endpoint.test.mjs 与 tests/server.test.mjs 覆盖，但**没有变异体**。
 const TEST_ARGS = ['--test', ...TEST_FILES];
 /**
  * 测试夹具体系（Task 7 起必需）：`tests/recognize-mount.test.mjs` 与 `tests/app-mount.test.mjs`
@@ -105,6 +121,7 @@ const HELPER_FILES = [
   'tests/helpers/dom.mjs',
   'tests/helpers/fakes.mjs',
   'tests/helpers/mount-harness.mjs',
+  'tests/helpers/watchdog.mjs',
 ];
 const only = (process.argv.find((a) => a.startsWith('--only=')) ?? '').slice('--only='.length);
 
@@ -130,6 +147,8 @@ const ENV = MODULE_FILES.env;
 const SM = MODULE_FILES['state-machine'];
 const CAM = MODULE_FILES.camera;
 const REC = MODULE_FILES.recognize;
+const ROUNDS = MODULE_FILES.rounds;
+const UP = MODULE_FILES['recognize-upstream'];
 
 const PICK_ORIGINAL = `export function pickWord({ candidates, acceptableSets, exclude = [] }) {
   const accepted = new Set();
@@ -693,6 +712,102 @@ const MUTANTS = [
       + '降级时的"问了几次"与调用成本核算都对不上',
     find: '    attempts += 1;',
     replace: '    // 变异体：不计数',
+  },
+  // ── 轮次计数与判据 B 的口径（Task 7 修复轮 · Critical 1）：R9–R12 ──
+  // 这批钉住的是"三个数不许互相推算"：轮数（一次快门一轮）≠ attempts（这一轮问过几次模型）
+  // ≠ 帧被端侧拦下的次数。它们是判据 B（retry_rate）的唯一输入，算错任何一处，
+  // Task 10 导出的"重拍率"就是错的，而且**看起来完全正常**。
+  {
+    name: 'R9_counterStuckAtOne', target: ROUNDS, expect: 'detected',
+    why: '轮次计数器不再递增（每一轮都是 1）：会话里按了几次快门都只数出 1 轮，'
+      + '于是"重拍次数 = 轮数 − 1"恒为 0——判据 B 永远显示"没人重拍过"，'
+      + '而 attempts 与拒帧计数看着都正常',
+    find: '      last += 1;',
+    replace: '      last += 0;',
+  },
+  {
+    name: 'R10_rejectedRoundsDropped', target: ROUNDS, expect: 'detected',
+    why: 'ROUND_EVENT_TYPES 丢掉 frame_rejected：被端侧质检拦下的那一轮**也是一次快门**，'
+      + '丢掉它等于把"太暗/太糊造成的重拍"从判据 B 里整体抹掉——而端侧前置拦截正是最主要的重拍来源',
+    find: "export const ROUND_EVENT_TYPES = Object.freeze(['frame_rejected', 'recognize_ok', 'recognize_failed']);",
+    replace: "export const ROUND_EVENT_TYPES = Object.freeze(['recognize_ok', 'recognize_failed']);",
+  },
+  {
+    name: 'R11_reshootOffByOne', target: ROUNDS, expect: 'detected',
+    why: '重拍次数算成轮数本身（少了 −1）：第一次快门被算成一次"重拍"，'
+      + '重拍率整体虚高（一轮就成闸），而用户其实一次都没重拍',
+    find: '  return Math.max(0, roundCountOfSession(events, sessionId) - 1);',
+    replace: '  return Math.max(0, roundCountOfSession(events, sessionId));',
+  },
+  {
+    name: 'R12_thresholdOnRounds', target: ROUNDS, expect: 'detected',
+    why: '判据 B 的门槛错位：用"轮数 ≥2"代替"重拍 ≥2 次（轮数 ≥3）"——'
+      + '只重拍过一次的会话也被算成"需重拍 ≥2 次"，分子虚高',
+    find: '  return roundCount - 1 >= RESHOOTS_FOR_RETRY;',
+    replace: '  return roundCount >= RESHOOTS_FOR_RETRY;',
+  },
+  {
+    name: 'R13_missingRoundIndexSilentlySkipped', target: ROUNDS, expect: 'detected',
+    why: '结论事件缺 roundIndex 时静默跳过（返回 null 而不是抛错）：写入路径漏字段会长得像'
+      + '"这一轮不存在"，少算重拍而且没人会发现——正是全局约束 3 禁止的静默降级',
+    find: `  if (v === null || v === undefined) {
+    throw new Error(`,
+    replace: `  if (v === null || v === undefined) {
+    return null;
+    throw new Error(`,
+  },
+  {
+    name: 'R14_clientNoSignal', target: REC, expect: 'detected',
+    why: '客户端识物请求不带 signal（等于没有超时）：上游半开时这个 Promise 永久 pending，'
+      + '界面卡在 capturing、每点一次快门多挂一个请求，而且一条事件都不落（判据 B 连这一轮都统计不到）',
+    find: '  const signal = AbortSignal.timeout(timeoutMs);',
+    replace: '  const signal = undefined;',
+  },
+  // ── 上游响应校验（Task 7 修复轮 · Important 4：把这份模块接进探针）：U1–U5 ──
+  // 这批是 review 点名的"没有变异证据"的四条规则（逐条 label 校验 / score → null /
+  // 3 条截断 / 32 MiB 上限），外加一条鉴权头。它们全在 server/recognize-upstream.mjs 里，
+  // 而那份测试只 import 它自己、也不碰 web/ 路径，所以接得进来（见 TEST_FILES 的说明）。
+  {
+    name: 'U1_emptyLabelAccepted', target: UP, expect: 'detected',
+    why: '空 label 不再判非法（只裁空白、不拒绝空串）：上游吐一个 `label: "  "` 就能通过校验，'
+      + '客户端拿到一条没有词的候选，`pickWord` 之后表现为"识别不出来"——把上游的垃圾说成模型没认出',
+    find: '  if (label === \'\') return null;',
+    replace: '  // 变异体：空 label 也当合法',
+  },
+  {
+    name: 'U2_scoreFabricatedZero', target: UP, expect: 'detected',
+    why: 'score 缺失时编一个 0 冒充置信度（而不是如实给 null）：下游看到的"模型很确定它是 0 分"'
+      + '是编出来的数，候选排序/诊断都会被带偏',
+    find: '  const score = Number.isFinite(raw.score) ? raw.score : null;',
+    replace: '  const score = Number.isFinite(raw.score) ? raw.score : 0;',
+  },
+  {
+    name: 'U3_noCandidateTruncation', target: UP, expect: 'detected',
+    why: '候选不再截到 3 条（设计文档 §4.1「三候选 + 人工重拍」）：上游多吐几条就全部回给客户端，'
+      + '界面与统计都按"最多 3 条"写，多出来的会静默改变选择结果',
+    find: '    candidates: normalized.slice(0, MAX_CANDIDATES),',
+    replace: '    candidates: normalized,',
+  },
+  {
+    name: 'U4_noDataUrlSizeGuard', target: UP, expect: 'detected',
+    why: '去掉 32 MiB 上限守卫：明知会被上游拒绝的超大图照样发出去——白花一次往返与一次计费，'
+      + '而且失败原因变成上游的 400，与"请求本身有问题"混在一起',
+    find: '  if (dataUrlBytes > MAX_DATA_URL_BYTES) {',
+    replace: '  if (false) {',
+  },
+  {
+    name: 'U5_noAuthHeader', target: UP, expect: 'detected',
+    why: '上游请求不带 Bearer 密钥：整条链路必然 401，而错误表现是"上游失败"，'
+      + '排查的人会去怀疑网络与模型，不会想到是这里把凭据弄丢了',
+    find: '        authorization: `Bearer ${env.DEEPSEEK_API_KEY}`,',
+    replace: "        authorization: 'Bearer ',",
+  },
+  {
+    name: 'U6_noUpstreamTimeout', target: UP, expect: 'detected',
+    why: '上游请求不带 signal（等于没有超时）：上游半开时这条 Promise 永久 pending，'
+      + '路由与连接都收不回来——本项目反复出现的"挂死而不是失败"',
+    find: `  const signal = AbortSignal.timeout(timeoutMs);`,
+    replace: '  const signal = undefined;',
   },
 ];
 

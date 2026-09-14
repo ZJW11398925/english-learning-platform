@@ -23,7 +23,7 @@ import { readFile } from 'node:fs/promises';
 import { extname, join, normalize, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { loadEnv } from './env.mjs';
-import { recognizeUpstream, UPSTREAM_FAILED, UPSTREAM_INVALID } from './recognize-upstream.mjs';
+import { recognizeUpstream, UPSTREAM_FAILED, UPSTREAM_INVALID, UPSTREAM_TIMEOUT_MS } from './recognize-upstream.mjs';
 
 // web/ 绝对路径。用 fileURLToPath 而非手写路径拼接：Windows 上的 /D:/ 前缀与
 // 百分号编码（本仓库路径含中文）都要还原，否则下面的前缀检查会误判。
@@ -36,6 +36,46 @@ const MIME = { '.html': 'text/html; charset=utf-8', '.mjs': 'text/javascript; ch
  * 而它挡住的是"用一个大 body 把内存吃干"这条最省事的远程打法（服务要经隧道挂在公网）。
  */
 const MAX_UPLOAD_BYTES = 1024 * 1024;
+
+/**
+ * 服务端**自己的**请求处理上限（首轮设定值，Node 默认是 headers 60s / request 300s）：
+ * 一个只发半截请求头就不再说话的连接，不该把 socket 与内存占到自己超时为止。
+ *
+ * 两者的关系：`headersTimeout`（只收头）< `requestTimeout`（整个请求含 body）——半开的连接
+ * 应当比"传得慢但一直在传"的连接更早被收掉。二者都**大于**客户端那条腿
+ * （`web/units/recognize.mjs` 的 12000ms）与上游那条腿（`UPSTREAM_TIMEOUT_MS` = 8000ms）：
+ * 正常请求绝不该被服务端先掐断——服务端只在客户端**已经不该再等**的时候才收尾。
+ * 调小 = 弱网下正常上传被 408 掐断；调大 = 半开连接占资源更久。
+ * （真机弱网标定时一并复核。）
+ */
+export const SERVER_HEADERS_TIMEOUT_MS = 10_000;
+export const SERVER_REQUEST_TIMEOUT_MS = 30_000;
+
+/**
+ * 图片格式的**魔数**判定：只认相机真的会产的那两种（JPEG / PNG），其余一律 `null`。
+ *
+ * 为什么必须有它（Task 7 修复轮 · Important 5）：此前只查"客户端声明的 mime 以 `image/` 开头"，
+ * 而 mime 是**客户端说了算的**——一个 15 字节的垃圾 payload 于是能一路打到按张计费的视觉模型上。
+ * 项目那条"太暗/太糊不花钱"的省钱性质，原先只覆盖端侧质检；这个检查把**垃圾字节**也挡在端点。
+ *
+ * 顺带的作用：data URL 的 mime 从此由**服务端按字节**决定（不再是客户端声明什么就报什么），
+ * 免得把非图片内容贴上 `image/jpeg` 的标签送给上游。
+ *
+ * 用魔数而不是完整解码：几条字节就够挡住意外的乱码/误传，解码一张图才是真花钱花时间的事
+ * （而且这里的原则本来就是"宁少不多"）。**不支持 GIF/WebP 等其它格式**——相机不产它们；
+ * 将来端侧若真支持别的格式，这里要**同时**加白名单与用例，不是放开判断。
+ *
+ * @param {Buffer|Uint8Array} bytes 上传的原始字节
+ * @returns {'image/jpeg'|'image/png'|null}
+ */
+export function sniffImageMime(bytes) {
+  if (bytes === null || bytes === undefined || bytes.length === undefined) return null;
+  if (bytes.length >= 3 && bytes[0] === 0xff && bytes[1] === 0xd8 && bytes[2] === 0xff) return 'image/jpeg';
+  if (bytes.length >= 8
+    && bytes[0] === 0x89 && bytes[1] === 0x50 && bytes[2] === 0x4e && bytes[3] === 0x47
+    && bytes[4] === 0x0d && bytes[5] === 0x0a && bytes[6] === 0x1a && bytes[7] === 0x0a) return 'image/png';
+  return null;
+}
 
 /**
  * 越界守卫：解析出的绝对路径是否落在 `web/` 之内。
@@ -209,7 +249,7 @@ async function serveStatic(req, res) {
  *   · 任何畸形输入（无图、乱码 body、超大体）都只坏这一个请求，进程继续服务
  *     ——Task 5 已经吃过一次"一条请求换一条命"的亏，不再引入第二个无守卫的解析点。
  */
-async function handleRecognize(req, res, { env, fetchImpl, log }) {
+async function handleRecognize(req, res, { env, fetchImpl, upstreamTimeoutMs, log }) {
   let body;
   try {
     body = await readBody(req);
@@ -230,15 +270,26 @@ async function handleRecognize(req, res, { env, fetchImpl, log }) {
     return json(res, 400, { error: 'bad_request', detail: '缺少 image 字段（multipart/form-data，字段名 image）' });
   }
 
+  // 魔数校验：客户端声明 `image/jpeg` 不算数（声明是它说了算的，而这一次调用要按张计费）。
+  // 不通过就按既有的 400 形状回，绝不把垃圾送去上游。
+  const sniffedMime = sniffImageMime(image.data);
+  if (sniffedMime === null) {
+    log(`recognize: 图片魔数校验未通过（客户端声明 mime=${image.mime === '' ? '（无）' : image.mime}，`
+      + `${image.data.length} 字节）`);
+    return json(res, 400, { error: 'bad_request', detail: 'image 不是 JPEG/PNG 图片（魔数校验未通过）' });
+  }
+
   const startedAt = Date.now();
   let result;
   try {
     result = await recognizeUpstream({
       image: image.data,
-      // 客户端说是图片就用它的类型，否则按 JPEG（端侧固定产 JPEG）。绝不原样回显客户端给的串。
-      mime: /^image\//.test(image.mime) ? image.mime : 'image/jpeg',
+      // mime 由**服务端按字节**判定（见 sniffImageMime）：客户端声明什么都不会被原样回显或转给上游。
+      mime: sniffedMime,
       env,
       fetchImpl,
+      // 上游那一腿的上限。必须小于客户端那条腿，理由见 recognize-upstream.mjs 的常量说明。
+      timeoutMs: upstreamTimeoutMs,
     });
   } catch (err) {
     const latencyMs = Date.now() - startedAt;
@@ -273,14 +324,14 @@ async function handleRecognize(req, res, { env, fetchImpl, log }) {
  *
  * `log` 是 stderr 写入的注入点：默认写 `process.stderr`，测试可注入收集器断言"走了哪条路径"。
  */
-function makeHandler({ env, fetchImpl, log }) {
+function makeHandler({ env, fetchImpl, upstreamTimeoutMs, log }) {
   return async function handleRequest(req, res) {
     // 路由比较是 `req.url` 与字面量的**字符串相等**，畸形 target 只会不匹配（不解析、不抛异常），
     // 落到最后一行 405——不需要额外守卫。真正解析 target 的只有 serveStatic 一处，已走 parseTarget()。
     try {
       if (req.method === 'POST' && req.url === '/api/recognize') {
         // 密钥只在服务端注入；客户端永远拿不到
-        return await handleRecognize(req, res, { env, fetchImpl, log });
+        return await handleRecognize(req, res, { env, fetchImpl, upstreamTimeoutMs, log });
       }
       if (req.method === 'POST' && req.url === '/api/feedback') {
         readBody(req).catch(() => {});
@@ -306,10 +357,19 @@ function makeHandler({ env, fetchImpl, log }) {
  * @param {object} [options]
  *   - `env`：模型配置（默认取 `process.env`，与"直接执行"路径一致；测试给一套假配置）
  *   - `fetchImpl`：上游 fetch 注入点（默认全局 `fetch`；测试指向本地桩服务）
+ *   - `upstreamTimeoutMs`：上游那一腿的上限（默认 `UPSTREAM_TIMEOUT_MS` = 8000ms）。
+ *     注入点是给测试用的（测试用几十毫秒跑完"上游半开"那条路径），生产不传即可。
  * @returns {import('node:http').Server}
  */
-export function createApp({ env = process.env, fetchImpl = fetch } = {}) {
-  return createServer(makeHandler({ env, fetchImpl, log: (line) => process.stderr.write(`${line}\n`) }));
+export function createApp({
+  env = process.env, fetchImpl = fetch, upstreamTimeoutMs = UPSTREAM_TIMEOUT_MS,
+} = {}) {
+  const server = createServer(makeHandler({ env, fetchImpl, upstreamTimeoutMs, log: (line) => process.stderr.write(`${line}\n`) }));
+  // 服务端自己的请求处理上限（见常量说明）：半开客户端不许一直占着 socket 与内存。
+  // 放在工厂里而不是直接执行那一支：测试起的是同一个 createApp()，于是这道闸也被测到。
+  server.headersTimeout = SERVER_HEADERS_TIMEOUT_MS;
+  server.requestTimeout = SERVER_REQUEST_TIMEOUT_MS;
+  return server;
 }
 
 // 只有直接执行（`node server/index.mjs`）才启动：import 本模块不绑端口、不打印、不读环境变量。

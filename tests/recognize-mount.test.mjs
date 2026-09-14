@@ -18,6 +18,25 @@ import {
   withFetch, openCameraAndShoot, makeBlob, okFetch, failingFetch, realRecognizeWithFallback,
 } from './helpers/mount-harness.mjs';
 import { btn, byTag, text } from './helpers/dom.mjs';
+import {
+  roundIndicesOfSession, roundCountOfSession, reShootCountOfSession, needsReshoot,
+} from '../web/units/rounds.mjs';
+
+/** 一帧"太暗"的统计（端侧质检必然拦下）。 */
+const DARK = { brightness: 10, laplacianVar: 10 };
+/** 一帧"可用"的统计。 */
+const OK = { brightness: 128, laplacianVar: 200 };
+
+/**
+ * 连按 `times` 次快门：被拦下的帧会退回 ready，所以每次都要重新点一次「拍照」。
+ * 这也是"一次快门 = 一轮"的前提在**代码路径**上的体现（每次快门恰好取一帧）。
+ */
+async function pressShutter(h, times) {
+  for (let i = 0; i < times; i += 1) {
+    if (h.machine.state === 'ready') await btn(h.root, '拍照').click();
+    await btn(h.root, '快门').click();
+  }
+}
 
 /** 上游给的是"可接受集里没有的词"（典型的内容配置问题）。 */
 const offSetFetch = async (url) => {
@@ -192,4 +211,118 @@ test('再拍一张：立刻重来一轮（重新取帧 + 重新识物），手�
   assert.ok(btn(h.root, 'book'), '手选词包也还在');
   assert.equal(h.events.filter((e) => e.type === 'recognize_failed').length, 2, '两轮都如实落失败事件');
   h.restoreFetch();
+});
+
+// ───────────────────────── 轮次标识（Task 7 修复轮 · Critical 1）─────────────────────────
+//
+// review 的原话：`attempts: 2` 既可能是"一次快门、两次模型请求"，也可能是"按了两次快门、
+// 各请求一次"；而三类结论事件原先都没有轮次字段，Task 10 从这里算不出"用户重拍了几次"。
+// 下面四条把 **一次快门 = 一轮** 钉在真链路上，并把"代码路径数出来的快门次数"与
+// "事件流用 rounds.mjs 的公式数出来的轮数"对上。
+
+test('一次快门 = 一轮：同一帧发了两次模型请求，roundIndex 也只加 1（attempts 与轮数是两个数）', async () => {
+  let call = 0;
+  const flaky = async (url) => {
+    call += 1;
+    return call === 1 ? failingFetch(502)(url) : okFetch(url);
+  };
+  const h = await withFetch({ fetchImpl: flaky, recognize: realRecognizeWithFallback });
+  await openCameraAndShoot(h);
+
+  const ok = h.events.filter((e) => e.type === 'recognize_ok');
+  assert.equal(ok.length, 1);
+  assert.equal(ok[0].payload.attempts, 2, '这一轮真的问了模型两次');
+  assert.equal(ok[0].roundIndex, 1, '但它只是**一次**快门 → 只占一轮');
+  assert.equal(roundCountOfSession(h.events, h.sessionId), 1, '事件流里也只有一轮');
+  assert.equal(reShootCountOfSession(h.events, h.sessionId), 0, 'attempts=2 绝不能被读成"重拍了一次"');
+  assert.equal(h.calls.grabFrame.length, 1, '一次快门只取一帧（轮次与取帧次数同源）');
+  h.restoreFetch();
+});
+
+test('被端侧拦下的那一轮也带 roundIndex，且 attempts 如实为 0（拒帧同样是一次快门）', async () => {
+  const h = await withFetch({
+    fetchImpl: okFetch,
+    recognize: realRecognizeWithFallback,
+    grabResult: { blob: makeBlob(9), stats: DARK },
+  });
+  await openCameraAndShoot(h);
+  const rejected = h.events.filter((e) => e.type === 'frame_rejected');
+  assert.equal(rejected.length, 1);
+  assert.equal(rejected[0].roundIndex, 1, '拒帧那一轮必须有轮次标识（否则它就"不存在"，判据 B 少算）');
+  assert.equal(rejected[0].payload.attempts, undefined, 'frame_rejected 的 payload 只有 reason（attempts 是"问过模型几次"）');
+  assert.equal(roundCountOfSession(h.events, h.sessionId), 1);
+  h.restoreFetch();
+});
+
+test('1 / 2 / 3 次快门：事件流数出 0 / 1 / 2 次重拍，且与代码路径（取帧次数）逐个吻合', async () => {
+  // 三次那一轮故意做成"两次被端侧拦下 + 第三次识物成功"：只数 recognize_* 的口径会数出 1 轮
+  // （判成"没重拍过"），而正确答案是 3 轮 = 重拍 2 次 = 成闸。这就是 review 说的分母陷阱。
+  for (const presses of [1, 2, 3]) {
+    let shot = 0;
+    const h = await withFetch({
+      fetchImpl: okFetch,
+      recognize: realRecognizeWithFallback,
+      grabResult: () => {
+        shot += 1;
+        return { blob: makeBlob(9), stats: shot <= presses - 1 ? DARK : OK };
+      },
+    });
+    await pressShutter(h, presses);
+
+    const rounds = roundCountOfSession(h.events, h.sessionId);
+    assert.equal(h.calls.grabFrame.length, presses, `按了 ${presses} 次快门就该取 ${presses} 帧（代码路径）`);
+    assert.deepEqual(
+      roundIndicesOfSession(h.events, h.sessionId),
+      Array.from({ length: presses }, (_, i) => i + 1),
+      `${presses} 次快门 → 事件流里的轮次应是连续的 1…${presses}（每会话重置、单调递增）`,
+    );
+    assert.equal(rounds, presses, `事件流数出来的轮数必须等于快门次数（${presses}）`);
+    assert.equal(reShootCountOfSession(h.events, h.sessionId), presses - 1, `${presses} 次快门 = 重拍 ${presses - 1} 次`);
+    assert.equal(needsReshoot(rounds), presses >= 3, `${presses} 次快门 → 需重拍 ≥2 次 = ${presses >= 3}`);
+    h.restoreFetch();
+  }
+});
+
+test('重拍率的两个数不能混：一次会话里 attempts 总和可以是 3，但轮数仍是 2', async () => {
+  // 会话：第 1 次快门被端侧拦下（attempts 0）；第 2 次快门通过质检但第一次请求失败、
+  // 第二次成功（attempts 2）。模型请求共 2 次、快门 2 次 → 轮数 2、重拍 1 次。
+  let call = 0;
+  const flaky = async (url) => {
+    call += 1;
+    return call === 1 ? failingFetch(502)(url) : okFetch(url);
+  };
+  let shot = 0;
+  const h = await withFetch({
+    fetchImpl: flaky,
+    recognize: realRecognizeWithFallback,
+    grabResult: () => {
+      shot += 1;
+      return { blob: makeBlob(9), stats: shot === 1 ? DARK : OK };
+    },
+  });
+  await pressShutter(h, 2);
+
+  const attemptsTotal = h.events
+    .filter((e) => e.type === 'recognize_ok' || e.type === 'recognize_failed')
+    .reduce((n, e) => n + (e.payload.attempts ?? 0), 0);
+  assert.equal(attemptsTotal, 2, '第 2 轮问了两次模型');
+  assert.equal(roundCountOfSession(h.events, h.sessionId), 2, '但用户只按了两次快门 → 2 轮');
+  assert.equal(reShootCountOfSession(h.events, h.sessionId), 1, '重拍 1 次');
+  assert.equal(needsReshoot(roundCountOfSession(h.events, h.sessionId)), false, '重拍 1 次不成闸');
+  h.restoreFetch();
+});
+
+test('轮次按会话重置：另一次 mount（= 另一个会话）从 1 重新开始', async () => {
+  const h1 = await withFetch({
+    fetchImpl: okFetch, recognize: realRecognizeWithFallback, grabResult: { blob: makeBlob(9), stats: DARK },
+  });
+  await pressShutter(h1, 2);
+  assert.equal(roundCountOfSession(h1.events, h1.sessionId), 2);
+  h1.restoreFetch();
+
+  const h2 = await withFetch({ fetchImpl: okFetch, recognize: realRecognizeWithFallback });
+  await openCameraAndShoot(h2);
+  assert.equal(h2.events.filter((e) => e.type === 'recognize_ok')[0].roundIndex, 1, '新会话的第一轮必须是 1');
+  assert.equal(roundCountOfSession(h2.events, h2.sessionId), 1);
+  h2.restoreFetch();
 });

@@ -17,6 +17,11 @@
 //   · `detail` 用 `${VISION_DETAIL}`（默认 `low`：缩到 512×512，与设计文档 §4.6 的 512px 长边一致）
 //   · base64 data URL 上限 32 MiB
 //   · `response_format: { type: 'json_object' }` 兜底"必须返回严格 JSON"，但**仍须校验**
+//
+// 另有一条与模型契约无关、但同样必须守住的：**这一腿有上限**（`UPSTREAM_TIMEOUT_MS`）。
+// `fetch` 默认不超时，半开的连接会把这条路由永久挂住；而这个上限必须**小于**客户端那条腿
+// （`web/units/recognize.mjs` 的 `RECOGNIZE_REQUEST_TIMEOUT_MS`），否则"上游慢"在数据里
+// 只会表现为"客户端自己等烦了"，服务端什么都没记。取值理由见该常量。
 
 /** 上游返回的东西不是我们能用的形状时抛出的错误上挂的 `code`。 */
 export const UPSTREAM_INVALID = 'upstream_invalid';
@@ -27,6 +32,28 @@ export const UPSTREAM_FAILED = 'upstream_failed';
 const MAX_DATA_URL_BYTES = 32 * 1024 * 1024;
 /** 候选上限：设计文档 §4.1「三候选 + 人工重拍」。多出来的直接砍掉，不返回给客户端。 */
 export const MAX_CANDIDATES = 3;
+
+/**
+ * 服务端这一腿的上游请求上限（毫秒）——**首轮设定值**，不是定论：第一周用真实弱网数据标定，
+ * 每次调整都要记入变更记录（与 `web/units/frame-qc.mjs` 的阈值、以及客户端那条腿同一条纪律）。
+ *
+ * 为什么必须有它：`fetch` 默认**没有**超时。上游连接半开（不回、也不断）时这个 Promise 会
+ * 永久 pending，这条路由就一直挂在半空、连接与内存都收不回来。
+ *
+ * 与客户端那条腿的关系（**硬要求，有跨模块用例钉住**）：本值必须**小于**客户端的
+ * `RECOGNIZE_REQUEST_TIMEOUT_MS`（`web/units/recognize.mjs`，12000ms）。于是链路是：
+ *   上游超时 → 本模块抛 `upstream_failed` → 路由回 `502 {ok:false,error:'upstream_failed'}`
+ *   → 客户端收到 HTTP 非 2xx → 落 `recognize_failed{reason:'request_failed'}`。
+ * 顺序反过来的话，所有"上游慢"都只会长成同一个样子——"客户端自己等烦了"，而服务端什么都没记，
+ * 分不清模型慢、服务端挂掉还是网络断。
+ *
+ * 调大 = 客户端那条腿先到、服务端的诊断失去意义；调小 = 真实模型偶发变慢被误报成上游失败。
+ * 标定依据：实弹探针实测端到端 1.8s / 3.0s（task-7-report §3.1）。
+ *
+ * 可在调用处覆盖（`recognizeUpstream({ timeoutMs })`，路由层由 `createApp({ upstreamTimeoutMs })`
+ * 注入），测试用一个小值即可，不必真等生产上限。
+ */
+export const UPSTREAM_TIMEOUT_MS = 8000;
 
 /**
  * 提示词：要求严格 JSON、按置信度排序、给场景标签。
@@ -67,13 +94,16 @@ function normalizeCandidate(raw) {
  *   - `mime`: 该帧的 MIME（默认 `image/jpeg`）
  *   - `env`: `{ DEEPSEEK_API_KEY, DEEPSEEK_API_BASE, DEEPSEEK_MODEL, VISION_DETAIL }`（见 `server/env.mjs`）
  *   - `fetchImpl`: 注入点，默认全局 `fetch`
+ *   - `timeoutMs`: 上游请求上限，默认 `UPSTREAM_TIMEOUT_MS`（必须小于客户端那条腿，见该常量）
  * @returns {Promise<{ candidates: Array<{label: string, score: number|null, scene: string|null}> }>}
  *   候选已校验、已截到 `MAX_CANDIDATES` 条；`score`/`scene` 缺失时为 `null`（**不编造**）
- * @throws {Error} `code === 'upstream_failed'`：网络错 / 非 2xx（message 带状态码）
+ * @throws {Error} `code === 'upstream_failed'`：网络错 / 非 2xx / **超时**（message 带状态码或"超时"）
  * @throws {Error} `code === 'upstream_invalid'`：非 JSON 响应体、choices 结构不对、
  *   `candidates` 不是数组、或数组里有**任何一条**连 `label` 都给不出来
  */
-export async function recognizeUpstream({ image, mime = 'image/jpeg', env, fetchImpl = fetch }) {
+export async function recognizeUpstream({
+  image, mime = 'image/jpeg', env, fetchImpl = fetch, timeoutMs = UPSTREAM_TIMEOUT_MS,
+}) {
   const bytes = Buffer.isBuffer(image) ? image : Buffer.from(image);
   const body = {
     model: env.DEEPSEEK_MODEL,
@@ -101,6 +131,8 @@ export async function recognizeUpstream({ image, mime = 'image/jpeg', env, fetch
   }
 
   const url = `${String(env.DEEPSEEK_API_BASE).replace(/\/+$/, '')}/chat/completions`;
+  // 上限在这里装好（不放进 try）：参数非法要响亮地成为 TypeError，而不是被报成"上游失败"。
+  const signal = AbortSignal.timeout(timeoutMs);
   let res;
   try {
     res = await fetchImpl(url, {
@@ -110,9 +142,15 @@ export async function recognizeUpstream({ image, mime = 'image/jpeg', env, fetch
         authorization: `Bearer ${env.DEEPSEEK_API_KEY}`,
       },
       body: JSON.stringify(body),
+      signal,
     });
   } catch (err) {
-    const wrapped = new Error(`上游请求发不出去：${String(err?.message ?? err)}`);
+    // 超时也算上游失败，但消息必须说清是"超时"：它与"连不上"要能分开看
+    // （`AbortSignal.timeout` 触发时 fetch 以 `TimeoutError` 拒绝，部分实现报 `AbortError`）。
+    const timedOut = err?.name === 'TimeoutError' || err?.name === 'AbortError';
+    const wrapped = new Error(timedOut
+      ? `上游请求超时（${timeoutMs}ms 未返回，已主动中止）：${String(err?.message ?? err)}`
+      : `上游请求发不出去：${String(err?.message ?? err)}`);
     wrapped.code = UPSTREAM_FAILED;
     throw wrapped;
   }

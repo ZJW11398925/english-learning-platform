@@ -16,6 +16,7 @@ import assert from 'node:assert/strict';
 import { createServer } from 'node:http';
 
 import { createApp, parseMultipart } from '../server/index.mjs';
+import { settlesWithin } from './helpers/watchdog.mjs';
 
 const ENV = {
   DEEPSEEK_API_KEY: 'sk-fake-server-side-key-0123456789',
@@ -278,6 +279,91 @@ test('content-type 说不是图片时按 JPEG 兜底（不把上游的 mime 交�
   const sent = JSON.parse(upstream.seen.at(-1).body);
   const url = sent.messages[0].content.find((p) => p.type === 'image_url').image_url.url;
   assert.match(url, /^data:image\/jpeg;base64,/);
+});
+
+// ───────────────────────────── 图片魔数校验（Task 7 修复轮 · Important 5）─────────────────────────────
+//
+// 原先只查"mime 以 image/ 开头"——而 mime 是**客户端声明的**。一个 15 字节的垃圾 payload
+// 因此能一路打到按张计费的视觉模型上。下面两条：垃圾必须被挡在端点（既有 400 形状），
+// 真图必须照常通过，且 data URL 的 mime 由**服务端按字节**判定。
+
+/** 一段没有任何图片魔数的垃圾（15 字节，客户端却可以宣称它是 image/jpeg）。 */
+const JUNK = Buffer.from('not an image ::)');
+
+test('客户端声明 image/jpeg 但字节不是图片 → 400 bad_request，且绝不打上游（不让垃圾花钱）', async () => {
+  const before = upstream.seen.length;
+  const res = await postFrame({ bytes: JUNK, mime: 'image/jpeg' });
+  assert.equal(res.status, 400);
+  const body = await res.json();
+  assert.equal(body.error, 'bad_request', '复用既有错误形状，不新造一种');
+  assert.match(String(body.detail), /JPEG|PNG/, '要说清为什么这些字节不算图片');
+  assert.equal(upstream.seen.length, before, '花在垃圾上的钱必须挡在这里——这是"太暗/太糊不花钱"的另一半');
+});
+
+test('PNG 魔数被接受，且 data URL 的 mime 由服务端按字节判定（客户端谎报 jpeg 也不算数）', async () => {
+  upstream.replyJson({ candidates: [] });
+  const png = Buffer.concat([
+    Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]), // PNG 签名
+    Buffer.from([0x00, 0x00, 0x00, 0x0d]),
+  ]);
+  await postFrame({ bytes: png, mime: 'image/jpeg', filename: 'frame.jpg' });
+  const sent = JSON.parse(upstream.seen.at(-1).body);
+  const url = sent.messages[0].content.find((p) => p.type === 'image_url').image_url.url;
+  assert.match(url, /^data:image\/png;base64,/, '服务端按魔数判定，不听客户端的声明');
+});
+
+test('魔数校验的谓词：只认相机真的会产的两种格式（JPEG / PNG），其余一律 null', async () => {
+  const { sniffImageMime } = await import('../server/index.mjs');
+  assert.equal(sniffImageMime(Buffer.from([0xff, 0xd8, 0xff, 0xe0])), 'image/jpeg');
+  assert.equal(sniffImageMime(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a])), 'image/png');
+  for (const bad of [JUNK, Buffer.from([0xff, 0xd8]), Buffer.from([0x89, 0x50, 0x4e]), Buffer.alloc(0),
+    Buffer.from('<html>'), Buffer.from([0x47, 0x49, 0x46, 0x38, 0x39, 0x61]) /* GIF：相机不产 */]) {
+    assert.equal(sniffImageMime(bad), null, `${bad.toString('hex').slice(0, 16) || '(空)'} 不是受支持的图片`);
+  }
+});
+
+// ───────────────────────── 服务端自己的请求处理上限（半开客户端不许占着连接）─────────────────────────
+
+test('服务端设了 requestTimeout / headersTimeout 守卫，且都是正数、headers < request', async () => {
+  const { SERVER_REQUEST_TIMEOUT_MS, SERVER_HEADERS_TIMEOUT_MS } = await import('../server/index.mjs');
+  assert.equal(app.requestTimeout, SERVER_REQUEST_TIMEOUT_MS, '整个请求（含 body）的接收上限要在岗');
+  assert.equal(app.headersTimeout, SERVER_HEADERS_TIMEOUT_MS, '只收半截请求头的连接也要被收掉');
+  assert.ok(SERVER_REQUEST_TIMEOUT_MS > 0 && SERVER_HEADERS_TIMEOUT_MS > 0);
+  assert.ok(SERVER_HEADERS_TIMEOUT_MS < SERVER_REQUEST_TIMEOUT_MS, '只发头的半开连接应比整个请求更早被收掉');
+});
+
+test('上游半开（收下请求却不回话）→ 在服务端上限内回 502 upstream_failed，不挂住客户端', async () => {
+  // 上游桩：读完请求就**有意不回**（连接半开）。没有超时闸时，这个 Promise 永久 pending，
+  // 界面卡在 capturing、每点一次快门就多挂一个请求，而事件一条都不会落。
+  const stalled = createServer((req) => { req.resume(); /* 有意不回 */ });
+  await new Promise((resolve) => stalled.listen(0, '127.0.0.1', resolve));
+  const slowApp = createApp({
+    env: { ...ENV, DEEPSEEK_API_BASE: `http://127.0.0.1:${stalled.address().port}` },
+    fetchImpl: fetch,
+    upstreamTimeoutMs: 60, // 测试专用注入：不真等生产上限
+  });
+  await new Promise((resolve) => slowApp.listen(0, '127.0.0.1', resolve));
+  try {
+    const t0 = Date.now();
+    // 看门狗：上游超时闸被拆掉时，这条 POST 会挂着不返回（undici 默认要等 5 分钟），
+    // 于是整个测试文件挂死。看门狗把它变成一次干净的失败。
+    const res = await settlesWithin(
+      postFrame({ url: `http://127.0.0.1:${slowApp.address().port}/api/recognize` }),
+      5000, '服务端识物请求',
+    );
+    const elapsed = Date.now() - t0;
+    assert.equal(res.status, 502);
+    const body = await res.json();
+    assert.equal(body.ok, false, '失败绝不长得像成功');
+    assert.equal(body.error, 'upstream_failed', '服务端先超时 → 报它自己的失败形状（客户端据此落 request_failed）');
+    assert.equal(typeof body.latency_ms, 'number');
+    assert.ok(elapsed < 3000, `必须在上限（注入 60ms）附近收口，实测 ${elapsed}ms——挂住就等于用户界面卡死`);
+  } finally {
+    slowApp.closeAllConnections();
+    await new Promise((resolve) => slowApp.close(resolve));
+    stalled.closeAllConnections();
+    await new Promise((resolve) => stalled.close(resolve));
+  }
 });
 
 // ──────────────────────────────────── parseMultipart 的谓词级用例 ────────────────────────────────────

@@ -13,7 +13,9 @@ import assert from 'node:assert/strict';
 
 import {
   recognizeUpstream, RECOGNIZE_PROMPT, MAX_CANDIDATES, UPSTREAM_INVALID, UPSTREAM_FAILED,
+  UPSTREAM_TIMEOUT_MS,
 } from '../server/recognize-upstream.mjs';
+import { settlesWithin } from './helpers/watchdog.mjs';
 
 const ENV = {
   DEEPSEEK_API_KEY: 'sk-fake-key-for-tests',
@@ -261,4 +263,38 @@ test('图片超过 data URL 上限时当场失败，不发那次请求（省往�
     (err) => err.code === UPSTREAM_INVALID && /上限/.test(err.message),
   );
   assert.equal(up.calls.length, 0, '明知会超限就不要发出去');
+});
+
+// ───────────────────────────────────── 超时闸（Task 7 修复轮 · Critical 2）─────────────────────────────────────
+
+/** 永不回话、但如实遵守 signal 的 fetch（真 fetch 在半开连接上就是这个行为）。 */
+const stalledFetch = (url, init) => new Promise((_, reject) => {
+  init.signal.addEventListener('abort', () => reject(init.signal.reason));
+});
+
+test('每次上游调用都带 signal（没有它，上游半开会让这条链路永久挂住）', async () => {
+  const up = fakeUpstream({ body: upstreamJson({ candidates: [] }) });
+  await recognizeUpstream({ image: IMAGE, env: ENV, fetchImpl: up.fetchImpl });
+  assert.ok(up.calls[0].init.signal instanceof AbortSignal, '上游 fetch 必须带 signal');
+});
+
+test('上游永不回话 → 在上限内抛 upstream_failed（不是永久 pending）', async () => {
+  const t0 = Date.now();
+  await assert.rejects(
+    () => settlesWithin(
+      recognizeUpstream({ image: IMAGE, env: ENV, fetchImpl: stalledFetch, timeoutMs: 30 }),
+      2000, '上游请求',
+    ),
+    (err) => err.code === UPSTREAM_FAILED && /超时|timeout/i.test(String(err.message)),
+    '超时按上游失败报（不是"形状非法"），且消息里说清是超时',
+  );
+  const elapsed = Date.now() - t0;
+  assert.ok(elapsed < 2000, `必须在注入的上限（30ms）内收口，实测 ${elapsed}ms`);
+});
+
+test('默认上限是首轮设定值：正整数字面量，且小于客户端那条腿（由客户端一侧的用例钉住关系）', () => {
+  assert.ok(Number.isInteger(UPSTREAM_TIMEOUT_MS), 'UPSTREAM_TIMEOUT_MS 必须是整数毫秒');
+  assert.ok(UPSTREAM_TIMEOUT_MS > 0);
+  // 上限必须显著高于实测端到端时延（实弹探针 1.8s / 3.0s），否则真实模型偶发慢会被误报成上游失败
+  assert.ok(UPSTREAM_TIMEOUT_MS >= 5000, `上限 ${UPSTREAM_TIMEOUT_MS}ms 太紧：会把慢一点的正常调用误报成失败`);
 });
