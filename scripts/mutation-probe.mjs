@@ -1,17 +1,26 @@
 /**
  * 变异探针（可重复运行的证据生成器，零依赖、非测试文件）。
  *
- * 用途：把 review 轮（`rv3-probe.mjs`）枚举的 18 个变异体 + Task 4 的 11 个变异体固化成仓库内
+ * 用途：把 review 轮（`rv3-probe.mjs`）枚举的 18 个变异体 + Task 4 的 12 个变异体固化成仓库内
  * 可复跑的证据——逐个"把实现改坏"，跑 `tests/scheduler.test.mjs` + `tests/pick-word.test.mjs` +
  * `tests/feedback.test.mjs`，报告每个变异体是被测试抓到（DETECTED）还是溜过去了（MISSED），
  * 只要有该抓没抓到的就以非零码退出。
  *
  * 用法（在仓库根）：
- *   node scripts/mutation-probe.mjs            # 全部 29 个变异体
- *   node scripts/mutation-probe.mjs --only=M2  # 只跑名字含 M2 的（F/Q 同理）
+ *   node scripts/mutation-probe.mjs            # 全部 30 个变异体
+ *   node scripts/mutation-probe.mjs --only=M2  # 只跑 M2（`--only=F` = 整个 F 系列；规则见下）
  *   KEEP_TMP=1 node scripts/mutation-probe.mjs # 保留临时工作树以便排查
  *
- * 三条护栏（少一条结论就可能是假阴性）：
+ * `--only` 的匹配规则（大小写敏感；按变异体 **ID** 匹配，ID = 名字里第一个 `_` 之前那段，如
+ * `F12_messageDropsValue` → `F12`）：
+ *   1. 先按 ID **全串相等**——`--only=M1` 只跑 M1（不再连带 M10–M14），`--only=F12` 只跑 F12；
+ *   2. 没有精确命中时退化为**族匹配**（ID 以该串开头）——`--only=F` 跑 F1…F12，`--only=Q` 跑 Q1…Q4；
+ *   3. 两者皆空即当场 FAIL（并列出全部可用 ID），绝不"跑 0 个然后 PASS"。
+ * 这修掉了原先的子串匹配：那时 `--only=F` 会把 `M9_terminalNoFlag`、`Q2_topScoreFirst`、
+ * `Q4_hypernymFallback` 一起选中（14 个而不是 11 个），选中的集合与"只看 F 系列"的意图不符。
+ * 不给 `--only=` 或给空值即全跑。
+ *
+ * 四条护栏（少一条结论就可能是假阴性）：
  * 1. **不碰仓库源码**。变异只写进 `os.tmpdir()` 下的临时工作树（`<tmp>/web/units/*.mjs` +
  *    `<tmp>/tests/*.test.mjs` 的逐字副本），跑完把临时模块按字节还原，并用 sha256 逐次核对；
  *    同时每次变异后都核对仓库里各模块的哈希未变。进程被强杀也不会留下被改坏的仓库文件。
@@ -19,13 +28,16 @@
  * 3. **退出码取自子进程的 `exit` 事件**。本环境不允许 piped 子进程 stdio，且 `node:test` 在
  *    `beforeExit` 时还没写 `process.exitCode`（那时仍是 0）——所以既不能用管道拿输出，也不能
  *    让子进程自报结果：只用 exit 事件的 code 判定。子进程输出改写到日志文件（文件描述符，不是管道）。
+ * 4. **每次运行有墙钟上限**（`CHILD_TIMEOUT_MS`）。`node:test` 默认超时是 `Infinity`，没有这道闸，
+ *    一条"把测试跑挂"的变异体会让整个探针无限期挂住且不给任何诊断（本项目已吃过一次同款亏）。
+ *    超时即强杀整棵进程树，并按"未抓到"单列一类（`TIMEOUT`，与 `MISSED` 分开打印），挂住 ≠ 干净失败。
  *
  * 变异体元数据：`expect: 'detected'` = 必须被测试抓到；`expect: 'equivalent'` = 与真实现**语义
  * 等价**（构造上不可能被抓到，见该条 why）。等价的那些不算漏网，但必须由差分核对证明等价，
  * 证明不过就反过来算漏网（说明它其实可被抓到）。
  *
  * 结论：见文末运行输出的汇总行（Task 3：17/17 可抓变异体 DETECTED + M2 证为等价变异体；
- * Task 4：11/11 可抓变异体 DETECTED，见 `task-4-report.md`）。
+ * Task 4：12/12 可抓变异体 DETECTED，见 `task-4-report.md`）。
  */
 import { spawn } from 'node:child_process';
 import { createHash } from 'node:crypto';
@@ -43,6 +55,16 @@ const MODULE_FILES = {
 const TEST_FILES = ['tests/scheduler.test.mjs', 'tests/pick-word.test.mjs', 'tests/feedback.test.mjs'];
 const TEST_ARGS = ['--test', ...TEST_FILES];
 const only = (process.argv.find((a) => a.startsWith('--only=')) ?? '').slice('--only='.length);
+
+/** 变异体 ID：名字里第一个 `_` 之前的那段（`F12_messageDropsValue` → `F12`）。 */
+const mutantPrefix = (name) => name.split('_')[0];
+
+/** `--only` 选中哪些变异体（规则见文件头）：先 ID 全串相等，未命中再按 ID 前缀族匹配。 */
+function selectMutants(value) {
+  if (!value) return MUTANTS;
+  const exact = MUTANTS.filter((m) => mutantPrefix(m.name) === value);
+  return exact.length ? exact : MUTANTS.filter((m) => mutantPrefix(m.name).startsWith(value));
+}
 
 const sha256 = (buf) => createHash('sha256').update(buf).digest('hex');
 
@@ -298,18 +320,84 @@ const MUTANTS = [
     find: "export const VERDICTS = Object.freeze(['correct', 'flawed', 'uncertain']);",
     replace: "export const VERDICTS = ['correct', 'flawed', 'uncertain'];",
   },
+  {
+    name: 'F12_messageDropsValue', target: FEEDBACK, expect: 'detected',
+    why: '越界消息丢掉实际取值（只报"error_type 取值越界"，不再说模型给的是什么）：调用方把它'
+      + '`join("; ")` 成 `feedback_pending` 的原因时会拿到一条无法定位的诊断——不知道模型到底吐了'
+      + '哪个值，只能回头猜。这条钉住的正是报告 §八.3 说的"文案半契约"里唯一不许退化的部分：'
+      + '*点名字段 + 带上实际取值*（措辞可以变，取值必须在）',
+    find: '    errors.push(`error_type 取值越界: ${String(raw.error_type)}`);',
+    replace: "    errors.push('error_type 取值越界');",
+  },
 ];
 
 // ─────────────────────────────────────────────────────────── 工具
-/** 跑一次聚焦测试，只信 **exit 事件的 code**（本环境不能读子进程管道输出）。 */
+/**
+ * 单个变异体子进程的**墙钟上限**（护栏 4）。`node:test` 默认超时是 `Infinity`，所以一条把测试
+ * 跑挂的变异体会让探针无限期挂住、不给诊断（本项目 Task 2 已吃过同款亏：手写测试替身的
+ * `oncomplete` 永不触发 → 零输出挂死，看起来像"还在跑"而不是"失败"）。
+ * 取值理由：整套测试当前约 1.5s（改前/改后全量 `node --test` 的 `duration_ms` 为 1515 / 1528），30s 已是
+ * **约 20 倍**整套测试、**三个数量级**于单文件耗时的余量——正常变异体绝无可能撞上，而它能保证
+ * 卡死的那一个在 30s 内变成一条可读的诊断而不是一次无限等待。成本上界从"无限"变成
+ * `30 个变异体 × 30s`（最坏 15 分钟，且首个超时即 FAIL 退出，实际远小于此）。
+ */
+const CHILD_TIMEOUT_MS = 30_000;
+/** 强杀后再等这么久还没收到 `exit` 就自己结算：否则"杀不掉"又会退化成永久挂住。 */
+const KILL_GRACE_MS = 5_000;
+
+/**
+ * 超时后强杀**整棵进程树**。Windows 上 `child.kill()` 只终止直接子进程，`node --test` 派生出来的
+ * 孙子测试进程会活下来继续挂住（正是要防的那种僵死），故 Windows 走 `taskkill /T /F`。
+ */
+function killTree(child) {
+  const { pid } = child;
+  if (process.platform === 'win32' && pid) {
+    try {
+      spawn('taskkill', ['/PID', String(pid), '/T', '/F'], { stdio: 'ignore' })
+        .on('error', () => { try { child.kill('SIGKILL'); } catch { /* 已退出 */ } });
+      return;
+    } catch { /* 落回 SIGKILL */ }
+  }
+  try { child.kill('SIGKILL'); } catch { /* 已退出 */ }
+}
+
+/**
+ * 跑一次聚焦测试，只信 **exit 事件的 code**（本环境不能读子进程管道输出）。
+ * 正常退出仍以 code 判定；只有超过 `CHILD_TIMEOUT_MS` 才走超时结算，且结算出来的 code 是 `null`，
+ * 绝不会在超时时伪造一个"非 0 退出码"（那会把挂住误判成 DETECTED）。
+ */
 function runTests(cwd, logPath) {
   const fd = fs.openSync(logPath, 'w');
   let closed = false;
   const close = () => { if (!closed) { closed = true; try { fs.closeSync(fd); } catch { /* 已关 */ } } };
   return new Promise((resolve) => {
     const child = spawn(process.execPath, TEST_ARGS, { cwd, stdio: ['ignore', fd, fd] });
-    child.on('exit', (code, signal) => { close(); resolve({ code, signal }); });
-    child.on('error', (err) => { close(); resolve({ code: null, signal: null, error: err }); });
+    let timedOut = false;
+    let settled = false;
+    let timer = null;
+    let killTimer = null;
+    const settle = (r) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      if (killTimer) clearTimeout(killTimer);
+      close();
+      resolve(r);
+    };
+    timer = setTimeout(() => {
+      timedOut = true;
+      killTree(child);
+      killTimer = setTimeout(
+        () => settle({ code: null, signal: `PROBE-TIMEOUT(${CHILD_TIMEOUT_MS}ms)`, timedOut: true }),
+        KILL_GRACE_MS,
+      );
+    }, CHILD_TIMEOUT_MS);
+    child.on('exit', (code, signal) => {
+      // 强杀触发的 exit 按"超时"结算，不冒充一次正常退出（更不冒充一次"干净的失败"）
+      if (timedOut) settle({ code: null, signal: `PROBE-TIMEOUT(${CHILD_TIMEOUT_MS}ms)`, timedOut: true });
+      else settle({ code, signal });
+    });
+    child.on('error', (err) => { settle({ code: null, signal: null, error: err }); });
   });
 }
 
@@ -446,7 +534,11 @@ try {
     hardFailure = '基线不绿：探针自身不可信，先修基线';
   }
 
-  const selected = MUTANTS.filter((m) => m.name.includes(only));
+  const selected = selectMutants(only);
+  if (!hardFailure && selected.length === 0) {
+    // `--only` 打错一个字就会"跑 0 个变异体然后 PASS"——那是最坏的一种假绿，必须当场拦下
+    hardFailure = `--only=${only} 没有匹配到任何变异体（可用 ID：${[...new Set(MUTANTS.map((m) => mutantPrefix(m.name)))].join(', ')}）`;
+  }
   if (!hardFailure) {
     for (const m of selected) {
       const target = tmpModule[m.target];
@@ -467,9 +559,10 @@ try {
       }
       fs.writeFileSync(target, mutated);
 
-      const { code, signal } = await runTests(tmpRoot, logPath);
-      const caught = failingTests(logPath);
-      const detected = code !== 0;
+      const { code, signal, timedOut } = await runTests(tmpRoot, logPath);
+      // 超时的子进程没有 exit code（code=null），绝不能被 `code !== 0` 当成"被测试抓到"
+      const caught = timedOut ? [] : failingTests(logPath);
+      const detected = !timedOut && code !== 0;
 
       // 还原临时模块并按哈希核对"逐字节还原"
       fs.writeFileSync(target, pristine[m.target]);
@@ -480,7 +573,12 @@ try {
         .every((r) => sha256(fs.readFileSync(path.join(REPO, r))) === repoHashes[r]);
 
       let verdict;
-      if (m.expect === 'detected') {
+      if (timedOut) {
+        // 挂住的变异体不是"被测试抓到"，也不是一次 MISSED（它根本没跑完，没有干净失败可读）。
+        // 单列一类，避免读者把"探针被卡死"误读成"测试覆盖不足"。等价变异体也不给 EQUIVALENT：
+        // 连跑完都没跑完，等价主张无从谈起。
+        verdict = `TIMEOUT（${CHILD_TIMEOUT_MS}ms 未退出，已强杀整棵进程树 → 按未抓到处理）`;
+      } else if (m.expect === 'detected') {
         verdict = detected ? 'DETECTED' : 'MISSED';
       } else {
         // 声称等价的：必须由差分核对证明等价，证明不过则反过来按漏网处理
@@ -491,8 +589,10 @@ try {
         verdict = proved ? 'EQUIVALENT（差分核对一致，构造上不可抓）'
           : `OVERCLAIM（差分不一致或其实被抓到 → 按漏网处理）`;
       }
-      results.push({ ...m, verdict, caught, exit: code, signal, restored, repoIntact });
-      if (!hardFailure && ((m.expect === 'detected' && !detected) || (m.expect !== 'detected' && verdict.startsWith('OVERCLAIM')))) {
+      results.push({ ...m, verdict, caught, exit: code, signal, timedOut, restored, repoIntact });
+      if (!hardFailure && timedOut) {
+        hardFailure = `变异体 ${m.name} 的子进程 ${CHILD_TIMEOUT_MS}ms 未退出（已强杀）——挂住不等于抓到，按未抓到处理`;
+      } else if (!hardFailure && ((m.expect === 'detected' && !detected) || (m.expect !== 'detected' && verdict.startsWith('OVERCLAIM')))) {
         hardFailure = `变异体 ${m.name} 未被测试抓到（期望：${m.expect}）`;
       }
       if (!restored || !repoIntact) {
@@ -506,6 +606,7 @@ try {
     console.log(`\n[${r.verdict}] ${r.name}  (${r.target}, exit=${r.exit}${r.signal ? `, signal=${r.signal}` : ''})`);
     console.log(`  为什么算坏：${r.why}`);
     if (r.caught.length) console.log(`  抓到它的用例：${r.caught.slice(0, 3).join(' / ')}${r.caught.length > 3 ? ` …（共 ${r.caught.length} 条）` : ''}`);
+    else if (r.timedOut) console.log(`  抓到它的用例：（无——子进程 ${CHILD_TIMEOUT_MS}ms 未退出被强杀，读不到任何干净的失败）`);
     else if (r.exit !== 0) console.log('  抓到它的用例：（退出码非 0 但未解析出用例名——本环境不读管道输出，日志在临时树里）');
   });
   if (process.env.KEEP_TMP === '1') console.log(`\n临时工作树保留在：${tmpRoot}`);
@@ -514,6 +615,7 @@ try {
 
 const detectedCount = results.filter((r) => r.verdict === 'DETECTED').length;
 const missed = results.filter((r) => r.verdict === 'MISSED');
+const timedOutList = results.filter((r) => r.verdict.startsWith('TIMEOUT'));
 const overclaim = results.filter((r) => r.verdict.startsWith('OVERCLAIM'));
 const patchFailed = results.filter((r) => r.verdict.startsWith('PATCH-FAILED'));
 const equivalent = results.filter((r) => r.verdict.startsWith('EQUIVALENT'));
@@ -522,7 +624,8 @@ console.log('\n================ 汇总 ================');
 console.log(`变异体：${results.length}/${MUTANTS.length}（--only=${only || '（全部）'}）`);
 console.log(`DETECTED（被测试抓到）：${detectedCount}`);
 console.log(`EQUIVALENT（与真实现等价，构造上不可抓，已差分核对）：${equivalent.length}${equivalent.length ? ` → ${equivalent.map((r) => r.name).join(', ')}` : ''}`);
-console.log(`MISSED（该抓没抓到）：${missed.length}${missed.length ? ` → ${missed.map((r) => r.name).join(', ')}` : ''}`);
+console.log(`MISSED（该抓没抓到，跑完了但没有干净失败）：${missed.length}${missed.length ? ` → ${missed.map((r) => r.name).join(', ')}` : ''}`);
+console.log(`TIMEOUT（${CHILD_TIMEOUT_MS}ms 未退出被强杀，按未抓到处理，单列不与 MISSED 混同）：${timedOutList.length}${timedOutList.length ? ` → ${timedOutList.map((r) => r.name).join(', ')}` : ''}`);
 console.log(`OVERCLAIM（声称等价但差分不一致）：${overclaim.length}`);
 console.log(`PATCH-FAILED（探针与源码不同步）：${patchFailed.length}`);
 if (hardFailure) console.log(`判定：FAIL —— ${hardFailure}`);
