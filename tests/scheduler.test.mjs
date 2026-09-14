@@ -92,9 +92,12 @@ test('stage 字段缺失时按 0 处理（新词可能只写 id 与 dueAt）', (
   assert.equal(n.dueAt, t0 + 1 * DAY);
 });
 
-test('stage 3 完成 7 天档后 stage 推进到 4 且 maintained=true（stage 数的是已完成的间隔档）', () => {
+test('stage 3 完成 7 天档后返回 stage 4（maintained 哨兵，不是"完成了 4 档"）', () => {
+  // 两个角色分清（见 scheduler.mjs 模块头）：入参 stage = **已完成的档数**（这里 3 = 1/3/7
+  // 三档都已跑完）；返回的 stage = **刚排上的那一档的序号**，而第 4 档并不存在——
+  // 4 只是"7 天档刚完成"的哨兵值（大于 INTERVALS_DAYS.length），它不等于"完成了 4 档"。
   const n = nextState({ id: 'w1', stage: 3, dueAt: t0 }, t0);
-  assert.equal(n.stage, 4, '4 = 已跑完 1/3/7 三档，不再有第四个间隔');
+  assert.equal(n.stage, 4, '4 = 刚跑完第 3 档（7 天）的 maintained 哨兵；已完成的档数仍是 3，没有第 4 档');
   assert.equal(n.maintained, true);
   assert.equal(n.dueAt, null);
 });
@@ -117,6 +120,19 @@ test('isMaintained 里 dueAt=null 这一条必须与 nextState/dueWords 一致�
     'dueAt=null 的词不得出现在待办里');
   assert.equal(isMaintained(nextState({ id: 'w', stage: 3, dueAt: t0 }, t0)), true,
     'nextState 产出的终态必须被 isMaintained 认作已维护');
+});
+
+test('isMaintained 的 dueAt===null 分支必须单独成立（dueWords 里那条冗余 w.dueAt !== null 的正当性）', () => {
+  // dueWords 的过滤条件写作 !isMaintained(w) && w.dueAt !== null && w.dueAt <= now：中间那条在
+  // "isMaintained 认 dueAt===null"成立时是冗余的——留着是为了让两种已维护写法在调用点可见、
+  // 并防住日后有人削弱 isMaintained。**本用例就是那条冗余的正当性所在**：一旦 isMaintained 的
+  // dueAt===null 分支被删掉，中间那条就从"冗余"变成唯一守门人，这里必须立刻变红。
+  // 注意只给 dueAt（不带 maintained 标志）：带上 maintained:true 会让另一个分支把它遮住。
+  const onlyNullDueAt = { id: 'w', stage: 4, dueAt: null, lastReviewedAt: t0 };
+  assert.equal(isMaintained(onlyNullDueAt), true, 'dueAt=null 本身即已维护，不能只认 maintained 标志');
+  // 与非终态词并排：只应推出真正到期的那个
+  const due = { id: 'd', stage: 1, dueAt: t0 - 1, createdAt: t0 };
+  assert.deepEqual(dueWords({ w: onlyNullDueAt, d: due }, t0 + 100 * DAY).map((x) => x.id), ['d']);
 });
 
 test('difficulty 被原样记录（自评测难要能留下来），且 hard/easy 的间隔完全相同', () => {
@@ -148,6 +164,19 @@ test('dueWords 只按到期时间排序返回，与词表键的插入顺序无�
     early: { id: 'early', stage: 1, dueAt: t0 - 5 * DAY, createdAt: t0 },
   };
   assert.deepEqual(dueWords(words, t0).map((w) => w.id), ['early', 'late']);
+});
+
+test('dueWords 同刻到期时按 id 码位升序兜底（与 ICU / 运行环境语言无关）', () => {
+  // 比较器若用 String(id).localeCompare(...)，结果就取决于 ICU 与运行环境语言：
+  // 'B' 与 'a' 在 en-US/zh-CN 的排序规则里是 a < B，在码位序里是 B(66) < a(97)。
+  // 同刻到期的先后是数据的一部分（谁先复习），不能随语言环境漂移，故断言码位序。
+  const sameDue = (id) => ({ id, stage: 1, dueAt: t0 - 1 * DAY, createdAt: t0 });
+  assert.deepEqual(dueWords({ a: sameDue('a'), B: sameDue('B') }, t0).map((w) => w.id), ['B', 'a'],
+    "同刻到期用码位序兜底；localeCompare 会把 'a' 排在 'B' 前");
+  // 兜底键也必须只取决于数据：换一个词表插入顺序，结果不变
+  assert.deepEqual(dueWords({ B: sameDue('B'), a: sameDue('a') }, t0).map((w) => w.id), ['B', 'a']);
+  // 普通小写 id 的升序不变（既不倒序，也不受 locale 影响）
+  assert.deepEqual(dueWords({ b: sameDue('b'), a: sameDue('a') }, t0).map((w) => w.id), ['a', 'b']);
 });
 
 test('dueWords 返回的是原词对象（不复制、不改写），且空词表返回空数组', () => {
