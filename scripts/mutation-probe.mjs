@@ -9,7 +9,7 @@
  * 变异体是被测试抓到（DETECTED）还是溜过去了（MISSED），只要有该抓没抓到的就以非零码退出。
  *
  * 用法（在仓库根）：
- *   node scripts/mutation-probe.mjs            # 全部 96 个变异体
+ *   node scripts/mutation-probe.mjs            # 全部 97 个变异体
  *   node scripts/mutation-probe.mjs --only=M2  # 只跑 M2（`--only=F` = 整个 F 系列；规则见下）
  *   KEEP_TMP=1 node scripts/mutation-probe.mjs # 保留临时工作树以便排查
  *
@@ -57,6 +57,9 @@
  * Task 8 的 C1–C9（`web/units/compose.mjs`）与 V1–V6（`server/feedback-upstream.mjs`）
  * → 15/15 DETECTED，见 `task-8-report.md`——这一轮把造句反馈链路的两半都接进了探针
  * （客户端那一腿的纯逻辑 + 服务端给上游的模型契约）。
+ * Task 8 复审轮的 C10（`web/units/compose.mjs` 的 504/408 分支）→ 1/1 DETECTED，
+ * 见 `task-8-report.md`「修复轮 2」一节——这一轮同时把 `server/redact.mjs` 放进
+ * MODULE_FILES（只为临时树里 import 得到，没有变异体）。
  */
 import { spawn } from 'node:child_process';
 import { createHash } from 'node:crypto';
@@ -93,6 +96,9 @@ const MODULE_FILES = {
   // 服务端给上游的模型契约（请求体形状 + 上游信封校验 + 超时）。
   compose: 'web/units/compose.mjs',
   'feedback-upstream': 'server/feedback-upstream.mjs',
+  // Task 8 复审轮接入：两条上游腿共用的密钥形状抹除（进临时树只为"import 得到"，
+  // 没有对应变异体——它是个逐条替换的纯函数，坏法太多而断言面很窄）。
+  redact: 'server/redact.mjs',
 };
 const TEST_FILES = [
   'tests/scheduler.test.mjs',
@@ -863,10 +869,11 @@ const MUTANTS = [
     }`,
     replace: '    // 变异体：不再区分"上限到点"与"响应体不是 JSON"',
   },
-  // ── 造句反馈：客户端那一腿（Task 8）：C1–C9 ──
+  // ── 造句反馈：客户端那一腿（Task 8）：C1–C10 ──
   // 这批钉的是这条链路的四条红线：①空句不花钱；②`ok` 必须是"校验通过"而不是"HTTP 200"；
   // ③**原句永不丢**（成功与失败两条路都要带回来——它是产品赌注的证据本身）；
   // ④超时归超时、不归"响应非法"（Task 7 复审 Important 1 的同一课，在造句链路上重演）。
+  // C10（复审轮追加）把第④条补全：504/408 这两条分支此前没有任何用例，删掉也不会红。
   {
     name: 'C1_emptySentenceHitsNetwork', target: COMPOSE, expect: 'detected',
     why: '空句不再当场拦下，而是照发不误：一次必然无用的调用被花掉，而"空句"这件事在数据里'
@@ -943,6 +950,15 @@ const MUTANTS = [
     }`,
     replace: '    // 变异体：不再区分"上限到点"与"响应体不是 JSON"',
   },
+  {
+    name: 'C10_gatewayTimeoutLooksGeneric', target: COMPOSE, expect: 'detected',
+    why: '504/408 不再单独归 `timeout`，而是落回泛泛的 `http_error`（Task 8 复审 Item 2 点名的'
+      + '"有分支、无用例、无变异体"）：网关超时与"服务端说你请求不对"混成一档，'
+      + '界面提示从"等服务端回话等太久了"变成"反馈服务这次没能返回结果"，'
+      + '而处置方向（重试 / 看上游，不是改端侧输入）也随之丢掉',
+    find: '    const gatewayTimeout = res.status === 504 || res.status === 408;',
+    replace: '    const gatewayTimeout = false;',
+  },
   // ── 造句反馈：服务端给上游的模型契约（Task 8）：V1–V6 ──
   // 与识物那批（U1–U7）同一个理由：这一层是**会被改坏但测试全绿**的地方，
   // 而它管的是"模型被要求输出什么"与"什么才算一份能往下走的响应"。
@@ -974,16 +990,14 @@ const MUTANTS = [
     name: 'V4_seqSaysNone', target: FBUP, expect: 'detected',
     why: '把 content 判成合法 JSON 即可，不再要求它解出来是**对象**：一个 JSON 数组或字符串'
       + '（例如 `"correct"`、`[1,2]`）会被当成一份反馈往下走，而它连四个字段都没有',
-    find: `  if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) {
-    throw invalid(\`上游 content 解析出来不是对象：\${JSON.stringify(parsed)?.slice(0, 120)}\`);
-  }`,
-    replace: '  // 变异体：不要求解出来是对象',
+    find: `  if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) {`,
+    replace: '  if (false) {',
   },
   {
     name: 'V5_proseAccepted', target: FBUP, expect: 'detected',
     why: 'content 不是合法 JSON 时不再失败，而是编一个空对象当反馈：模型吐一段散文被静默降级成'
       + '"一份缺四个字段的响应"，真凶（模型契约没被遵守）在数据里消失——全局约束 3 的反面',
-    find: `    throw invalid(\`上游 content 不是合法 JSON：\${String(err?.message ?? err)}\`);`,
+    find: `    throw invalid(\`上游 content 不是合法 JSON：\${redactSecrets(err?.message ?? err)}\`);`,
     replace: '    parsed = {};',
   },
   {

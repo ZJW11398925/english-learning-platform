@@ -227,6 +227,24 @@ test('HTTP 非 2xx → 独立一档 http_error（不是"响应非法"：要改�
   }
 });
 
+test('HTTP 504 / 408 → 归 timeout 一档（网关超时不是"响应非法"，也不是泛泛的 http_error）', async () => {
+  // 复审 Item 2：这两个分支此前**一个用例都没有**——上面那组 HTTP 分档只跑
+  // 400/401/429/500/502/503，把 `gatewayTimeout` 判据整个删掉也不会红。
+  // 它们必须与"服务端回了别的非 2xx"分开的理由见 `web/units/compose.mjs` 的那段注释：
+  // 真凶是网关/上游慢，处置方向是重试与看上游，而不是"去改端侧输入或模型契约"。
+  for (const status of [504, 408]) {
+    const r = await submitSentence(
+      { sentence: 'I use a cup.', word: 'mug', scene: 'kitchen' },
+      { fetchImpl: fakeFetch({ ok: false, status, json: async () => ({ error: 'gateway_timeout' }) }) },
+    );
+    assert.equal(r.status, 'pending', `HTTP ${status} 是 pending`);
+    assert.equal(r.reason, FEEDBACK_FAIL_REASONS.TIMEOUT, `HTTP ${status} 必须归 timeout（不是 http_error）`);
+    assert.notEqual(r.reason, FEEDBACK_FAIL_REASONS.HTTP_ERROR, `HTTP ${status} 不许落回泛泛的 http_error`);
+    assert.match(r.error, new RegExp(String(status)), '诊断里仍要说清是哪个状态码');
+    assert.equal(r.sentence, 'I use a cup.', '原句照旧保留');
+  }
+});
+
 test('网络层抛错（断网）→ request_failed，带上原始错误信息', async () => {
   const r = await submitSentence(
     { sentence: 'I use a cup.', word: 'mug', scene: 'kitchen' },

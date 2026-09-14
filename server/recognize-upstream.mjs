@@ -25,6 +25,13 @@
 // 上限到点在 `fetch()` 那一句和 `res.json()` 那一句**都算"超时"**（`upstream_failed`）：
 // 后者是"响应头已经到了、body 还在流"（一次上游停滞），绝不是 `upstream_invalid`
 // ——把停滞记成"契约不对"，排查的人会去改模型契约（Task 7 复审 Important 1）。
+//
+// 还有一条日志卫生（Task 8 复审 Item 1）：非 2xx 时读进来的正文片段、以及 `JSON.parse`
+// 报错里带出的正文片段，都会经 Error.message 进服务端 stderr。上游在这些正文里**回显请求**
+// （`Authorization: Bearer …` / 密钥本身）时，密钥就会落进日志。所以**凡是从上游来的文本，
+// 进 Error.message 之前先过 `redactSecrets`**（见 `server/redact.mjs` 的"抹了什么 / 没抹什么"）。
+
+import { redactSecrets } from './redact.mjs';
 
 /** 上游返回的东西不是我们能用的形状时抛出的错误上挂的 `code`。 */
 export const UPSTREAM_INVALID = 'upstream_invalid';
@@ -173,8 +180,11 @@ export async function recognizeUpstream({
 
   if (!res.ok) {
     // 读一下 body 但**只留一小段**：诊断需要它，而整段可能很长且可能回显请求内容。
+    // **先抹再截**（Task 8 复审 Item 1，与 `feedback-upstream.mjs` 同一条）：正文可能回显请求
+    // （把 `Authorization: Bearer …` 或密钥本身抄回来），而这段文字会经 Error.message 进 stderr；
+    // 截断还会把密钥切成半截。抹掉哪些形状 / **没有**抹掉哪些：见 `server/redact.mjs` 文件头。
     let snippet = '';
-    try { snippet = String(await res.text()).slice(0, 300); } catch { /* 读不到就算了 */ }
+    try { snippet = redactSecrets(await res.text()).slice(0, 300); } catch { /* 读不到就算了 */ }
     const err = new Error(`上游返回 HTTP ${res.status}${snippet ? `：${snippet}` : ''}`);
     err.code = UPSTREAM_FAILED;
     throw err;
@@ -195,7 +205,7 @@ export async function recognizeUpstream({
       timedOut.code = UPSTREAM_FAILED;
       throw timedOut;
     }
-    const wrapped = new Error(`上游响应不是合法 JSON：${String(err?.message ?? err)}`);
+    const wrapped = new Error(`上游响应不是合法 JSON：${redactSecrets(err?.message ?? err)}`);
     wrapped.code = UPSTREAM_INVALID;
     throw wrapped;
   }
@@ -213,7 +223,9 @@ export async function recognizeUpstream({
   } catch (err) {
     // `response_format: json_object` 只是兜底，不是保证：真出现非 JSON 内容时**如实失败**，
     // 绝不"从文本里抠一个词"当成功（那是猜测，不是识别）。
-    const wrapped = new Error(`上游 content 不是合法 JSON：${String(err?.message ?? err)}`);
+    // 本模块的统一纪律：**凡是从上游来的文本，进 Error.message 之前先过 `redactSecrets`**
+    // （这条带的是模型输出，不是 HTTP 正文；统一过一遍是为了让这条纪律没有例外要记）。
+    const wrapped = new Error(`上游 content 不是合法 JSON：${redactSecrets(err?.message ?? err)}`);
     wrapped.code = UPSTREAM_INVALID;
     throw wrapped;
   }

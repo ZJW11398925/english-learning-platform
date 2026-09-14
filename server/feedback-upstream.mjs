@@ -33,6 +33,8 @@
 // 后者是"响应头已经到了、body 还在流"（一次上游停滞），绝不是 `upstream_invalid`
 // ——把停滞记成"契约不对"，排查的人会去改提示词与模型（Task 7 复审 Important 1 的同一课）。
 
+import { redactSecrets } from './redact.mjs';
+
 /** 上游返回的东西不是我们能用的**信封**时抛出的错误上挂的 `code`。 */
 export const UPSTREAM_INVALID = 'upstream_invalid';
 /** 上游调用本身失败（网络错、非 2xx、**超时**）时挂的 `code`——与"信封不对"分开报。 */
@@ -208,8 +210,12 @@ export async function feedbackUpstream({
 
   if (!res.ok) {
     // 读一下 body 但**只留一小段**：诊断需要它，而整段可能很长且可能回显请求内容。
+    // **先抹再截**（Task 8 复审 Item 1）：正文可能回显请求（把 `Authorization: Bearer …`
+    // 或密钥本身抄回来），而这段文字会经 Error.message 进服务端 stderr。截断还会把一个密钥
+    // 切成半截（`sk-` 前缀还在、尾部没了）——半截同样是密钥，所以抹在前、截在后。
+    // 抹掉哪些形状、**没有**抹掉哪些：见 `server/redact.mjs` 的文件头（那里是穷举，别当成保证）。
     let snippet = '';
-    try { snippet = String(await res.text()).slice(0, 300); } catch { /* 读不到就算了 */ }
+    try { snippet = redactSecrets(await res.text()).slice(0, 300); } catch { /* 读不到就算了 */ }
     throw failed(`上游返回 HTTP ${res.status}${snippet ? `：${snippet}` : ''}`);
   }
 
@@ -223,7 +229,10 @@ export async function feedbackUpstream({
     if (isTimeoutAbort(err, signal)) {
       throw failed(`上游请求超时（${timeoutMs}ms 未返回，已主动中止）：${String(err?.message ?? err)}`);
     }
-    throw invalid(`上游响应不是合法 JSON：${String(err?.message ?? err)}`);
+    // 这条消息里的 `err.message` 来自 `JSON.parse`，Node 会把它解析失败的**前 ~10 个字符**
+    // 原样带出来（实测 `Unexpected token 's', "sk-abcdefg"... is not valid JSON`）——
+    // 上游 200 回一份"以密钥开头"的非 JSON 正文时，那 10 个字符就是半截密钥。同样先抹。
+    throw invalid(`上游响应不是合法 JSON：${redactSecrets(err?.message ?? err)}`);
   }
 
   const content = payload?.choices?.[0]?.message?.content;
@@ -237,11 +246,15 @@ export async function feedbackUpstream({
   } catch (err) {
     // `response_format: json_object` 只是兜底，不是保证：真出现非 JSON 内容时**如实失败**，
     // 绝不"从散文里抠出四个字段"当成功（那是猜测，不是判定）。
-    throw invalid(`上游 content 不是合法 JSON：${String(err?.message ?? err)}`);
+    throw invalid(`上游 content 不是合法 JSON：${redactSecrets(err?.message ?? err)}`);
   }
 
   if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) {
-    throw invalid(`上游 content 解析出来不是对象：${JSON.stringify(parsed)?.slice(0, 120)}`);
+    // 本模块的统一纪律：**凡是从上游来的文本，进 Error.message 之前先过 `redactSecrets`**
+    // （这条与上面那条 content 消息带的是**模型输出**、不是 HTTP 正文；统一过一遍是为了让这条
+    // 纪律没有例外要记——而不是因为这里真出现过密钥）。`fetch` 自己的网络错误不在其列：
+    // 那是本地传输错误，密钥只在请求头里，不会出现在它的消息里。
+    throw invalid(`上游 content 解析出来不是对象：${redactSecrets(JSON.stringify(parsed)?.slice(0, 120))}`);
   }
 
   return {

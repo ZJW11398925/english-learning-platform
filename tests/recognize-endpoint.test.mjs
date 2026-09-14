@@ -183,6 +183,44 @@ test('上游 200 但不是 JSON → 502 upstream_invalid', async () => {
   assert.equal(body.error, 'upstream_invalid');
 });
 
+test('识物失败路径的日志：上游正文里的密钥形状同样先抹再记（Task 8 复审 Item 1 的同形状）', async () => {
+  // 识物这条腿与造句那条腿在同一个位置读上游正文片段（`server/recognize-upstream.mjs` 的
+  // 非 2xx 分支），路由层的失败日志也照样把 message 写进 stderr。所以同一条纪律在这里也钉一遍：
+  // 正文片段留着（诊断要的），密钥形状抹掉。
+  const KEY = ENV.DEEPSEEK_API_KEY;
+  const collected = [];
+  const logApp = createApp({
+    env: { ...ENV, DEEPSEEK_API_BASE: `http://127.0.0.1:${upstream.server.address().port}` },
+    fetchImpl: fetch,
+    logImpl: (line) => collected.push(line),
+  });
+  await new Promise((resolve) => logApp.listen(0, '127.0.0.1', resolve));
+  try {
+    upstream.setReply({
+      status: 401,
+      raw: JSON.stringify({
+        error: { message: `Incorrect API key provided: ${KEY}`, type: 'invalid_request_error' },
+        authorization: `Bearer ${KEY}`,
+        request_id: 'req_9f2c1a',
+      }),
+    });
+    const res = await postFrame({ url: `http://127.0.0.1:${logApp.address().port}/api/recognize` });
+    assert.equal(res.status, 502, '上游 401 仍然如实报成失败');
+    assert.equal((await res.json()).error, 'upstream_failed');
+
+    const joined = collected.join('\n');
+    assert.ok(!joined.includes(KEY), '失败路径的日志里同样不许出现密钥');
+    assert.doesNotMatch(joined, /sk-[A-Za-z0-9_-]{3,}/, 'sk- 形状的串一个都不许留（含被截断的半截）');
+    assert.doesNotMatch(joined, /Bearer\s+sk/i, 'Authorization 头的写法同样不许漏下去');
+    assert.match(joined, /recognize 失败（upstream_failed/, '仍然要看得出"上游失败了"');
+    assert.match(joined, /HTTP 401/, '状态码要留着');
+    assert.match(joined, /invalid_request_error/, '上游正文的其余部分照旧可见：抹密钥 ≠ 删正文');
+  } finally {
+    logApp.closeAllConnections();
+    await new Promise((resolve) => logApp.close(resolve));
+  }
+});
+
 test('上游 200 但 candidates 不是数组 → 502 upstream_invalid（brief Step 5 的第①件事）', async () => {
   upstream.setReply({ status: 200, body: { choices: [{ message: { content: '{"candidates":"nope"}' } }] } });
   const res = await postFrame();

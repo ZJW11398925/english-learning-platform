@@ -374,7 +374,9 @@ export async function mount(root, deps = {}) {
         view.push(hint(`你写的是：${r.sentence}`));
         if (r.status === 'ok' && r.uncertain === true) {
           view.push(title('这句我拿不准'));
-          view.push(hint('模型没法确定它对不对——**这不是判定**，我们不会把它算成"通过"。'));
+          // 文案里**不写 markdown 的强调符**（Task 8 复审 Item 3）：`hint()` 走 `textContent`，
+          // 写进去的 `**` 会一字不差地显示给学习者。强调靠标题与分句，不靠星号。
+          view.push(hint('模型没法确定它对不对——这不是判定，我们不会把它算成"通过"。'));
           if (r.feedback.rewrite !== null && r.feedback.rewrite !== undefined) {
             view.push(hint(`可以参考这样写：${r.feedback.rewrite}`));
           }
@@ -389,8 +391,10 @@ export async function mount(root, deps = {}) {
           view.push(hint(r.feedback.note));
         } else {
           view.push(title('这次没拿到反馈'));
+          // 同上：`hint()` 是 `textContent`，`**` 会原样显示给学习者（这句正是真机清单第 35 项
+          // 要人读的那一屏）。
           view.push(hint(`${PENDING_HINT[r.reason] ?? '反馈服务这次没能返回结果'}——`
-            + '**你的句子没有丢**，它还在这儿，可以再交一次。'));
+            + '你的句子没有丢，它还在这儿，可以再交一次。'));
         }
         action('再写一次', () => machine.send('rewrite'));
         action('下一个词', () => machine.send('next'));

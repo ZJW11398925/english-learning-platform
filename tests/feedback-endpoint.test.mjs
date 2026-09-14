@@ -18,6 +18,7 @@ import assert from 'node:assert/strict';
 import { createServer } from 'node:http';
 
 import { createApp } from '../server/index.mjs';
+import { redactSecrets } from '../server/redact.mjs';
 import { feedbackUpstream, FEEDBACK_PROMPT, UPSTREAM_TIMEOUT_MS } from '../server/feedback-upstream.mjs';
 import { submitSentence, FEEDBACK_FAIL_REASONS, FEEDBACK_REQUEST_TIMEOUT_MS } from '../web/units/compose.mjs';
 import { validateFeedback } from '../web/units/feedback.mjs';
@@ -157,6 +158,82 @@ test('密钥绝不出现在给客户端的响应里（成功与失败两条路�
   const failText = await (await postFeedback(SAID)).text();
   assert.ok(!failText.includes(ENV.DEEPSEEK_API_KEY), '失败响应里同样不许回显密钥');
   assert.ok(!failText.includes('bad key'), '上游原文不进响应（只进服务端日志）');
+});
+
+// ─────────────────── 失败路径的日志卫生：上游正文里的密钥形状必须先抹掉 ───────────────────
+// 上面那条"日志里绝不出现密钥"跑的是**成功**路径，所以它对失败路径其实没有证据——
+// 而上游 401/500 恰恰是最可能把请求回显进正文的地方（正文里带上 `Authorization` 头或密钥本身）。
+// 这两条钉的是：正文片段照旧进日志（诊断要的），但密钥形状在进去之前就被抹掉。
+
+test('失败路径的日志：上游正文里的密钥形状被抹掉，"上游出了什么事"仍然看得见', async () => {
+  const KEY = ENV.DEEPSEEK_API_KEY;
+  // 上游把请求回显进 401 正文：密钥本身、`Authorization: Bearer …` 两种写法都在里面。
+  upstream.setReply({
+    status: 401,
+    raw: JSON.stringify({
+      error: { message: `Incorrect API key provided: ${KEY}`, type: 'invalid_request_error' },
+      authorization: `Bearer ${KEY}`,
+      request_id: 'req_9f2c1a',
+    }),
+  });
+  logs.length = 0;
+  const res = await postFeedback(SAID);
+  assert.equal(res.status, 502, '上游 401 仍然如实报成失败');
+  assert.equal((await res.json()).error, 'upstream_failed');
+
+  const joined = logs.join('\n');
+  assert.ok(!joined.includes(KEY), '失败路径的日志里同样不许出现密钥');
+  assert.doesNotMatch(joined, /sk-[A-Za-z0-9_-]{3,}/, 'sk- 形状的串一个都不许留（含被截断的半截）');
+  assert.doesNotMatch(joined, /Bearer\s+sk/i, 'Authorization 头的写法同样不许漏下去');
+  // ——以下三条是"不许把诊断一起删掉"的反向保证——
+  assert.match(joined, /feedback 失败（upstream_failed/, '仍然要看得出"上游失败了"');
+  assert.match(joined, /HTTP 401/, '状态码要留着');
+  assert.match(joined, /invalid_request_error/, '上游正文的其余部分照旧可见：抹密钥 ≠ 删正文');
+});
+
+test('上游 200 但正文不是 JSON 时，那条解析报错里的正文片段同样先抹再记', async () => {
+  // Node 的 `JSON.parse` 报错消息会带上输入的前 ~10 个字符（本机实测：
+  // `Unexpected token 's', "sk-abcdefg"... is not valid JSON`）。上游把请求回显在一份
+  // 200 的非 JSON 正文里时，那 10 个字符足以把密钥的头一截写进日志——所以这条消息也抹。
+  const KEY = ENV.DEEPSEEK_API_KEY;
+  upstream.setReply({ status: 200, raw: `${KEY} oops, not json` });
+  logs.length = 0;
+  const res = await postFeedback(SAID);
+  assert.equal(res.status, 502, '200 带着一份不能用的正文，照样是失败');
+  assert.equal((await res.json()).error, 'upstream_invalid');
+
+  const joined = logs.join('\n');
+  assert.doesNotMatch(joined, /sk-[A-Za-z0-9_-]{3,}/, '解析报错里的正文片段也要先抹：半截密钥同样是密钥');
+  assert.match(joined, /不是合法 JSON/, '仍然要看得出"上游回的不是 JSON"（这一档的处置方向是改契约）');
+});
+
+test('redactSecrets 抹什么、不抹什么（把 `server/redact.mjs` 文件头那句自述钉住）', () => {
+  // 上面两条是端到端的；这一条直接钉抹除规则本身——**包括"不抹什么"**，
+  // 免得将来有人把过滤写宽（把整段正文吃掉）而没人发现。
+  const cases = [
+    // ① 密钥字段名 + 值（引号一起吃掉，JSON 结构还在）
+    ['authorization: Bearer sk-abc123def456', /sk-abc123def456/, 'authorization: [已抹去]'],
+    ['{"api_key":"plainvalue123456"}', /plainvalue123456/, '"api_key":[已抹去]'],
+    ['x-api-key=plainvalue123456', /plainvalue123456/, 'x-api-key=[已抹去]'],
+    ['{"access_token": "plainvalue123456", "expires_in": 3600}', /plainvalue123456/, '"access_token": [已抹去]'],
+    // ② 裸的 `Bearer <token>`（没有字段名，例如正文里单独一行）
+    ['Bearer eyJhbGciOiJIUzI1NiJ9.payload.sig', /eyJhbGciOiJIUzI1NiJ9/, 'Bearer [已抹去]'],
+    // ③ `sk-…` 形状（DeepSeek 密钥前缀）出现在正文任何位置都抹
+    ['{"error":"Incorrect API key provided: sk-9f2c1a7b8d3e4f5061728394a5b6c7d8","type":"x"}',
+      /sk-9f2c1a7b8d3e4f5061728394a5b6c7d8/, 'sk-[已抹去]'],
+  ];
+  for (const [input, secret, expected] of cases) {
+    const out = redactSecrets(input);
+    assert.doesNotMatch(out, secret, `这个形状必须被抹掉：${input}`);
+    assert.ok(out.includes(expected), `抹出来的样子要能读（期望含 ${expected}）：实际 ${out}`);
+  }
+
+  // **不抹什么**（反向保证：过滤别写宽、别把诊断吃掉）
+  const keep = '{"error":{"message":"rate limit exceeded","type":"rate_limit_error"},"request_id":"req_9f2c1a"}';
+  assert.equal(redactSecrets(keep), keep, '非密钥内容一字不动——诊断要的正是这些');
+  assert.equal(redactSecrets('null'), 'null');
+  assert.equal(redactSecrets(undefined), '', '拿不到文本时给空串，不抛错（它用在错误消息拼接处）');
+  assert.equal(redactSecrets('I use a cup.'), 'I use a cup.', '学习者的原句不在本模块的职责里（它本来就进日志）');
 });
 
 // ───────────────────────── 信封校验：垃圾绝不长得像成功 ─────────────────────────
