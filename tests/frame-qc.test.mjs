@@ -103,10 +103,8 @@ test('拉普拉斯方差与独立 oracle（E[L²] − E[L]²）逐值一致，�
     `laplacianVar 应等于 E[L²]−E[L]² = ${expectedVar}，实际 ${laplacianVar}`);
 });
 
-// 以下为 review 轮补充（finding 2）：computeStats 遇到退化输入必须抛 RangeError，
-// 而不是算出 NaN。NaN 会让 judgeFrame 的两次 `<` 比较都为 false，于是一张完全
-// 不可用的帧被报成 { ok: true }——正是共享上下文 Global Constraint 3
-// （"失败不得静默降级为成功"）禁止的那类静默失真。
+// 以下为 review 轮补充（finding 2）：computeStats 遇到退化输入必须抛 RangeError。
+// 为什么不能外流 NaN，见 web/units/frame-qc.mjs 的 judgeFrame JSDoc（唯一权威说明处）。
 test('pixels 短于 width*height 时抛出 RangeError', () => {
   assert.throws(() => computeStats(new Uint8Array(15), 4, 4), RangeError);
 });
@@ -128,12 +126,8 @@ test('合法输入不得抛错，且返回值形状不变', () => {
   assert.equal(Number.isNaN(stats.laplacianVar), false);
 });
 
-// 以下为修复轮 2 补充（finding：judgeFrame 对非有限输入静默放行）：
-// `judgeFrame({ brightness: NaN, laplacianVar: 500 })` 曾返回 `{ ok: true, reason: 'ok' }`——
-// 因为 `NaN < DARK_THRESHOLD` 与 `NaN < BLUR_THRESHOLD` 都是 false。于是一张完全不可用的
-// 帧被判为可用，下游走 recognize_ok 路径，frame_rejected 计数（retry_rate 判据所依赖的信号）
-// 永不触发，属共享上下文 Global Constraint 3 禁止的静默降级。
-// 本轮与 computeStats 采用同一策略：契约被违反就抛 RangeError，而不是返回一个看起来合理的判定。
+// 以下为修复轮 2 补充：judgeFrame 对非有限输入抛 RangeError（与 computeStats 同一策略）。
+// 历史与理由见 web/units/frame-qc.mjs 的 judgeFrame JSDoc（唯一权威说明处），此处不再复述。
 //
 // 小工具：捕获同步抛出的错误；若函数根本没抛错，立即断言失败（否则测试会因
 // “没有错误对象可查”而以更难读的方式崩掉）。
@@ -185,4 +179,87 @@ test('合法调用判定不变：{ brightness: 128, laplacianVar: 200 } 仍为 {
   // 阈值边界语义不变：恰好等于阈值的帧仍然可用（新守卫只拒绝非有限数，不动 "<" 的取等）
   assert.deepEqual(judgeFrame({ brightness: DARK_THRESHOLD, laplacianVar: BLUR_THRESHOLD }),
     { ok: true, reason: 'ok' });
+});
+
+// ————————————————————————————————————————————————————————————————
+// 以下为修复轮 3 补充（review finding 1）：computeStats 的入参是**灰度**缓冲
+// （每像素 1 字节，长度**恰好** width*height），RGBA 缓冲必须由调用方先转灰度。
+// 旧实现只查 `pixels.length >= width*height`，于是一个与 ctx.getImageData().data
+// 同形的 RGBA 缓冲会被静默当成灰度：只读前 width*height 个字节（每 4 字节取 1 个，
+// 而且取到的是 G、A 通道），全黑帧因此算出偏高的亮度被判可用。长度不符必须抛错，
+// 不做任何静默重解释——理由见模块内 judgeFrame 的 JSDoc（Global Constraint 3）。
+// ————————————————————————————————————————————————————————————————
+
+// 与 ctx.getImageData(...).data 同形：每像素 4 字节 RGBA。
+// "全黑"= RGB 通道为 0；不透明 = A 通道为 255，故每 4 字节为 [0, 0, 0, 255]。
+function blackOpaqueRgba(width, height) {
+  const px = new Uint8Array(width * height * 4);
+  for (let i = 3; i < px.length; i += 4) px[i] = 255;
+  return px;
+}
+
+test('RGBA 形状的黑帧缓冲被拒：computeStats 抛 RangeError，绝不按灰度静默重解释', () => {
+  const rgba = blackOpaqueRgba(8, 8);
+  assert.equal(rgba.length, 8 * 8 * 4, '前置条件：RGBA 缓冲长度应为 width*height*4');
+  // 旧实现（`>=`）对这个缓冲返回 { brightness: 63.75, laplacianVar: 74056.25 }，
+  // judgeFrame 据此判 { ok: true, reason: 'ok' }——暗帧被放行，白花一次识物调用。
+  assert.throws(() => computeStats(rgba, 8, 8), RangeError);
+});
+
+test('同一张全黑图的正确灰度缓冲不抛错，且被判 too_dark（与 RGBA 结果对照）', () => {
+  const gray = new Uint8Array(8 * 8).fill(0);
+  const stats = computeStats(gray, 8, 8);           // 长度恰好 width*height：不得抛错
+  assert.deepEqual(judgeFrame(stats), { ok: false, reason: 'too_dark' });
+});
+
+test('长度不符的错误消息同时点出期望长度、实际长度与灰度契约', () => {
+  const err = thrownBy(() => computeStats(new Uint8Array(15), 4, 4));
+  assert.ok(err instanceof RangeError, `应为 RangeError，实际 ${err.name}: ${err.message}`);
+  assert.match(err.message, /16/);                  // 期望长度 width*height
+  assert.match(err.message, /15/);                  // 实际长度
+  assert.match(err.message, /灰度/);                // 说明这是灰度契约，不是随便一个缓冲
+  assert.match(err.message, /RGBA/);                // 点名最常见的违反方式：getImageData().data
+});
+
+// ————————————————————————————————————————————————————————————————
+// 以下为修复轮 3 补充（review finding 2）：把两条此前无测试覆盖的校验分支钉住
+// （整数校验与 null/undefined 分支——删掉任一条，此前 18 条测试全绿）。
+// 每条只做一个断言，保持聚焦。
+// ————————————————————————————————————————————————————————————————
+
+test('width 为小数（4.5）时抛 RangeError', () => {
+  // 缓冲长度取 18 = 4.5 × 4，恰好通过长度校验，只有"必须是整数"这一条能拦住它。
+  assert.throws(() => computeStats(new Uint8Array(18), 4.5, 4), RangeError);
+});
+
+test('width 为 NaN 时抛 RangeError', () => {
+  // 注：NaN 尺寸同时也会被长度校验拦下，故本条覆盖该分支但无法单独隔离它。
+  assert.throws(() => computeStats(new Uint8Array(16), NaN, 4), RangeError);
+});
+
+test('width/height 为负数（-4）时抛 RangeError', () => {
+  // 取 (-4, -4)：n = (-4) × (-4) = 16，长度校验恰好放行，
+  // 只有"必须为正整数"这一条能拦住它（若写成 (-4, 4)，n = -16，会被长度校验顺带拦下，钉不住这条分支）。
+  assert.throws(() => computeStats(new Uint8Array(16), -4, -4), RangeError);
+});
+
+test('pixels 为 null 时抛 RangeError', () => {
+  assert.throws(() => computeStats(null, 4, 4), RangeError);
+});
+
+// ————————————————————————————————————————————————————————————————
+// 以下为修复轮 3 补充（review finding 3）：错误消息本身也要准。
+// ————————————————————————————————————————————————————————————————
+
+test('pixels 为 null 的错误消息点名 null，不再谎称"长度不足"', () => {
+  const err = thrownBy(() => computeStats(null, 4, 4));
+  assert.ok(err instanceof RangeError, `应为 RangeError，实际 ${err.name}: ${err.message}`);
+  assert.match(err.message, /null/);
+  assert.doesNotMatch(err.message, /长度不足/);      // null 没有"长度"可言，消息须分支出准确说法
+});
+
+test('宽度为 Symbol 时抛 RangeError（而非插值出 TypeError）', () => {
+  // 消息里 width/height 一律经 String(...) 插值：直接 `${width}` 遇 Symbol 会抛 TypeError，
+  // 把"契约被违反"报成了另一种错误类型，调用方按 RangeError 捕获就会漏。
+  assert.throws(() => computeStats(new Uint8Array(16), Symbol('w'), 4), RangeError);
 });
