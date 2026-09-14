@@ -17,13 +17,29 @@ export function createStore({ localStorage, indexedDB }) {
     // 否则一次瞬时失败（或一次被别的标签页阻塞的开库）会让本页所有图片操作在页面生命周期内全废。
     if (dbPromise === null) {
       dbPromise = new Promise((resolve, reject) => {
+        // onblocked / onerror 会让 promise 提前 settle，但请求本身仍然活着：
+        // 真 IDB 在阻塞解除后还会派发一次 onsuccess。若那时再 resolve，就会留下一个
+        // 没有任何人 close 的活连接（连接一直不关，后续标签页的版本升级还会被它挡住）。
+        let settled = false;
+        const settle = (fn, value) => {
+          if (settled) return;
+          settled = true;
+          fn(value);
+        };
         const req = indexedDB.open(DB_NAME, 1);
         req.onupgradeneeded = () => req.result.createObjectStore(STORE_NAME);
-        req.onsuccess = () => resolve(req.result);
-        req.onerror = () => reject(req.error ?? new Error(`IndexedDB 打开失败: ${DB_NAME}`));
+        req.onsuccess = () => {
+          if (settled) {
+            // 迟到的成功：promise 已拒绝，没人会再拿这个连接，就地关掉
+            req.result.close();
+            return;
+          }
+          settle(resolve, req.result);
+        };
+        req.onerror = () => settle(reject, req.error ?? new Error(`IndexedDB 打开失败: ${DB_NAME}`));
         // 版本升级被其他标签页的旧连接挡住时，open 既不 success 也不 error：
         // 不处理就会让所有图片操作永久 pending（挂起而不是失败）。这里显式转为拒绝。
-        req.onblocked = () => reject(new Error(
+        req.onblocked = () => settle(reject, new Error(
           `IndexedDB 打开被阻塞（${DB_NAME} v1）：请关闭本站点的其他标签页后重试`,
         ));
       });
@@ -47,11 +63,15 @@ export function createStore({ localStorage, indexedDB }) {
    * - `w.id` 必填，作为归并键
    * - `w.createdAt` 可选；缺省时补 `Date.now()`，它是 `pruneImages` 的淘汰排序依据，
    *   缺失会让排序比较器拿到 NaN（顺序实现相关，可能淘汰掉最新的图）
+   * - **已存在的记录按 id 覆盖时，其 `createdAt` 一律保留**（`w.createdAt` > 已有记录的
+   *   `createdAt` > `Date.now()`）：复现流程（设计文档 §4.5）只更新 `stage`/`dueAt` 且不带
+   *   `createdAt`，若在这里重新盖时间戳，该词会被当成"最新"，`pruneImages` 就会淘汰掉
+   *   真正更老的词的图——写错图片比写错词更贵
    * - 词记录不被任何图片淘汰逻辑删除（「词与事件记录永久保留」）
    */
   const putWord = (w) => {
     const all = readJson(WORDS_KEY, {});
-    all[w.id] = { ...w, createdAt: w.createdAt ?? Date.now() };
+    all[w.id] = { ...w, createdAt: w.createdAt ?? all[w.id]?.createdAt ?? Date.now() };
     writeJson(WORDS_KEY, all);
   };
 
