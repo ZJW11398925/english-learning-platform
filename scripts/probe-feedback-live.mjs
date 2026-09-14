@@ -59,6 +59,14 @@ const CASES = [
     expectation: 'verdict=flawed / error_type=collocation（搭配不地道）',
     input: { sentence: 'I very like my mug.', word: 'mug', scene: 'kitchen' },
   },
+  {
+    // 这一条是**冲 `uncertain` 去的**：真实调用里从没出现过这一档，而它是设计文档 §4.2 的
+    // 核心让步（"拿不准"是合法答案）。用一句明显别扭、但语法上说不清对错的句子去逼它。
+    // 逼不出来也照实记——那是一条真实的观测，不是探针的失败。
+    label: 'borderline-uncertain',
+    expectation: 'verdict=uncertain（逼不出来就如实记：模型给了别的判定）',
+    input: { sentence: 'The mug it is on desk maybe.', word: 'mug', scene: 'desk' },
+  },
 ];
 
 // ── 前置检查（缺什么就说什么，绝不假装跑过）──────────────────────────────────
@@ -217,5 +225,6 @@ function matchesExpectation(label, feedback) {
   if (label === 'clearly-correct') return feedback.verdict === 'correct' && feedback.error_type === 'none';
   if (label === 'wrong-word') return feedback.verdict === 'flawed' && feedback.error_type === 'word_choice';
   if (label === 'bad-collocation') return feedback.verdict === 'flawed' && feedback.error_type === 'collocation';
+  if (label === 'borderline-uncertain') return feedback.verdict === 'uncertain';
   return false;
 }
