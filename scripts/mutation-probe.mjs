@@ -2,20 +2,20 @@
  * 变异探针（可重复运行的证据生成器，零依赖、非测试文件）。
  *
  * 用途：把 review 轮（`rv3-probe.mjs`）枚举的 18 个变异体 + Task 4 的 12 个变异体 + Task 5 修复轮
- * 的 3 个环境校验变异体固化成仓库内可复跑的证据——逐个"把实现改坏"，跑
- * `tests/scheduler.test.mjs` + `tests/pick-word.test.mjs` + `tests/feedback.test.mjs` +
- * `tests/env.test.mjs`，报告每个变异体是被测试抓到（DETECTED）还是溜过去了（MISSED），
- * 只要有该抓没抓到的就以非零码退出。
+ * 的 3 个环境校验变异体 + Task 6 的 26 个（状态机 13 + 相机/灰度 13）固化成仓库内可复跑的证据
+ * ——逐个"把实现改坏"，跑 `tests/` 下被登记的那 7 个测试文件，报告每个变异体是被测试抓到
+ * （DETECTED）还是溜过去了（MISSED），只要有该抓没抓到的就以非零码退出。
  *
  * 用法（在仓库根）：
- *   node scripts/mutation-probe.mjs            # 全部 33 个变异体
+ *   node scripts/mutation-probe.mjs            # 全部 59 个变异体
  *   node scripts/mutation-probe.mjs --only=M2  # 只跑 M2（`--only=F` = 整个 F 系列；规则见下）
  *   KEEP_TMP=1 node scripts/mutation-probe.mjs # 保留临时工作树以便排查
  *
  * `--only` 的匹配规则（大小写敏感；按变异体 **ID** 匹配，ID = 名字里第一个 `_` 之前那段，如
  * `F12_messageDropsValue` → `F12`）：
  *   1. 先按 ID **全串相等**——`--only=M1` 只跑 M1（不再连带 M10–M14），`--only=F12` 只跑 F12；
- *   2. 没有精确命中时退化为**族匹配**（ID 以该串开头）——`--only=F` 跑 F1…F12，`--only=Q` 跑 Q1…Q4；
+ *   2. 没有精确命中时退化为**族匹配**（ID 以该串开头）——`--only=F` 跑 F1…F12，`--only=Q` 跑 Q1…Q4，
+ *      `--only=S` 跑 Task 6 的状态机 13 条，`--only=C` 跑相机/灰度 13 条；
  *   3. 两者皆空即当场 FAIL（并列出全部可用 ID），绝不"跑 0 个然后 PASS"。
  * 这修掉了原先的子串匹配：那时 `--only=F` 会把 `M9_terminalNoFlag`、`Q2_topScoreFirst`、
  * `Q4_hypernymFallback` 一起选中（14 个而不是 11 个），选中的集合与"只看 F 系列"的意图不符。
@@ -39,7 +39,8 @@
  *
  * 结论：见文末运行输出的汇总行（Task 3：17/17 可抓变异体 DETECTED + M2 证为等价变异体；
  * Task 4：12/12 可抓变异体 DETECTED，见 `task-4-report.md`；
- * Task 5 修复轮：N1–N3 → 3/3 DETECTED，见 `task-5-report.md` 修复轮一节）。
+ * Task 5 修复轮：N1–N3 → 3/3 DETECTED，见 `task-5-report.md` 修复轮一节；
+ * Task 6：S1–S13 与 C1–C13 → 26/26 DETECTED，见 `task-6-report.md`）。
  */
 import { spawn } from 'node:child_process';
 import { createHash } from 'node:crypto';
@@ -49,18 +50,38 @@ import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 
 const REPO = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
+/**
+ * 被变异 / 被复制进临时树的模块。
+ *
+ * Task 6 起这张表里**不全是变异目标**：`state-machine` 与 `camera` 有对应变异体；
+ * `app` / `frame-qc` / `event-log` 没有变异体，它们进表只是为了让临时树里"测试 import 得到"——
+ * `tests/state-machine.test.mjs` import `web/app.mjs`，app 又（按需）动态 import
+ * `units/frame-qc.mjs`、`units/event-log.mjs`；少复制一个，临时树里的测试就会因缺文件而失败，
+ * 那会把"基线假红"和"变异被抓到"混成一谈（本探针最忌讳的假信号）。
+ * 顺带好处：它们也进了"仓库源码全程未被改动"的哈希核对名单。
+ */
 const MODULE_FILES = {
   scheduler: 'web/units/scheduler.mjs',
   'pick-word': 'web/units/pick-word.mjs',
   feedback: 'web/units/feedback.mjs',
   env: 'server/env.mjs',
+  'state-machine': 'web/units/state-machine.mjs',
+  camera: 'web/units/camera.mjs',
+  'frame-qc': 'web/units/frame-qc.mjs',
+  'event-log': 'web/units/event-log.mjs',
+  app: 'web/app.mjs',
 };
 const TEST_FILES = [
   'tests/scheduler.test.mjs',
   'tests/pick-word.test.mjs',
   'tests/feedback.test.mjs',
   'tests/env.test.mjs',
+  'tests/state-machine.test.mjs',
+  'tests/camera.test.mjs',
+  'tests/app-mount.test.mjs',
 ];
+// `tests/index-html.test.mjs` **有意不进这张表**：它读 `web/index.html` 这个真实文件，
+// 而临时树只复制模块与测试，进来会因缺文件而假红。它由 `node --test` 全量套件守着。
 const TEST_ARGS = ['--test', ...TEST_FILES];
 const only = (process.argv.find((a) => a.startsWith('--only=')) ?? '').slice('--only='.length);
 
@@ -83,6 +104,8 @@ const SCHED = MODULE_FILES.scheduler;
 const PICK = MODULE_FILES['pick-word'];
 const FEEDBACK = MODULE_FILES.feedback;
 const ENV = MODULE_FILES.env;
+const SM = MODULE_FILES['state-machine'];
+const CAM = MODULE_FILES.camera;
 
 const PICK_ORIGINAL = `export function pickWord({ candidates, acceptableSets, exclude = [] }) {
   const accepted = new Set();
@@ -366,6 +389,222 @@ const MUTANTS = [
       + \`启动方式: \${START_COMMAND}（.env 由 Node 运行时加载，不是由本程序解析）\`,`,
     replace: `      \`缺少必需的环境变量: \${missing.join(', ')}\`,`,
   },
+  // ── 状态机（Task 6）：S1–S13 ──
+  // 这批全部围绕同一个产品约束：**造句（composing）不可跳过**，以及"敷衍样本可筛"
+  // 所依赖的两个记录量（停留时长、改写次数）。改坏任何一条，采集到的就不是
+  // "愿不愿意产出"，而是"用户在哪儿退出"。
+  {
+    name: 'S1_unfrozenTable', target: SM, expect: 'detected',
+    why: '转移表不冻结（只冻内层）："能不能跳过造句"这条产品约束退化成可运行时改写的普通对象，'
+      + '任何一处 import 都能改它，而且改完不报错',
+    find: 'export const TRANSITIONS = Object.freeze({',
+    replace: 'export const TRANSITIONS = ({',
+  },
+  {
+    name: 'S2_wordReadySkipsReading', target: SM, expect: 'detected',
+    why: 'word 态按"我会读了"直接落到 composing：跟读这一步被整段跳过，'
+      + '而 skipped_reading 还记成 false（数据上看不出用户没读）',
+    find: "  word: Object.freeze({ wordReady: 'reading' }),",
+    replace: "  word: Object.freeze({ wordReady: 'composing' }),",
+  },
+  {
+    name: 'S3_finishFromComposing', target: SM, expect: 'detected',
+    why: '给 composing 多开一个出口 finish：用户可以不造句就走人——正是设计文档 §3.2 '
+      + '明确不许发生的那件事（拿到的会是退出点分布，不是"愿不愿意"）',
+    find: "  composing: Object.freeze({ submit: 'feedback' }),",
+    replace: "  composing: Object.freeze({ submit: 'feedback', finish: 'done' }),",
+  },
+  {
+    name: 'S4_frameBadStaysCapturing', target: SM, expect: 'detected',
+    why: '被拒的帧不退回 ready：用户卡在拍摄态，没有任何按钮能出去（只能刷新页面）',
+    find: "  capturing: Object.freeze({ frameOk: 'word', frameBad: 'ready' }),",
+    replace: "  capturing: Object.freeze({ frameOk: 'word', frameBad: 'capturing' }),",
+  },
+  {
+    name: 'S5_dropFrameRejectionCounter', target: SM, expect: 'detected',
+    why: '被拒的帧不计数：frame_rejected 永不落，下游 retry_rate（判据 B）整个失真——'
+      + '正是全局约束 3 禁止的"失败静默"',
+    find: '        ctx.frameRejections += 1;',
+    replace: '        // 变异体：不计数',
+  },
+  {
+    name: 'S6_dropSkippedReadingFlag', target: SM, expect: 'detected',
+    why: '跳过跟读不置 skipped_reading：跳过与没跳过在数据里长得一样，'
+      + '而"跟读被大量跳过"是要单独看见的信号',
+    find: "      if (action === 'skipReading') ctx.skippedReading = true;",
+    replace: '      // 变异体：不记 skipped_reading',
+  },
+  {
+    name: 'S7_dropRewriteIncrement', target: SM, expect: 'detected',
+    why: '提交造句不累加次数：改写过一版与一次成型分不出来，'
+      + '§3.2 的"时长过短 + 未改写 → 敷衍样本"就筛不出来了',
+    find: '      if (action === \'submit\') ctx.rewriteCount += 1;',
+    replace: '      // 变异体：不累加改写次数',
+  },
+  {
+    name: 'S8_illegalActionReturnsTrue', target: SM, expect: 'detected',
+    why: '非法动作不再返回 false（而是"照原状态走一遍流程并返回 true"）：调用方以为点击被接受了，'
+      + '状态机却纹丝不动——界面与状态从此对不上，且没有任何报错',
+    find: '      const next = TRANSITIONS[state][action];',
+    replace: '      const next = TRANSITIONS[state][action] ?? state;',
+  },
+  {
+    name: 'S9_noInitialOnEnter', target: SM, expect: 'detected',
+    why: '构造时不以 ready 调一次 onEnter：首屏没有任何渲染时机（页面停在空白），'
+      + '而 onEnter 的语义也从"每个状态都收到"变成"除首个之外"',
+    find: `  // 构造即进入 ready：调用方拿到机器时首屏就有一次渲染时机。
+  onEnter(state);`,
+    replace: '  // 构造即进入 ready：调用方拿到机器时首屏就有一次渲染时机。',
+  },
+  {
+    name: 'S10_dropDwell', target: SM, expect: 'detected',
+    why: '离开状态时不结算停留时长：dwellMs 恒为 0，"停留时长过短"这条敷衍判据失去输入',
+    find: '    ctx.dwellMs[state] += t - enteredAt;',
+    replace: '    // 变异体：不结算停留时长',
+  },
+  {
+    name: 'S11_snapshotLeaksLedger', target: SM, expect: 'detected',
+    why: '快照直接交出内部账本（不是副本）且丢掉当前状态的未结算段：调用方随手改一下返回值，'
+      + '就改坏了状态机的记录——统计数字变成"谁读谁改"的产物',
+    find: '      dwellMs: { ...ctx.dwellMs, [state]: ctx.dwellMs[state] + (now() - enteredAt) },',
+    replace: '      dwellMs: ctx.dwellMs,',
+  },
+  {
+    name: 'S12_rejectReasonPassthrough', target: SM, expect: 'detected',
+    why: '拒帧理由不做枚举校验就透传给界面：模型/上游给什么就显示什么，'
+      + '等于替系统编一个理由（reason="ok" 也会被当成"太暗"显示出去）',
+    find: '        ctx.lastRejectReason = REJECT_REASONS.includes(reason) ? reason : null;',
+    replace: '        ctx.lastRejectReason = reason ?? null;',
+  },
+  {
+    name: 'S13_staleRejectReason', target: SM, expect: 'detected',
+    why: '重新拍照时不清掉上一条拒帧理由：用户会拿上一次的失败原因解释这一次的画面',
+    find: "      if (action === 'capture') ctx.lastRejectReason = null;",
+    replace: '      // 变异体：不清上一条拒帧理由',
+  },
+  // ── 相机与灰度转换（Task 6）：C1–C13 ──
+  // C1 就是 task-6 修正 1 存在的理由：brief 那版 grabFrame 把 RGBA 裸缓冲交出去，
+  // 与只收灰度的 computeStats 一接就抛。其余各条钉住 toGrayscale 的算术与取帧的几处响亮失败。
+  {
+    name: 'C1_rgbaPassthrough', target: CAM, expect: 'detected',
+    why: 'grabFrame 把 RGBA 裸缓冲交给 computeStats（brief 的原样）：长度是像素数的 4 倍，'
+      + 'computeStats 响亮抛 RangeError——这一条就是"修正 1"要防的事故本身',
+    find: '    stats: computeStats(toGrayscale(img.data, img.width, img.height), img.width, img.height),',
+    replace: '    stats: computeStats(img.data, img.width, img.height),',
+  },
+  {
+    name: 'C2_grayscaleSimpleAverage', target: CAM, expect: 'detected',
+    why: '用 (R+G+B)/3 代替 BT.601 亮度权重：灰度值整体偏移（纯红 76 → 85），'
+      + '亮度阈值 40 与模糊阈值 80 的量纲随之变形（它们只对原来的灰度定义有意义）',
+    find: '    const v = Math.round(0.299 * rgba[o] + 0.587 * rgba[o + 1] + 0.114 * rgba[o + 2]);',
+    replace: '    const v = Math.round((rgba[o] + rgba[o + 1] + rgba[o + 2]) / 3);',
+  },
+  {
+    name: 'C3_grayscaleNoRound', target: CAM, expect: 'detected',
+    why: '去掉四舍五入改为截断：每个通道最多差 1（140.75 → 140 而非 141），'
+      + '亮度均值整体系统性偏低',
+    find: '    const v = Math.round(0.299 * rgba[o] + 0.587 * rgba[o + 1] + 0.114 * rgba[o + 2]);',
+    replace: '    const v = (0.299 * rgba[o] + 0.587 * rgba[o + 1] + 0.114 * rgba[o + 2]) | 0;',
+  },
+  {
+    name: 'C4_grayscaleFoldsAlpha', target: CAM, expect: 'detected',
+    why: '把 alpha 折进亮度（乘 a/255）：全透明像素算成纯黑，'
+      + '带透明通道的一帧会被判"太暗"而白白退回重拍',
+    find: '    const v = Math.round(0.299 * rgba[o] + 0.587 * rgba[o + 1] + 0.114 * rgba[o + 2]);',
+    replace: '    const v = Math.round((0.299 * rgba[o] + 0.587 * rgba[o + 1] + 0.114 * rgba[o + 2]) * (rgba[o + 3] / 255));',
+  },
+  {
+    name: 'C5_grayscaleNoClamp', target: CAM, expect: 'detected',
+    why: '去掉夹紧：越界通道值回绕成"看着合理"的错灰度（400 → 144），'
+      + '一个错误的采样伪装成一次正常读取',
+    find: '    out[i] = v < 0 ? 0 : (v > 255 ? 255 : v);',
+    replace: '    out[i] = v;',
+  },
+  {
+    name: 'C6_grayscaleNoLengthCheck', target: CAM, expect: 'detected',
+    why: 'toGrayscale 不校验长度就按 RGB 读：短缓冲读出 undefined、长缓冲被当成别的格式，'
+      + 'NaN 或错值一路流到质检——正是"静默重解释输入"',
+    find: `  if (rgba.length !== n * 4) {
+    throw new RangeError(
+      \`toGrayscale: rgba.length 必须恰好等于 width*height*4 = \${n * 4}（= \${String(width)}×\${String(height)}×4），\`
+      + \`收到 \${String(rgba.length)}\`,
+    );
+  }`,
+    replace: '  // 变异体：不校验长度',
+  },
+  {
+    name: 'C7_wrongDimsToComputeStats', target: CAM, expect: 'detected',
+    why: '把视频的 videoWidth/videoHeight 当成图像尺寸传给 computeStats（而不是这张缩过的图的尺寸）：'
+      + '那对数字来自另一张图，长度校验一比对就抛 RangeError',
+    find: '    stats: computeStats(toGrayscale(img.data, img.width, img.height), img.width, img.height),',
+    replace: '    stats: computeStats(toGrayscale(img.data, img.width, img.height), vw, vh),',
+  },
+  {
+    name: 'C8_noUpscaleGuard', target: CAM, expect: 'detected',
+    why: '去掉 Math.min(1, …)：小图被放大到 512 长边（320×240 → 512×384）——'
+      + '放大不增加任何信息，只让每一帧的编码与上传更贵',
+    find: '  const scale = Math.min(1, maxEdge / Math.max(vw, vh));',
+    replace: '  const scale = maxEdge / Math.max(vw, vh);',
+  },
+  {
+    name: 'C9_noMediaDevicesGuard', target: CAM, expect: 'detected',
+    why: '没有 mediaDevices 时不再给明确错误：用户（和读日志的人）看到的是 '
+      + '"Cannot read properties of undefined (reading \'getUserMedia\')"，'
+      + '根本看不出这是"http:// + 局域网 IP 不是安全上下文"（全局约束 2）',
+    find: `  if (mediaDevices === undefined || mediaDevices === null
+    || typeof mediaDevices.getUserMedia !== 'function') {
+    throw new Error(
+      'openCamera: 这个环境没有可用的摄像头接口（navigator.mediaDevices 缺失）。'
+      + 'getUserMedia 只在安全上下文可用：https:// 域名或 localhost；'
+      + '用 http:// + 局域网 IP 打开时必然失败，请走内网穿透的 HTTPS 地址。',
+    );
+  }`,
+    replace: '  // 变异体：没有 mediaDevices 时不给明确错误',
+  },
+  {
+    name: 'C10_noTrackStopOnPlayFail', target: CAM, expect: 'detected',
+    why: '起播失败时不关摄像头：轨迹还活着（指示灯亮着、耗电），界面上却没有画面，'
+      + '用户只能刷新页面（隐私与电量都吃亏）',
+    find: `    for (const track of stream.getTracks?.() ?? []) {
+      try { track.stop(); } catch { /* 停不掉也只能继续抛原始错误 */ }
+    }`,
+    replace: '    // 变异体：不关摄像头',
+  },
+  {
+    name: 'C11_nullBlobOk', target: CAM, expect: 'detected',
+    why: 'toBlob 给回 null 也照常返回：Task 7 会拿一个空 blob 去 POST 一趟识物，'
+      + '"编码失败"被静默降级成"发出去过"',
+    find: `  if (blob === null || blob === undefined) {
+    // 真 toBlob 在画布被污染（跨域图）或尺寸为 0 时会以 null 回调。照常返回的话，
+    // Task 7 会拿 null 去 POST 一趟识物——失败被静默降级成"发出去过"。
+    throw new Error('grabFrame: 画布编码失败（toBlob 回调收到 null），本帧不可用');
+  }`,
+    replace: '  // 变异体：编码失败也照常返回',
+  },
+  {
+    name: 'C12_noVideoReadyGuard', target: CAM, expect: 'detected',
+    why: '不检查视频是否出画：按快门太早本应是"稍等一秒"的用户情形，'
+      + '变异后却会悄悄产出一张 1×1 的帧送去质检（恒判太糊），用户永远等不到画面',
+    find: `  if (!Number.isInteger(vw) || !Number.isInteger(vh) || vw <= 0 || vh <= 0) {
+    // 这是**用户情形**（按快门比相机出画早），所以是一个可识别的普通 Error，
+    // 而不是下游 computeStats 会抛的那种 RangeError——两者的处置完全不同。
+    const err = new Error(
+      \`grabFrame: 视频还没出画（videoWidth=\${String(vw)}, videoHeight=\${String(vh)}），请稍候再按快门\`,
+    );
+    err.code = VIDEO_NOT_READY;
+    throw err;
+  }`,
+    replace: '  // 变异体：不检查视频是否出画',
+  },
+  {
+    name: 'C13_noMaxEdgeValidation', target: CAM, expect: 'detected',
+    why: '不校验 maxEdge：0 或非整数会被静默当成缩放系数，拍出一张 1×1 的帧'
+      + '（质检必然判太糊，而调用方完全不知道是参数写错了）',
+    find: `  if (!Number.isInteger(maxEdge) || maxEdge <= 0) {
+    throw new RangeError(\`grabFrame: maxEdge 必须是正整数，收到 \${String(maxEdge)}\`);
+  }`,
+    replace: '  // 变异体：不校验 maxEdge',
+  },
 ];
 
 // ─────────────────────────────────────────────────────────── 工具
@@ -455,13 +694,20 @@ function failingTests(logPath) {
 
 /**
  * 变异体自身必须是**能解析的**合法模块：否则它只会让测试加载失败（退出码非 0），
- * 那种"抓到"是崩溃而不是断言，会伪造出 DETECTED。这里用去 export 后 `new Function` 做语法门。
- * （本仓库两个模块只用 `export function` / `export const`，没有 import / 顶层 await。）
+ * 那种"抓到"是崩溃而不是断言，会伪造出 DETECTED。这里用去 export/import 后 `new Function` 做语法门。
+ *
+ * Task 6 起这道门多剥一层 `import`：`web/units/camera.mjs` 有
+ * `import { computeStats } from './frame-qc.mjs';`，而 `import` 声明只在 ES 模块里合法，
+ * `new Function` 见它就报语法错（原注释里写的"本仓库模块只有 export"已不再成立）。
+ * **局限（如实记，别当成没这回事）**：剥掉 import 行之后再查语法，等于不再检查 import 行本身。
+ * 现有变异体的 `find` 全在函数体/常量里，没有一条动 import 行，所以这道门对当前变异集的能力不变；
+ * 将来若出现改 import 行的变异体，这里会漏，届时应把它换成真编译检查（例如 `node --check`）。
  */
 function syntaxOk(source, rel) {
   try {
+    const stripped = source.replace(/^export /gm, '').replace(/^import .*?;$/gm, '');
     // eslint-disable-next-line no-new-func
-    new Function(source.replace(/^export /gm, ''));
+    new Function(stripped);
     return null;
   } catch (err) {
     return `变异体语法错误（${rel}）：${err.message}`;
@@ -619,7 +865,9 @@ try {
         verdict = detected ? 'DETECTED' : 'MISSED';
       } else {
         // 声称等价的：必须由差分核对证明等价，证明不过则反过来按漏网处理
-        const equivPath = path.join(tmpRoot, `equiv-${m.name}.mjs`);
+        // 差分副本放在**被测模块旁边**（不是临时树根）：这样变异体里的相对 import
+        // （`./frame-qc.mjs`）才解析得到。对无 import 的模块，位置变化不改变任何行为。
+        const equivPath = path.join(path.dirname(target), `equiv-${m.name}.mjs`);
         fs.writeFileSync(equivPath, mutated);
         const diff = await differentialAgreement(m.target, target, equivPath);
         const proved = !detected && diff.agree;
