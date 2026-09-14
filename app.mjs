@@ -632,11 +632,22 @@ export async function mount(root, deps = {}) {
       result = await runSubmitSentence({ sentence: text, word: shownWord?.word ?? '', scene: shownWord?.scene ?? '未知' });
       // 落事件：一条，且必定带原句（A4：句子就是语料，Task 9 的持久化与验证三都从这里读）。
       const ev = feedbackEventFor(result);
+      // **顺序就是契约**（Task 8 复审 Important 1 的同形状）：`...ev.payload` 放在最前面，
+      // `sessionId` / `roundIndex` 写在它后面 → 服务端的身份字段永远权威。
+      // 原先 `...ev.payload` 在最后：payload 里若出现同名键（`recordEvent` 会把 `sessionId`/
+      // `wordId`/`roundIndex` 提到事件顶层，见它的第三个参数形状），它就会盖掉真实的会话号与轮次
+      // ——判据 B（`retry_rate`）按 `roundIndex` 分组，被盖掉就等于把这一轮记到别处去。
+      //
+      // 当前**够不到**（已核实）：`feedbackEventFor` 的 payload 是把固定几个键逐个写出来的
+      // **白名单**（`base` + verdict/error_type/note/rewrite，或 base + reason/error/detail），
+      // 模型多给的键连 `result.feedback` 都不出、更进不了 payload，所以那三个名字永远不会撞上。
+      // 之所以照样改（一行）：把这条不变式从"远处那个函数一直记得别加错键"挪到**这里写死**——
+      // `feedbackEventFor` 将来要加一个键时，风险面就只剩它自己。
       record(store, ev.type, {
+        ...ev.payload,
         sessionId,
         roundIndex: lastRoundIndex,
         wordId: null,
-        ...ev.payload,
       }, clock);
     } catch (err) {
       // `submitSentence` 的契约是"不抛错"，抛出来就是编程错误：**原样重抛**（与控制台里的栈对上），
