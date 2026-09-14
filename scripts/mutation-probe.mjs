@@ -1,13 +1,13 @@
 /**
  * 变异探针（可重复运行的证据生成器，零依赖、非测试文件）。
  *
- * 用途：把 review 轮（`rv3-probe.mjs`）枚举的 18 个变异体 + Task 4 的 10 个变异体固化成仓库内
+ * 用途：把 review 轮（`rv3-probe.mjs`）枚举的 18 个变异体 + Task 4 的 11 个变异体固化成仓库内
  * 可复跑的证据——逐个"把实现改坏"，跑 `tests/scheduler.test.mjs` + `tests/pick-word.test.mjs` +
  * `tests/feedback.test.mjs`，报告每个变异体是被测试抓到（DETECTED）还是溜过去了（MISSED），
  * 只要有该抓没抓到的就以非零码退出。
  *
  * 用法（在仓库根）：
- *   node scripts/mutation-probe.mjs            # 全部 28 个变异体
+ *   node scripts/mutation-probe.mjs            # 全部 29 个变异体
  *   node scripts/mutation-probe.mjs --only=M2  # 只跑名字含 M2 的（F/Q 同理）
  *   KEEP_TMP=1 node scripts/mutation-probe.mjs # 保留临时工作树以便排查
  *
@@ -25,7 +25,7 @@
  * 证明不过就反过来算漏网（说明它其实可被抓到）。
  *
  * 结论：见文末运行输出的汇总行（Task 3：17/17 可抓变异体 DETECTED + M2 证为等价变异体；
- * Task 4：10/10 可抓变异体 DETECTED，见 `task-4-report.md`）。
+ * Task 4：11/11 可抓变异体 DETECTED，见 `task-4-report.md`）。
  */
 import { spawn } from 'node:child_process';
 import { createHash } from 'node:crypto';
@@ -290,6 +290,13 @@ const MUTANTS = [
       + '与库里那条记录不是同一个对象，就地更新/同一性判断会失配）',
     find: '  return errors.length === 0 ? { ok: true, value: raw } : { ok: false, errors };',
     replace: '  return errors.length === 0 ? { ok: true, value: { ...raw } } : { ok: false, errors };',
+  },
+  {
+    name: 'F11_unfrozenConstants', target: FEEDBACK, expect: 'detected',
+    why: '去掉 Object.freeze：档位变成可运行时改动的普通数组——统计口径的契约就此可被'
+      + '任何一处 import 悄悄改写（改完还不报错）',
+    find: "export const VERDICTS = Object.freeze(['correct', 'flawed', 'uncertain']);",
+    replace: "export const VERDICTS = ['correct', 'flawed', 'uncertain'];",
   },
 ];
 

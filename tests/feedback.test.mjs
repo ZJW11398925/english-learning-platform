@@ -152,3 +152,10 @@ test('空对象只报四个字段缺失，不叠加"取值越界: undefined"的�
     assert.ok(m.includes('缺少字段'), `不该出现"缺少字段"以外的诊断：${m}`);
   }
 });
+
+test('两个常量是冻结的（档位/错误类型是统计口径的契约，调用方不得运行时改动）', () => {
+  assert.ok(Object.isFrozen(VERDICTS), 'VERDICTS 必须冻结');
+  assert.ok(Object.isFrozen(ERROR_TYPES), 'ERROR_TYPES 必须冻结');
+  assert.throws(() => VERDICTS.push('bad'), TypeError, '往 VERDICTS 里塞档位必须当场抛错，不得静默生效');
+  assert.throws(() => ERROR_TYPES.push('spelling'), TypeError, '往 ERROR_TYPES 里塞类型必须当场抛错');
+});
