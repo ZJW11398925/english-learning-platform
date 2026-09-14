@@ -41,3 +41,16 @@ test('recordEvent 写入后可从 store 读回，且时间戳被填上', () => {
   assert.equal(e.type, 'uncertain');
   assert.equal(memory.length, 1);
 });
+
+test('recordEvent 第三参形状为 {sessionId, wordId?, ...payload}：后两者被提到顶层，不留在 payload', () => {
+  const memory = [];
+  const store = { appendEvent: (e) => memory.push(e), readEvents: () => memory };
+  const e = recordEvent(store, 'compose_submitted', {
+    sessionId: 's-1',
+    wordId: 'w-1',
+    sentence: 'The lamp is on.',
+  }, () => 7);
+  assert.equal(e.sessionId, 's-1');
+  assert.equal(e.wordId, 'w-1');
+  assert.deepEqual(e.payload, { sentence: 'The lamp is on.' });
+});
