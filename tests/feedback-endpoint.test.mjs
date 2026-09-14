@@ -346,6 +346,96 @@ test('上游先回响应头、再半截 body 卡住 → 502 upstream_failed（�
   }
 });
 
+// ───────────── 模型多给的键：与"我们自己的字段"撞名时，谁说了算（Task 8 复审 Important 1）─────────────
+//
+// 契约**有意允许模型多给键**（Task 4 的复审核过：多余键原样放行是对的——拒绝未知键等于凭空
+// 发明一个设计文档 §5.1 阶梯里没有的失败档，`tests/feedback.test.mjs` 与
+// `tests/compose.test.mjs` 两条用例都钉着这份放行）。
+//
+// 但"放行"只覆盖**我们没打算用的键**。`server/index.mjs` 的响应体是
+// `{ ok, latency_ms, usage, ...result.feedback }` 摊平出来的：一旦模型也回一个 `ok`（或
+// `latency_ms` / `usage`），它就会**盖掉服务端自己的字段**。后果是 fail-closed 的——
+// 客户端把它读成 `pending`（`web/units/compose.mjs` 的 `raw.ok === false`），不会伪造成功——
+// 但一份**本来可用**的判定被静默丢掉，而这份响应里的 `verdict/error_type/rewrite/note` 四个字段
+// 全都合法。代价是白花一次调用（真金白银）换回一个"这次没拿到反馈"。
+//
+// 正确形状与 `/api/recognize` 一致：**逐字段显式构造**，服务端自己的字段永远权威。
+
+test('模型多回一个 `ok`（与我们的字段撞名）→ 服务端自己的 ok 仍权威，判定**照样可用**', async () => {
+  const withOk = { ...GOOD, ok: false };
+  upstream.replyContent(withOk);
+
+  const res = await postFeedback(SAID);
+  assert.equal(res.status, 200);
+  const proxyResult = await res.json();
+  assert.equal(proxyResult.ok, true, '模型回 ok:false 不许盖掉服务端自己的 ok');
+  assert.equal(proxyResult.verdict, 'flawed', '四个字段照样透传');
+
+  // 客户端那一侧：这是一份**可用**的判定，必须落 ok，不是 pending。
+  const clientResult = await submitSentence(SAID, {
+    fetchImpl: async () => ({ ok: true, json: async () => proxyResult }),
+  });
+  assert.equal(clientResult.status, 'ok', '一份四个字段齐备的合法判定不许因为模型多给了 ok 就变成 pending');
+  assert.equal(clientResult.uncertain, false);
+  assert.equal(clientResult.feedback.verdict, 'flawed');
+  assert.equal(clientResult.sentence, SAID.sentence, '原句照样在');
+});
+
+test('模型多回 `latency_ms` / `usage` → 服务端自报的耗时与 token 计数不被盖掉', async () => {
+  upstream.replyContent({
+    ...GOOD,
+    latency_ms: 999_999,
+    usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 1, model_forged: true },
+  });
+  const res = await postFeedback(SAID);
+  assert.equal(res.status, 200);
+  const body = await res.json();
+  assert.equal(Number.isInteger(body.latency_ms), true);
+  assert.notEqual(body.latency_ms, 999_999, 'latency_ms 必须是服务端自己测的，不是模型编的');
+  assert.ok(body.latency_ms < 60_000, `服务端自报耗时应在正常量级，实测 ${body.latency_ms}ms`);
+  assert.deepEqual(
+    body.usage,
+    { prompt_tokens: 301, completion_tokens: null, total_tokens: null },
+    'usage 只回上游真实计数里我们知道的三项，且由服务端构造（模型自带的键不许漏进来）',
+  );
+});
+
+test('模型多回的**其它**未知键照旧原样透传（这份放行是契约，不许被"防撞名"顺手收紧）', async () => {
+  const modelExtra = {
+    ...GOOD,
+    model_extra: '上游多给的键',
+    sessionId: '模型编的会话号',
+    roundIndex: 42,
+  };
+  upstream.replyContent(modelExtra);
+  const res = await postFeedback(SAID);
+  assert.equal(res.status, 200);
+  const body = await res.json();
+  assert.equal(body.ok, true);
+  assert.equal(body.model_extra, '上游多给的键', '多余键原样带下去（Task 4 复审钉住的放行）');
+  assert.equal(body.sessionId, '模型编的会话号', '连与事件顶层撞名的键也照样透传——服务端不当过滤器');
+
+  // 端到端：多余键穿到客户端，不影响"可用"的判定，也不会跟着进事件 payload。
+  const r = await submitSentence(SAID, {
+    fetchImpl: (path, init) => fetch(`${origin}${path}`, init),
+  });
+  assert.equal(r.status, 'ok');
+  assert.equal(validateFeedback(r.feedback).ok, true);
+  assert.equal(r.feedback.model_extra, '上游多给的键', '客户端交回的就是入参本身（不重建、不裁剪）');
+});
+
+test('模型回的 `ok` 不是布尔（例如 ok:"yes"）→ 它一透传下去就会变成一份"不可用"的判定', async () => {
+  // 这一条钉的是**保护面**而不是"要不要拦"：服务端不判 `ok` 的取值（那是模型的字段，
+  // 语义归客户端校验器），但正因为如此，它自己的 `ok` 必须是响应里唯一的那个——
+  // 否则模型给一个 ok:"yes" 就能让 `raw.ok === false` 那条判断之外的任何形状漏下去。
+  upstream.replyContent({ ...GOOD, ok: 'yes' });
+  const body = await (await postFeedback(SAID)).json();
+  assert.equal(body.ok, true);
+  assert.equal(body.verdict, 'flawed');
+  const r = await submitSentence(SAID, { fetchImpl: async () => ({ ok: true, json: async () => body }) });
+  assert.equal(r.status, 'ok', '四个字段齐备就是可用：不因为模型多给了个古怪的 ok 就作废');
+});
+
 // ───────────────────── 客户端 → 真服务端 → 桩上游：整条链路一起走一遍 ─────────────────────
 
 test('端到端（真客户端 + 真路由 + 桩上游）：submitSentence 拿回 ok 与校验过的反馈', async () => {

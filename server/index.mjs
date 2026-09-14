@@ -429,11 +429,21 @@ async function handleFeedback(req, res, { env, fetchImpl, upstreamTimeoutMs, log
   }
 
   const latencyMs = Date.now() - startedAt;
+  // **顺序就是契约**（Task 8 复审 Important 1）：`...result.feedback` 必须在最前面——
+  // 模型多给的键要**原样透传**（Task 4 复审钉住的放行：拒绝未知键等于凭空发明一个
+  // 设计文档 §5.1 阶梯里没有的失败档），但它的键**永远不许盖掉服务端自己的字段**。
+  //
+  // 原先写成 `{ ok: true, ...result.feedback, latency_ms, usage }`：模型只要多回一个
+  // `"ok": false`（或 `latency_ms` / `usage`），服务端自己的 `ok` 就被它盖掉，客户端
+  // （`web/units/compose.mjs` 的 `raw.ok === false`）于是把一份**四个字段齐备、本来可用**的
+  // 判定读成 `pending`。方向是 fail-closed 的（不伪造成功），但代价是白花一次调用换回
+  // 一句"这次没拿到反馈"。形状与 `/api/recognize` 一致：自己的字段由自己最后写死。
   return json(res, 200, {
-    ok: true,
     // 四个字段**原样**摊平在响应顶层（不在嵌套对象里）：客户端把整份响应交给 validateFeedback，
-    // 它只认这四个键（多余键按设计放行）。
+    // 它只认这四个键（多余键按设计放行）。放行的是"我们没打算用的键"，见上。
     ...result.feedback,
+    // 以下三个字段服务端说了算，写在展开之后 → 模型给什么都盖不掉。
+    ok: true,
     latency_ms: latencyMs,
     // usage 只回三类 token 计数（成本核算只认真实计数，不用估算），不带上游任何原文
     usage: result.usage === null ? null : {

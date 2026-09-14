@@ -395,6 +395,52 @@ test('映射出来的事件真的能落进事件流：事件类型已登记、�
   assert.deepEqual(appended.map((e) => e.type), ['feedback_ok', 'uncertain', 'feedback_pending']);
 });
 
+// ──────────── 事件顶层字段的保护（Task 8 复审 Important 1 的姊妹形状）────────────
+//
+// `web/app.mjs` 落反馈事件时写的是 `record(store, ev.type, { sessionId, roundIndex, wordId,
+// ...ev.payload }, clock)`。而 `recordEvent` 的第三参形状是
+// `{ sessionId, wordId?, roundIndex?, ...payload }`——payload 里一旦出现同名键，它就会**盖掉**
+// 真实的会话号与轮次（轮次是判据 B / `retry_rate` 的分组依据，被盖掉等于把这一轮记到别处）。
+//
+// 当前**够不到**：`feedbackEventFor` 的 payload 是逐个键写出来的白名单，模型多给的键连
+// `result.feedback` 都不出。这条用例把这个前提**钉成一个可执行的不变式**——将来谁往 payload
+// 里加一个事件顶层字段名，这里立刻红，而不是等到判据 B 的数对不上才发现。
+// 姊妹形状的那一处已顺手改成"自己的字段写在展开之后"（`web/app.mjs`），两处一起防。
+
+test('事件映射的 payload 不含 sessionId/wordId/roundIndex（那三个是事件顶层字段，撞名会被 recordEvent 摘走）', () => {
+  const eventTopKeys = ['sessionId', 'wordId', 'roundIndex'];
+  const results = [
+    { status: 'ok', feedback: goodBody, uncertain: false, sentence: 'I use a cup.', word: 'mug', scene: 'kitchen' },
+    { status: 'ok', uncertain: true, sentence: 'x', word: 'mug', feedback: { verdict: 'uncertain', error_type: 'none', rewrite: null, note: '拿不准' } },
+    { status: 'pending', reason: FEEDBACK_FAIL_REASONS.TIMEOUT, error: 'timeout', sentence: 'I use a mug.', word: 'mug', scene: 'desk' },
+  ];
+  for (const result of results) {
+    const { type, payload } = feedbackEventFor(result);
+    for (const k of eventTopKeys) {
+      assert.equal(k in payload, false, `${type} 的 payload 出现了事件顶层字段 ${k}（会被 recordEvent 摘走，永远进不了 payload）`);
+    }
+  }
+});
+
+test('姊妹保护：`...ev.payload` 放在事件顶层字段之前时，一个撞名的 payload 会盖掉真实会话号', () => {
+  // 这条**故意**把危险形状跑一遍（app.mjs 就是这么写的），证明：
+  //   ① 这个坑是真的（撞名的 payload 确实能盖掉 `sessionId`）；
+  //   ② 上面那条不变式为什么必须存在。
+  const appended = [];
+  const store = { appendEvent: (ev) => appended.push(ev) };
+  const colliding = recordEvent(store, 'feedback_ok', {
+    sessionId: 's1', wordId: null, roundIndex: 1, ...{ sessionId: 'payload 里的假会话号', verdict: 'flawed' },
+  });
+  assert.equal(colliding.sessionId, 'payload 里的假会话号', '顺序写反时后写的赢——所以自己的字段必须写在展开之后');
+  assert.equal(colliding.roundIndex, 1, '这一条没有撞名，仍如实保留');
+
+  // 修正后的顺序（`web/app.mjs` 的现形状）：身份字段写在展开之后 → 谁也盖不掉。
+  const fixed = recordEvent(store, 'feedback_ok', {
+    ...{ sessionId: 'payload 里的假会话号', verdict: 'flawed' }, sessionId: 's1', wordId: null, roundIndex: 1,
+  });
+  assert.equal(fixed.sessionId, 's1', '自己的字段写在展开之后 → 权威在调用方');
+});
+
 // ───────────────────────── uncertain 与 error_type 是两个维度（A5 的前提）─────────────────────────
 
 test('uncertain + error_type 非 none 是契约合法的组合：按 error_type 计数必须先按 verdict 分组', () => {
