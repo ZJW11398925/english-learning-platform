@@ -27,6 +27,7 @@
 //     "用户按了两次"——口径与公式见 `units/rounds.mjs` 的文件头（Task 7 修复轮 Critical 1）。
 import { createMachine, STATES } from './units/state-machine.mjs';
 import { createRoundCounter } from './units/rounds.mjs';
+import { submitSentence as realSubmitSentence, feedbackEventFor } from './units/compose.mjs';
 
 export { createMachine, TRANSITIONS, STATES, REJECT_REASONS } from './units/state-machine.mjs';
 
@@ -34,6 +35,23 @@ export { createMachine, TRANSITIONS, STATES, REJECT_REASONS } from './units/stat
 const REJECT_HINT = {
   too_dark: '刚才那张太暗：换个亮一点的位置，或者把灯打开，再来一次。',
   too_blurry: '刚才那张有点糊：拿稳手机、让物体占满画面，再来一次。',
+};
+
+/** 错误类型 → 给用户看的一档（**不堆术语**：设计文档 §4.2 要求 note 面向学习者）。 */
+const ERROR_TYPE_LABEL = {
+  word_choice: '用词不准',
+  collocation: '搭配不地道',
+  grammar: '语法问题',
+  none: '',
+};
+
+/** 落空的档位 → 给用户看的一句话：说清"这次为什么没拿到反馈"，但不把技术细节摊给他。 */
+const PENDING_HINT = {
+  timeout: '等服务端回话等太久了',
+  request_failed: '这次请求没能发出去（可能是网络断了）',
+  http_error: '反馈服务这次没能返回结果',
+  response_invalid: '反馈服务这次返回的内容不能用',
+  empty_sentence: '这句话是空的',
 };
 
 /** 会话号：安全上下文里有 randomUUID，没有就退到一个够用的随机串（不参与任何安全判断）。 */
@@ -88,6 +106,9 @@ const FALLBACK_SCENE_WORDS = Object.freeze(['mug', 'cup', 'book', 'pen', 'bottle
  *   - `urlApi` 默认 `globalThis.URL`（冻结画面用 `createObjectURL`）
  *   - `camera` / `store` / `recordEvent` / `recognizeWithFallback` 覆盖懒加载的浏览器依赖
  *   - `sessionId`、`clock`（时间戳函数）、`cameraOptions`、`onCompose`（造句原文的接线点）
+ *   - `compose`：造句链路的注入点，形状 `{ submitSentence }`（缺省用 `units/compose.mjs` 的真实现）。
+ *     注入它是为了让"界面与事件对不对"能脱离网络单独测（网络路径由 tests/compose.test.mjs 覆盖），
+ *     与 `recognizeWithFallback` 的注入点是同一个理由。
  * @returns {Promise<{ machine: object, sessionId: string, store: object, grab: () => Promise<{blob: object, stats: object}> }>}
  *   `grab` 就是传给 `recognizeWithFallback({ grab })` 的取帧函数
  * @throws {TypeError} `root` 不是元素
@@ -106,6 +127,7 @@ export async function mount(root, deps = {}) {
     recordEvent: givenRecord = null,
     recognizeWithFallback: givenRecognize = null,
     manualSceneWords: givenSceneWords = null,
+    compose: givenCompose = null,
     sessionId: givenSessionId = null,
     clock = Date.now,
     cameraOptions = {},
@@ -121,6 +143,9 @@ export async function mount(root, deps = {}) {
   // 与识别链路口径会各自漂移（改了词包却忘了改界面）。
   const runRecognize = givenRecognize ?? recognizeModule.recognizeWithFallback;
   const sceneWords = givenSceneWords ?? recognizeModule?.MANUAL_PICK_SCENE_WORDS ?? FALLBACK_SCENE_WORDS;
+  // 造句链路的只调一次 `submitSentence`；`feedbackEventFor`（事件映射）**不注入**——
+  // 它必须与链路本身同源，两处各写一套映射的话，事件流里的字段名会悄悄漂移。
+  const runSubmitSentence = givenCompose?.submitSentence ?? realSubmitSentence;
   let store = givenStore;
   if (store === null) {
     const { createStore } = await import('./units/store.mjs');
@@ -145,6 +170,9 @@ export async function mount(root, deps = {}) {
   let frozen = null;           // { blob, url }：快门冻结的那一帧
   let composeEl = null;        // 当前 composing 态的输入框
   let lastComposeText = '';    // 上一版造句原文（回改时带出来，别让用户重打一遍）
+  // 反馈屏的状态：`{ busy }` 表示"正在等服务端/模型"；`{ result }` 是 `submitSentence` 的返回值。
+  // **原句只从 `lastComposeText` 与 `result.sentence` 两处来**，界面不另存一份（免得两处不一致）。
+  let feedback = null;
   let opening = false;         // 正在开相机（挡住双击：否则会开出两路流，多出来的那路没人关）
   let lastShotBlob = null;     // 最近一次 `grab()` 拿到的帧（识别链走后，freeze 用的是它）
   // 最近一次取词的结果（`recognizeWithFallback` 的返回）。**界面上的词只能来自这里或用户手选**：
@@ -206,6 +234,9 @@ export async function mount(root, deps = {}) {
       : '';
     return `场景：${shownWord?.scene ?? '未知'}；第 ${lastPick?.attempts ?? 1} 次尝试取到${tail}`;
   }
+
+  /** 落最近一次取词那一轮的轮次号：反馈事件挂在它上面（一次快门 = 一轮，反馈不是新的快门）。 */
+  let lastRoundIndex = null;
 
   function onManualPick(word) {
     // 手选：来源标成 manual，界面据此明说"这是你自己挑的"。
@@ -303,7 +334,9 @@ export async function mount(root, deps = {}) {
       }
       case 'reading': {
         view.push(title('跟读一遍'));
-        view.push(hint('转写与判定在 Task 8/9 接入；现在可以手动标记读完，或跳过（会记 skipped_reading）。'));
+        // 措辞按实情写：**造句反馈**已经在 Task 8 接上了（提交后会真的出反馈），
+        // 还没接的是转写与"有没有念出目标词"的判定（Task 9 的 SpeakingCheck）。
+        view.push(hint('转写与发音判定在 Task 9 接入；现在可以手动标记读完，或跳过（会记 skipped_reading）。'));
         action('我读完了', () => machine.send('readDone'));
         action('跳过跟读', () => machine.send('skipReading'));
         break;
@@ -320,8 +353,45 @@ export async function mount(root, deps = {}) {
         break;
       }
       case 'feedback': {
-        view.push(title('反馈'));
-        view.push(hint('结构化反馈在 Task 8 接入；现在可以再写一版（会累加改写次数），或进入下一个词。'));
+        // 设计文档 §4.2/§5.1 的三档在界面上的样子（**一句都不许美化**）：
+        //   · 拿到判定 → 摊开四个字段（判定 / 错误类型 / 改写建议 / 说明）+ 自己写的那句；
+        //   · 模型判 uncertain → 明说"拿不准"，不伪装成对/错（全局约束 4）；
+        //   · 没拿到（pending）→ 明说没拿到、**原句仍在这儿**、可以再交一次，绝不编一个好评。
+        if (feedback === null || feedback.busy === true) {
+          view.push(title('正在看你这句…'));
+          view.push(hint('结果回来之前这一屏不会有别的动作（弱网下可能要等十几秒）。'));
+          if (lastComposeText.trim() !== '') view.push(hint(`你写的是：${lastComposeText}`));
+          // 等待期间**也要留住出口**：这条腿最坏会等到客户端上限（24s），
+          // 把「再写一次」「下一个词」藏起来就等于让用户在这段时间里无路可走。
+          // 点它们不会取消那次请求——结论回来时会发现状态已经变了，于是不再重绘。
+          action('再写一次', () => machine.send('rewrite'));
+          action('下一个词', () => machine.send('next'));
+          break;
+        }
+        const r = feedback.result;
+        // 不管哪一档，都先把**学习者自己写的那句**摊出来：反馈是给这句话的，
+        // 不把原句放在眼前，"哪里错了"就只能靠记忆对照（而上一屏已经被换掉了）。
+        view.push(hint(`你写的是：${r.sentence}`));
+        if (r.status === 'ok' && r.uncertain === true) {
+          view.push(title('这句我拿不准'));
+          view.push(hint('模型没法确定它对不对——**这不是判定**，我们不会把它算成"通过"。'));
+          if (r.feedback.rewrite !== null && r.feedback.rewrite !== undefined) {
+            view.push(hint(`可以参考这样写：${r.feedback.rewrite}`));
+          }
+          view.push(hint(r.feedback.note));
+        } else if (r.status === 'ok') {
+          view.push(title(r.feedback.verdict === 'correct' ? '这句没问题' : '这句可以更好'));
+          const problem = ERROR_TYPE_LABEL[r.feedback.error_type] ?? r.feedback.error_type;
+          if (problem !== '') view.push(hint(`问题在：${problem}`));
+          if (r.feedback.rewrite !== null && r.feedback.rewrite !== undefined) {
+            view.push(hint(`可以这样改：${r.feedback.rewrite}`));
+          }
+          view.push(hint(r.feedback.note));
+        } else {
+          view.push(title('这次没拿到反馈'));
+          view.push(hint(`${PENDING_HINT[r.reason] ?? '反馈服务这次没能返回结果'}——`
+            + '**你的句子没有丢**，它还在这儿，可以再交一次。'));
+        }
         action('再写一次', () => machine.send('rewrite'));
         action('下一个词', () => machine.send('next'));
         break;
@@ -457,6 +527,9 @@ export async function mount(root, deps = {}) {
     // 它们要么 return、要么原样重抛，一条事件都不落——所以事件流里的 roundIndex 是连续的
     // 1、2、3…，没有空洞（"按了但没产出结论"不是一轮，见 units/rounds.mjs 的定义）。
     const roundIndex = rounds.next();
+    // 反馈事件（Task 8）沿用这一轮的编号：造句发生在取词的**同一轮**里，
+    // 它不是一次新的快门——给反馈单开一个轮次号会让判据 B 的轮数虚增。
+    lastRoundIndex = roundIndex;
 
     if (picked.mode === 'frame_rejected') {
       // 如实记录这一档（设计文档 §5.1）：先落事件再退状态，两件事都不许省。
@@ -519,14 +592,63 @@ export async function mount(root, deps = {}) {
   function onSubmit() {
     // 先取出原文：send('submit') 会触发渲染，输入框当场就被换掉了。
     const text = composeEl?.value ?? '';
+    // 空句（或读不到输入框）**在提交之前**就说清楚，并把用户留在造句屏：
+    // 一次反馈调用要花钱，而空句换来的一定是一份无用的判定；推进到反馈屏还会让他
+    // 面对一个没有"回去改"入口的界面（feedback 只有 rewrite/next 两个出口）。
+    if (text.trim() === '') {
+      setError('先写一句你自己的话再提交（这一句是这次练习的重点）。');
+      return;
+    }
+    setError('');
     if (!machine.send('submit')) return;
     lastComposeText = text;
-    // 落盘（原句、轮次）交给 Task 8/9 的钩子：事件表里的 compose_submitted 口径归 Task 9，
+    // 落盘（原句、轮次）交给 Task 9 的钩子：事件表里的 compose_submitted 口径归 Task 9，
     // 本任务不抢着记一遍（记重了会让 compose 相关计数翻倍）。
+    submitForFeedback(text);
+  }
+
+  /**
+   * 提交造句 → 拿反馈（Task 8）。**原句先留住**（`lastComposeText` + `result.sentence`），
+   * 无论成功还是失败都不丢——这是设计文档 §5.1「反馈接口失败：保留原句不丢」的落点。
+   *
+   * 三件事的顺序不能颠倒：
+   *   ① 先把"正在看"渲染出来（弱网下这一屏会停十几秒，不能让它看起来像卡死）；
+   *   ② 调 `runSubmitSentence`（**它自己不抛错**：一切外界失败都是一条 pending）；
+   *   ③ 把结论落到事件与界面（事件映射用 `units/compose.mjs` 的 `feedbackEventFor`，
+   *      不在这里另写一套——两套映射迟早漂移）。
+   */
+  async function submitForFeedback(text) {
+    feedback = { busy: true, result: null };
+    render(machine.state);
+    // 造句原文先交给注入的钩子（Task 8/9 的接线点）：**提交即回调**，不等反馈。
+    // 这样"钩子收到了这句话"与"模型那边多久回话"是两件互不牵连的事——
+    // 钩子挂掉、反馈超时，都不该让"用户提交过这句话"这件事消失。
     if (typeof onCompose === 'function') {
       const s = machine.snapshot();
       onCompose({ text, rewriteCount: s.rewriteCount, skippedReading: s.skippedReading });
     }
+    let result;
+    try {
+      result = await runSubmitSentence({ sentence: text, word: shownWord?.word ?? '', scene: shownWord?.scene ?? '未知' });
+      // 落事件：一条，且必定带原句（A4：句子就是语料，Task 9 的持久化与验证三都从这里读）。
+      const ev = feedbackEventFor(result);
+      record(store, ev.type, {
+        sessionId,
+        roundIndex: lastRoundIndex,
+        wordId: null,
+        ...ev.payload,
+      }, clock);
+    } catch (err) {
+      // `submitSentence` 的契约是"不抛错"，抛出来就是编程错误：**原样重抛**（与控制台里的栈对上），
+      // 但界面必须给一句话，不让用户面对"点了没反应"。
+      feedback = null;
+      setError(`提交造句时出错（这是程序缺陷，不是你的句子的问题）：${err?.message ?? err}`);
+      render(machine.state);
+      throw err;
+    }
+    feedback = { busy: false, result };
+    // 用户可能已经点了「再写一次」——那就不再重绘（否则会把他刚回到的输入框换掉）。
+    if (machine.state === 'feedback') render(machine.state);
   }
 
   return { machine, sessionId, store, grab };

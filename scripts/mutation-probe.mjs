@@ -4,11 +4,12 @@
  * 用途：把 review 轮（`rv3-probe.mjs`）枚举的 18 个变异体 + Task 4 的 12 个变异体 + Task 5 修复轮
  * 的 3 个环境校验变异体 + Task 6 的 26 个（状态机 13 + 相机/灰度 13）+ Task 7 的 8 个识物变异体
  * + Task 7 修复轮的 12 个（轮次/判据 B 口径 6 + 上游响应校验与超时 6）
- * 固化成仓库内可复跑的证据——逐个"把实现改坏"，跑 `tests/` 下被登记的那 11 个测试文件，报告每个
+ * + Task 7 复审轮的 2 个（停滞的响应体归超时）+ Task 8 的 15 个（造句反馈：客户端 9 + 上游 6）
+ * 固化成仓库内可复跑的证据——逐个"把实现改坏"，跑 `tests/` 下被登记的那 13 个测试文件，报告每个
  * 变异体是被测试抓到（DETECTED）还是溜过去了（MISSED），只要有该抓没抓到的就以非零码退出。
  *
  * 用法（在仓库根）：
- *   node scripts/mutation-probe.mjs            # 全部 81 个变异体
+ *   node scripts/mutation-probe.mjs            # 全部 96 个变异体
  *   node scripts/mutation-probe.mjs --only=M2  # 只跑 M2（`--only=F` = 整个 F 系列；规则见下）
  *   KEEP_TMP=1 node scripts/mutation-probe.mjs # 保留临时工作树以便排查
  *
@@ -16,8 +17,11 @@
  * `F12_messageDropsValue` → `F12`）：
  *   1. 先按 ID **全串相等**——`--only=M1` 只跑 M1（不再连带 M10–M14），`--only=F12` 只跑 F12；
  *   2. 没有精确命中时退化为**族匹配**（ID 以该串开头）——`--only=F` 跑 F1…F12，`--only=Q` 跑 Q1…Q4，
- *      `--only=S` 跑 Task 6 的状态机 13 条，`--only=C` 跑相机/灰度 13 条，
- *      `--only=R` 跑 Task 7 的 15 条（R1–R15），`--only=U` 跑上游响应校验与超时的 7 条（U1–U7）；
+ *      `--only=S` 跑 Task 6 的状态机 13 条，`--only=C` 跑相机/灰度 13 条 **与 Task 8 的
+ *      compose 9 条**（两批的 ID 都是 `C<数字>`，族匹配会一起选中：想单跑后者请用
+ *      `--only=C1_empty` 这样的全串，或看下面的说明），
+ *      `--only=R` 跑 Task 7 的 15 条（R1–R15），`--only=U` 跑上游响应校验与超时的 7 条（U1–U7），
+ *      `--only=V` 跑 Task 8 的服务端造句上游 6 条（V1–V6）；
  *   3. 两者皆空即当场 FAIL（并列出全部可用 ID），绝不"跑 0 个然后 PASS"。
  * 这修掉了原先的子串匹配：那时 `--only=F` 会把 `M9_terminalNoFlag`、`Q2_topScoreFirst`、
  * `Q4_hypernymFallback` 一起选中（14 个而不是 11 个），选中的集合与"只看 F 系列"的意图不符。
@@ -50,6 +54,9 @@
  * Task 7 复审轮的 R15 / U7 → 2/2 DETECTED，见 `task-7-report.md`「修复轮 2」一节——
  * 它们钉的是"响应头到了、body 还在流时上限到点"必须归**超时**（而不是"响应非法"），
  * 抓它的是两条真桩（真 createServer + 真 fetch，半截 body 挂住）的用例。
+ * Task 8 的 C1–C9（`web/units/compose.mjs`）与 V1–V6（`server/feedback-upstream.mjs`）
+ * → 15/15 DETECTED，见 `task-8-report.md`——这一轮把造句反馈链路的两半都接进了探针
+ * （客户端那一腿的纯逻辑 + 服务端给上游的模型契约）。
  */
 import { spawn } from 'node:child_process';
 import { createHash } from 'node:crypto';
@@ -82,6 +89,10 @@ const MODULE_FILES = {
   recognize: 'web/units/recognize.mjs',
   rounds: 'web/units/rounds.mjs',
   'recognize-upstream': 'server/recognize-upstream.mjs',
+  // Task 8 接入：造句反馈链路的两半——客户端那一腿（分档 + 原句保留 + 事件映射）与
+  // 服务端给上游的模型契约（请求体形状 + 上游信封校验 + 超时）。
+  compose: 'web/units/compose.mjs',
+  'feedback-upstream': 'server/feedback-upstream.mjs',
 };
 const TEST_FILES = [
   'tests/scheduler.test.mjs',
@@ -99,20 +110,30 @@ const TEST_FILES = [
   // 也不起子进程），所以接进来既不假红也不拖慢。
   'tests/rounds.test.mjs',
   'tests/recognize-upstream.test.mjs',
+  // Task 8 接入：`compose`（客户端那一腿的纯逻辑：分档、原句保留、事件映射）与
+  // `feedback-upstream`（零 import 的纯逻辑模块，理由同 recognize-upstream）。
+  // 两条都进得来：只 import 模块本身，不起子进程、不写死 `../web/` 的绝对路径。
+  'tests/compose.test.mjs',
 ];
 // `tests/index-html.test.mjs` **有意不进这张表**：它读 `web/index.html` 这个真实文件，
 // 而临时树只复制模块与测试，进来会因缺文件而假红。它由 `node --test` 全量套件守着。
 //
-// `tests/recognize-endpoint.test.mjs` / `tests/server.test.mjs` 同样**有意不进**（Task 7 起）：
+// `tests/recognize-endpoint.test.mjs` / `tests/server.test.mjs` / `tests/feedback-endpoint.test.mjs`
+// 同样**有意不进**（Task 7 起；Task 8 把造句端点也归进这一类）：
 // 它们 import `server/index.mjs`，而后者的路由表里写死了 `../web/` 的绝对路径
 // （`fileURLToPath(new URL('../web/', import.meta.url))`）——在临时树里那会指向**临时树的 web/**，
 // 静态托管用例会对不上。要让它们进来，得先让临时树复制整个 `web/` 与 `server/`，
 // 而这两份测试里还有子进程 + 15s 超时闸的用例：单次变异体可能要跑一分钟以上。
 // 探针的价值在于**快**（现在一轮 < 2 分钟），因此这里只接纯逻辑模块，
-// 那两个服务层文件由 `node --test` 全量套件守着。
+// 那几个服务层文件由 `node --test` 全量套件守着。
+// 连带的一条纪律（Task 8 的 `tests/compose.test.mjs` 就是照它写的）：进探针的测试文件
+// **不许 import `server/index.mjs`**，否则临时树基线立刻假红、整轮结论作废——
+// 跨模块的服务端关系用例要放在不进探针的那份文件里。
 // **未被变异证据覆盖的服务层代码（如实记，别当成没这回事）**：`server/index.mjs` 的
-// multipart 解析、错误分档、图片魔数校验、超时与半开连接守卫，以及 `createApp()` 的注入点——
-// 它们由 tests/recognize-endpoint.test.mjs 与 tests/server.test.mjs 覆盖，但**没有变异体**。
+// multipart 解析、错误分档、图片魔数校验、超时与半开连接守卫，造句端点的 body/字段守卫与
+// `config_missing` 分档，以及 `createApp()` 的注入点——
+// 它们由 tests/recognize-endpoint.test.mjs、tests/feedback-endpoint.test.mjs 与 tests/server.test.mjs
+// 覆盖，但**没有变异体**。
 const TEST_ARGS = ['--test', ...TEST_FILES];
 /**
  * 测试夹具体系（Task 7 起必需）：`tests/recognize-mount.test.mjs` 与 `tests/app-mount.test.mjs`
@@ -152,6 +173,8 @@ const CAM = MODULE_FILES.camera;
 const REC = MODULE_FILES.recognize;
 const ROUNDS = MODULE_FILES.rounds;
 const UP = MODULE_FILES['recognize-upstream'];
+const COMPOSE = MODULE_FILES.compose;
+const FBUP = MODULE_FILES['feedback-upstream'];
 
 const PICK_ORIGINAL = `export function pickWord({ candidates, acceptableSets, exclude = [] }) {
   const accepted = new Set();
@@ -837,6 +860,139 @@ const MUTANTS = [
       );
       timedOut.code = UPSTREAM_FAILED;
       throw timedOut;
+    }`,
+    replace: '    // 变异体：不再区分"上限到点"与"响应体不是 JSON"',
+  },
+  // ── 造句反馈：客户端那一腿（Task 8）：C1–C9 ──
+  // 这批钉的是这条链路的四条红线：①空句不花钱；②`ok` 必须是"校验通过"而不是"HTTP 200"；
+  // ③**原句永不丢**（成功与失败两条路都要带回来——它是产品赌注的证据本身）；
+  // ④超时归超时、不归"响应非法"（Task 7 复审 Important 1 的同一课，在造句链路上重演）。
+  {
+    name: 'C1_emptySentenceHitsNetwork', target: COMPOSE, expect: 'detected',
+    why: '空句不再当场拦下，而是照发不误：一次必然无用的调用被花掉，而"空句"这件事在数据里'
+      + '也消失了（本来它是 `empty_sentence` 独立一档，看得见）',
+    find: `  if (typeof sentence !== 'string' || sentence.trim() === '') {`,
+    replace: '  if (false) {',
+  },
+  {
+    name: 'C2_httpOkMeansUsable', target: COMPOSE, expect: 'detected',
+    why: '去掉校验器那一关，直接把响应当反馈交出去：`ok` 从"校验通过、可用"退化成"HTTP 200"，'
+      + '缺字段/取值越界的响应会以 `status:ok` 的形式流进界面与事件流——'
+      + '全局约束 3（失败不得静默降级为成功）的反面',
+    find: `  const verdict = validateFeedback(raw);
+  if (!verdict.ok) {`,
+    replace: `  const verdict = { ok: true, value: raw };
+  if (false) {`,
+  },
+  {
+    name: 'C3_httpFailureLooksOk', target: COMPOSE, expect: 'detected',
+    why: '非 2xx 不再判失败，而是接着读 body：服务端报的 `502 upstream_failed` 会被当成一次判定'
+      + '（HTTP 层面确实拿到了 JSON，但那不是反馈）',
+    find: '  if (!res.ok) {',
+    replace: '  if (false) {',
+  },
+  {
+    name: 'C4_sentenceDroppedOnPending', target: COMPOSE, expect: 'detected',
+    why: '落空时不带原句：学习者的句子在这条路径上消失，而"待反馈队列"与"补交"全都要靠它'
+      + '（A2/A4：原句永不丢）——这类丢失在界面上看不出来，只有断言能拦住',
+    find: `    status: 'pending', reason, error: error ?? reason, detail, sentence, word, scene,`,
+    replace: `    status: 'pending', reason, error: error ?? reason, detail, word, scene,`,
+  },
+  {
+    name: 'C5_validationErrorsDropped', target: COMPOSE, expect: 'detected',
+    why: '校验失败时不再把 `validateFeedback` 的 `errors` 当诊断（换成一句笼统的"响应不合契约"）：'
+      + 'Task 4 的复审把 `errors` 定成了"被持久化成 pending 原因的东西"——丢掉它就等于丢掉'
+      + '"模型到底少给了什么/给了什么越界值"，排查只能回头猜',
+    find: `      error: verdict.errors.join('; '),`,
+    replace: "      error: '响应不合契约',",
+  },
+  {
+    name: 'C6_uncertainMixedIntoOk', target: COMPOSE, expect: 'detected',
+    why: '`uncertain` 不再单独落一条事件，而是混进 `feedback_ok`：设计文档 §4.2 要求它'
+      + '"单独统计、不计入通过率"——混进去之后通过率的分子里多了拿不准的句子，而分母不变',
+    find: "  if (result?.status === 'ok' && result.uncertain === true) {",
+    replace: '  if (false) {',
+  },
+  {
+    name: 'C7_okEventDropsSentence', target: COMPOSE, expect: 'detected',
+    why: '成功那条事件不再带原句：`feedback_ok` 里只剩下判定，学习者的那句话在这条路径上丢了'
+      + '（A4：句子就是语料，Task 9 要靠它持久化、验证三要靠它做人工标注对照）',
+    find: `  const base = { sentence: result?.sentence ?? null, word: result?.word ?? null, scene: result?.scene ?? null };`,
+    replace: '  const base = {};',
+  },
+  {
+    name: 'C8_clientNoSignal', target: COMPOSE, expect: 'detected',
+    why: '客户端请求不带 signal（等于没有超时）：上游半开时这个 Promise 永久 pending，'
+      + '界面卡在"提交中"、学习者以为自己的句子没交出去，而且一条事件都不落——'
+      + '本项目反复出现的"挂死而不是失败"',
+    find: '  const signal = AbortSignal.timeout(timeoutMs);',
+    replace: '  const signal = undefined;',
+  },
+  {
+    name: 'C9_stalledBodyLooksInvalid', target: COMPOSE, expect: 'detected',
+    why: '响应头到了、body 还在流时被上限中止，不再认"这是我们那条上限到点了"：'
+      + '一次**网络停滞**被归成 `response_invalid`，而这一档的处置方向是"改服务端或模型契约"',
+    find: `    if (isTimeoutAbort(err, signal)) {
+      return pending({
+        reason: FEEDBACK_FAIL_REASONS.TIMEOUT,
+        detail: \`造句反馈请求超时（\${timeoutMs}ms 未返回，已主动中止）：\${String(err?.message ?? err)}\`,
+        sentence,
+        word,
+        scene,
+      });
+    }`,
+    replace: '    // 变异体：不再区分"上限到点"与"响应体不是 JSON"',
+  },
+  // ── 造句反馈：服务端给上游的模型契约（Task 8）：V1–V6 ──
+  // 与识物那批（U1–U7）同一个理由：这一层是**会被改坏但测试全绿**的地方，
+  // 而它管的是"模型被要求输出什么"与"什么才算一份能往下走的响应"。
+  {
+    name: 'V1_promptLosesUncertainRewrite', target: FBUP, expect: 'detected',
+    why: '提示词里那条"uncertain 也要给改写建议"被删掉：设计文档 §4.2 要求拿不准时仍给改写建议，'
+      + '而 Task 4 的契约允许 `uncertain + rewrite: null`——不收紧校验器的前提下，'
+      + '提示词是唯一要得到它的地方（A1），删掉它界面上就只剩一句"拿不准"',
+    find: '  \'  When you answer "uncertain", STILL put a suggested rewrite in "rewrite"\',',
+    replace: "  '',",
+  },
+  {
+    name: 'V2_promptLosesFlawedRewrite', target: FBUP, expect: 'detected',
+    why: '提示词里"flawed 必须给改写建议"那半句被删掉：模型的判定对了、改写却可以不给，'
+      + '而界面上"哪里错了 + 该怎么写"是同一屏给出的（设计文档 §4.2 的响应契约要求 rewrite 可空'
+      + '并不等于我们希望它空）',
+    find: '  \'  (never "none"), and MUST give a corrected sentence in "rewrite".\',',
+    replace: "  '',",
+  },
+  {
+    name: 'V3_noJsonMode', target: FBUP, expect: 'detected',
+    why: '上游请求不带 `response_format: json_object`（控制器 A4 要求的兜底）：'
+      + '模型可以合法地吐一段散文，四个字段的解析随之变成"从文本里抠 JSON"——'
+      + '那一档失败会从"契约问题"变成"上游无效"，排查方向被带偏',
+    find: "    response_format: { type: 'json_object' },",
+    replace: '    // 变异体：不带 JSON 模式',
+  },
+  {
+    name: 'V4_seqSaysNone', target: FBUP, expect: 'detected',
+    why: '把 content 判成合法 JSON 即可，不再要求它解出来是**对象**：一个 JSON 数组或字符串'
+      + '（例如 `"correct"`、`[1,2]`）会被当成一份反馈往下走，而它连四个字段都没有',
+    find: `  if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) {
+    throw invalid(\`上游 content 解析出来不是对象：\${JSON.stringify(parsed)?.slice(0, 120)}\`);
+  }`,
+    replace: '  // 变异体：不要求解出来是对象',
+  },
+  {
+    name: 'V5_proseAccepted', target: FBUP, expect: 'detected',
+    why: 'content 不是合法 JSON 时不再失败，而是编一个空对象当反馈：模型吐一段散文被静默降级成'
+      + '"一份缺四个字段的响应"，真凶（模型契约没被遵守）在数据里消失——全局约束 3 的反面',
+    find: `    throw invalid(\`上游 content 不是合法 JSON：\${String(err?.message ?? err)}\`);`,
+    replace: '    parsed = {};',
+  },
+  {
+    name: 'V6_stalledBodyLooksInvalid', target: FBUP, expect: 'detected',
+    why: '上游 body 停滞到上限时不再认"上限到点"（复审 Important 1 的同一形状）：'
+      + '一次网络停滞被归成 `upstream_invalid` → 路由回 502 upstream_invalid，'
+      + '而这一档的意思是"模型契约不对"，排查的人会去改提示词',
+    find: `    if (isTimeoutAbort(err, signal)) {
+      throw failed(\`上游请求超时（\${timeoutMs}ms 未返回，已主动中止）：\${String(err?.message ?? err)}\`);
     }`,
     replace: '    // 变异体：不再区分"上限到点"与"响应体不是 JSON"',
   },

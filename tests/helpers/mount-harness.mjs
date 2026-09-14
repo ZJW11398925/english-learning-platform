@@ -13,7 +13,7 @@
 // 与 tests/recognize-mount.test.mjs 用真模块覆盖）。
 import { mount } from '../../web/app.mjs';
 import { recognizeWithFallback as realRecognizeWithFallback } from '../../web/units/recognize.mjs';
-import { makeEl, btn } from './dom.mjs';
+import { makeEl, btn, text } from './dom.mjs';
 
 export const OK_STATS = { brightness: 128, laplacianVar: 200 };
 
@@ -93,6 +93,9 @@ export { realRecognizeWithFallback };
  *   - `recognize`：识物器（`recognizeWithFallback` 的形状）；缺省为"识别成功"的假识物器。
  *     要跑**真**识物链路就传 `realRecognizeWithFallback`，并用 `withFetch()` 接管全局 fetch。
  *   - `sceneWords`：手选词包（只在与假识物器搭配时用得到）
+ *   - `compose`：造句链路的注入点（`{ submitSentence }`，形状同 `units/compose.mjs`）。
+ *     缺省不注入 = 走真模块；`tests/compose-mount.test.mjs` 用它把网络那一层换掉，
+ *     于是"界面与事件对不对"能单独测。
  *   - `clock` / `onCompose` / `cameraOptions`：透传给 mount()
  * @returns {Promise<object>} `{ root, calls, stream, store, mounted, events, sessionId, machine }`
  */
@@ -105,6 +108,7 @@ export async function harness({
   cameraOptions = undefined,
   recognize = null,
   sceneWords = null,
+  compose = null,
 } = {}) {
   const root = makeEl('div');
   const calls = { openCamera: [], grabFrame: [], recognize: [] };
@@ -149,6 +153,7 @@ export async function harness({
     onCompose,
     cameraOptions,
     recognizeWithFallback,
+    ...(compose === null ? {} : { compose }),
     ...(sceneWords === null ? {} : { manualSceneWords: sceneWords }),
   });
   return {
@@ -204,6 +209,38 @@ let pendingRestore = null;
 /** 兜底：上一个用例没还原就把它还原掉。每个 `withFetch()` 开头调一次。 */
 export function restoreStaleFetch() {
   if (pendingRestore !== null) pendingRestore();
+}
+
+/**
+ * 等待态的那句话（`web/app.mjs` 的 feedback 分支里）。
+ *
+ * 它是**测试与界面之间的一个约定**：这段话改文案时，这个常量要跟着改。
+ * 之所以认文案而不是认内部状态：`mount()` 有意不暴露"反馈拿到没有"的内部标志——
+ * 那属于实现细节；界面上的字才是用户（与测试）能看到的东西。
+ */
+const FEEDBACK_BUSY_MARK = '正在看你这句';
+
+/**
+ * 等**反馈结论落到界面**（Task 8）。
+ *
+ * 为什么需要它：`onSubmit` 是同步的（状态当场推进到 feedback），而拿反馈是**异步**的
+ * （`submitForFeedback` 里的 await，弱网下可能十几秒）。所以"提交造句"的 click 回调 resolve 时，
+ * 界面还停在"正在看你这句…"——这时候去点什么「再写一次」是点不到的。
+ *
+ * **不用固定 sleep**：那会让测试变成"睡够久就过"，而且把一个真实的时序（结论落地）隐掉了。
+ * 这里轮询到界面真的不再是等待态为止，超时即响亮失败。
+ *
+ * @param {object} h `harness()` 的返回值
+ * @param {number} [timeoutMs] 上限（默认 1s：夹具里的假提交器都是立刻返回的）
+ * @throws {Error} 超时（界面一直停在等待态）
+ */
+export async function settleFeedback(h, timeoutMs = 1000) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (!text(h.root).includes(FEEDBACK_BUSY_MARK)) return;
+    await new Promise((r) => setTimeout(r, 1));
+  }
+  throw new Error(`等到超时：反馈结论没有落到界面（还停在"${FEEDBACK_BUSY_MARK}"）`);
 }
 
 

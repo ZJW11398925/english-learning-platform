@@ -23,7 +23,18 @@ import { readFile } from 'node:fs/promises';
 import { extname, join, normalize, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { loadEnv } from './env.mjs';
-import { recognizeUpstream, UPSTREAM_FAILED, UPSTREAM_INVALID, UPSTREAM_TIMEOUT_MS } from './recognize-upstream.mjs';
+import {
+  recognizeUpstream,
+  UPSTREAM_FAILED as RECOGNIZE_UPSTREAM_FAILED,
+  UPSTREAM_INVALID as RECOGNIZE_UPSTREAM_INVALID,
+  UPSTREAM_TIMEOUT_MS as RECOGNIZE_UPSTREAM_TIMEOUT_MS,
+} from './recognize-upstream.mjs';
+import {
+  feedbackUpstream,
+  UPSTREAM_FAILED as FEEDBACK_UPSTREAM_FAILED,
+  UPSTREAM_INVALID as FEEDBACK_UPSTREAM_INVALID,
+  UPSTREAM_TIMEOUT_MS as FEEDBACK_UPSTREAM_TIMEOUT_MS,
+} from './feedback-upstream.mjs';
 
 // web/ 绝对路径。用 fileURLToPath 而非手写路径拼接：Windows 上的 /D:/ 前缀与
 // 百分号编码（本仓库路径含中文）都要还原，否则下面的前缀检查会误判。
@@ -298,16 +309,17 @@ async function handleRecognize(req, res, { env, fetchImpl, upstreamTimeoutMs, lo
       env,
       fetchImpl,
       // 上游那一腿的上限。必须小于客户端那条腿，理由见 recognize-upstream.mjs 的常量说明。
-      timeoutMs: upstreamTimeoutMs,
+      // 生产路径取本端点自己的默认值；`createApp({ upstreamTimeoutMs })` 只用于测试注入。
+      timeoutMs: upstreamTimeoutMs ?? RECOGNIZE_UPSTREAM_TIMEOUT_MS,
     });
   } catch (err) {
     const latencyMs = Date.now() - startedAt;
     // 上游原文只进服务端日志（诊断用），不进响应：响应由对端控制，不给它任何回显面。
     log(`recognize 失败（${String(err?.code ?? 'unknown')}, ${latencyMs}ms）：${String(err?.message ?? err)}`);
-    if (err?.code === UPSTREAM_INVALID) {
+    if (err?.code === RECOGNIZE_UPSTREAM_INVALID) {
       return json(res, 502, { ok: false, error: 'upstream_invalid', latency_ms: latencyMs });
     }
-    if (err?.code === UPSTREAM_FAILED) {
+    if (err?.code === RECOGNIZE_UPSTREAM_FAILED) {
       return json(res, 502, { ok: false, error: 'upstream_failed', latency_ms: latencyMs });
     }
     // 其余（例如 data URL 超限）如实报出来，不假装成上游的问题
@@ -329,9 +341,114 @@ async function handleRecognize(req, res, { env, fetchImpl, upstreamTimeoutMs, lo
 }
 
 /**
- * 请求处理工厂：路由与拆分前逐字相同（`/api/recognize` 由占位变成真实调用）。
+ * `POST /api/feedback`：收一句学习者写的话，转发给文本模型，把四个字段回给客户端（Task 8）。
  *
- * `log` 是 stderr 写入的注入点：默认写 `process.stderr`，测试可注入收集器断言"走了哪条路径"。
+ * 四件必须做的事（brief Step 5 + 控制器追加）：
+ *   ① **强约束提示词**要求模型只输出设计文档 §4.2 的四个字段（提示词在
+ *      `server/feedback-upstream.mjs` 里，可脱离 HTTP 单独测与变异）；
+ *   ② `sentence`/`word`/`scene` 一并写进服务端日志——**原句就是语料**（验证三的采集口），
+ *      而这条路径上没有任何持久化（`compose_submitted` 的落盘归 Task 9），日志是此刻唯一的副本；
+ *   ③ 响应**原样透传**（四字段 + `latency_ms` + `usage`），字段语义的校验交给客户端的
+ *      `validateFeedback`——服务端只守**信封**（见下）；
+ *   ④ 空句/缺 `word`/缺 `scene`/乱码 body/超大 body 一律 400 且**不打上游**：
+ *      这些请求换来的一定是一份无用的判定，而每一次调用都要花钱。
+ *
+ * **信封与语义的分工**：这里只判"上游 HTTP 成功了吗、`choices[0].message.content` 在不在、
+ * 它是不是一个 JSON 对象"（全在 `feedback-upstream.mjs` 里）。四个字段的取值合不合法**不在这里判**
+ * ——那是 `validateFeedback`（Task 4，冻结）的职责。两处各判一套的话，它们迟早漂移成
+ * "服务端放行、客户端拒绝"（或反过来），而两边都"有测试"。
+ *
+ * 与 `/api/recognize` 同样的三条安全性质：响应里**绝不**出现密钥或上游原文（原文只进 stderr）；
+ * 任何畸形输入都只坏这一个请求，进程继续服务；失败形状与识物端点保持一致（502 + `ok:false`）。
+ */
+async function handleFeedback(req, res, { env, fetchImpl, upstreamTimeoutMs, log }) {
+  let body;
+  try {
+    body = await readBody(req);
+  } catch (err) {
+    return json(res, 400, { error: 'bad_request', detail: `请求体读取失败：${String(err?.message ?? err)}` });
+  }
+
+  let payload;
+  try {
+    payload = JSON.parse(body.toString('utf8'));
+  } catch {
+    // 不是 JSON 的 body 是**客户端的错**，不是 500：说清是哪种错，别让它看起来像"模型判不出来"。
+    return json(res, 400, { error: 'bad_request', detail: '请求体不是合法 JSON（期望 { sentence, word, scene }）' });
+  }
+
+  const sentence = payload?.sentence;
+  const word = payload?.word;
+  const scene = payload?.scene;
+  if (typeof sentence !== 'string' || sentence.trim() === '') {
+    // 空句在这里就被拦下：一次上游调用要花钱，而空句换来的一定是一份无用的判定。
+    return json(res, 400, { error: 'bad_request', detail: '缺少 sentence：需要学习者写下的那句话（非空字符串）' });
+  }
+  if (typeof word !== 'string' || word.trim() === '' || typeof scene !== 'string' || scene.trim() === '') {
+    // 提示词需要这两个上下文（"用目标词造句"没有目标词就无从判起）。
+    // 缺了就是缺了：**绝不编一个词或场景**给模型（那会让反馈看起来是针对这个词的，其实不是）。
+    return json(res, 400, { error: 'bad_request', detail: '缺少 word 或 scene：判定需要目标词与场景' });
+  }
+
+  // 原句进服务端日志：验证三的语料采集口，也是失败时唯一的线索。
+  // 只记这一行，且**绝不记密钥**（密钥只出现在对上游的请求头里，不进任何日志）。
+  log(`feedback: word=${word} scene=${scene} sentence=${JSON.stringify(sentence)}`);
+
+  // 配置缺失时**响亮**回一个可诊断的 500，而不是让请求走到上游模块里变成一句
+  // "Failed to parse URL from undefined/chat/completions"——那句话看起来像上游故障，
+  // 真凶却是这份进程没加载 `.env`（`loadEnv()` 只在直接执行那一支跑，测试与误启动都可能缺）。
+  const missing = ['DEEPSEEK_API_KEY', 'DEEPSEEK_API_BASE', 'DEEPSEEK_MODEL']
+    .filter((k) => env?.[k] === undefined || String(env[k]).trim() === '');
+  if (missing.length > 0) {
+    log(`feedback 失败（config_missing）：缺少 ${missing.join(', ')}（启动方式见 server/env.mjs 的 START_COMMAND）`);
+    return json(res, 500, { ok: false, error: 'config_missing', detail: `缺少 ${missing.join(', ')}` });
+  }
+
+  const startedAt = Date.now();
+  let result;
+  try {
+    result = await feedbackUpstream({
+      sentence, word, scene, env, fetchImpl,
+      // 上游那一腿的上限。必须小于客户端那条腿（web/units/compose.mjs），理由见该常量说明。
+      // 生产路径取本端点自己的默认值（20s）；`createApp({ upstreamTimeoutMs })` 只用于测试注入。
+      timeoutMs: upstreamTimeoutMs ?? FEEDBACK_UPSTREAM_TIMEOUT_MS,
+    });
+  } catch (err) {
+    const latencyMs = Date.now() - startedAt;
+    // 上游原文只进服务端日志（诊断用），不进响应：响应由对端控制，不给它任何回显面。
+    log(`feedback 失败（${String(err?.code ?? 'unknown')}, ${latencyMs}ms）：${String(err?.message ?? err)}`);
+    if (err?.code === FEEDBACK_UPSTREAM_INVALID) {
+      // "信封不对"与"上游失败"是两档：前者要改模型契约（提示词/JSON 模式），后者要看网络与上游状态。
+      return json(res, 502, { ok: false, error: 'upstream_invalid', latency_ms: latencyMs });
+    }
+    if (err?.code === FEEDBACK_UPSTREAM_FAILED) {
+      return json(res, 502, { ok: false, error: 'upstream_failed', latency_ms: latencyMs });
+    }
+    // 其余如实报出来，不假装成上游的问题
+    return json(res, 500, { ok: false, error: 'feedback_failed', latency_ms: latencyMs });
+  }
+
+  const latencyMs = Date.now() - startedAt;
+  return json(res, 200, {
+    ok: true,
+    // 四个字段**原样**摊平在响应顶层（不在嵌套对象里）：客户端把整份响应交给 validateFeedback，
+    // 它只认这四个键（多余键按设计放行）。
+    ...result.feedback,
+    latency_ms: latencyMs,
+    // usage 只回三类 token 计数（成本核算只认真实计数，不用估算），不带上游任何原文
+    usage: result.usage === null ? null : {
+      prompt_tokens: result.usage?.prompt_tokens ?? null,
+      completion_tokens: result.usage?.completion_tokens ?? null,
+      total_tokens: result.usage?.total_tokens ?? null,
+    },
+  });
+}
+
+/**
+ * 请求处理工厂：路由与拆分前逐字相同（`/api/recognize` 与 `/api/feedback` 都是真实调用）。
+ *
+ * `log` 是 stderr 写入的注入点：默认写 `process.stderr`，测试可注入收集器断言"走了哪条路径"
+ * （别再引入直接写 stderr 的调用点，否则那类测试永远只能靠"输出里有没有"来判）。
  */
 function makeHandler({ env, fetchImpl, upstreamTimeoutMs, log }) {
   return async function handleRequest(req, res) {
@@ -343,8 +460,9 @@ function makeHandler({ env, fetchImpl, upstreamTimeoutMs, log }) {
         return await handleRecognize(req, res, { env, fetchImpl, upstreamTimeoutMs, log });
       }
       if (req.method === 'POST' && req.url === '/api/feedback') {
-        readBody(req).catch(() => {});
-        return json(res, 200, { ok: false, error: 'not_implemented_until_task_8' });
+        // 同一个上游注入点与上限注入点（Task 8）：两条链路共用 `createApp()` 的配置，
+        // 于是"测试把上游指向本地桩"这件事对两个端点同时成立。
+        return await handleFeedback(req, res, { env, fetchImpl, upstreamTimeoutMs, log });
       }
       if (req.method === 'GET' || req.method === 'HEAD') return await serveStatic(req, res);
       return json(res, 405, { error: 'method_not_allowed' });
@@ -366,14 +484,22 @@ function makeHandler({ env, fetchImpl, upstreamTimeoutMs, log }) {
  * @param {object} [options]
  *   - `env`：模型配置（默认取 `process.env`，与"直接执行"路径一致；测试给一套假配置）
  *   - `fetchImpl`：上游 fetch 注入点（默认全局 `fetch`；测试指向本地桩服务）
- *   - `upstreamTimeoutMs`：上游那一腿的上限（默认 `UPSTREAM_TIMEOUT_MS` = 8000ms）。
- *     注入点是给测试用的（测试用几十毫秒跑完"上游半开"那条路径），生产不传即可。
+ *   - `upstreamTimeoutMs`：**两个模型端点共用**的上游那一腿上限（默认
+ *     `RECOGNIZE_UPSTREAM_TIMEOUT_MS` = 8000ms）。注入点是给测试用的
+ *     （测试用几十毫秒跑完"上游半开"那条路径），生产不传即可。
+ *     Task 8 起它同时管 `/api/feedback`——但两个端点的**生产取值不同**：
+ *     `/api/feedback` 不传本参数时由 `feedbackUpstream` 用它自己的
+ *     `FEEDBACK_UPSTREAM_TIMEOUT_MS`（10s）；构造参数只用于测试注入，
+ *     生产路径（直接执行）两个端点各取自己的默认值。
+ *   - `logImpl`：日志写入注入点（默认 `process.stderr`）。测试注入收集器，
+ *     就能断言"原句有没有进日志""失败诊断走没走那条路"，而不必去翻进程的 stderr。
  * @returns {import('node:http').Server}
  */
 export function createApp({
-  env = process.env, fetchImpl = fetch, upstreamTimeoutMs = UPSTREAM_TIMEOUT_MS,
+  env = process.env, fetchImpl = fetch, upstreamTimeoutMs = null, logImpl = null,
 } = {}) {
-  const server = createServer(makeHandler({ env, fetchImpl, upstreamTimeoutMs, log: (line) => process.stderr.write(`${line}\n`) }));
+  const log = logImpl ?? ((line) => process.stderr.write(`${line}\n`));
+  const server = createServer(makeHandler({ env, fetchImpl, upstreamTimeoutMs, log }));
   // 服务端自己的请求处理上限（见常量说明）：半开客户端不许一直占着 socket 与内存。
   // 放在工厂里而不是直接执行那一支：测试起的是同一个 createApp()，于是这道闸也被测到。
   server.headersTimeout = SERVER_HEADERS_TIMEOUT_MS;

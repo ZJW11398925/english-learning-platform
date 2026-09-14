@@ -23,6 +23,7 @@ import assert from 'node:assert/strict';
 import { mount } from '../web/app.mjs';
 import {
   harness, openCameraAndShoot, withFetch, makeBlob, OK_STATS, okFetch, realRecognizeWithFallback,
+  settleFeedback,
 } from './helpers/mount-harness.mjs';
 import { btn, byTag, text, errorText, makeEl } from './helpers/dom.mjs';
 
@@ -261,11 +262,17 @@ test('走完一整轮：rewrite 回环、跳过跟读、各态停留时长都进
   t += 1000;
   await btn(h.root, '跳过跟读').click();
   t += 4000;                                   // 第一轮 composing 停留 4s
+  byTag(h.root, 'textarea')[0].value = 'I put the mug on the desk.';
   await btn(h.root, '提交造句').click();
+  // Task 8 起提交是**异步**的（要等服务端/模型回话）：结论落地前界面停在"正在看你这句…"，
+  // 那时点「再写一次」是点不到的。所以先等结论落地，再继续走（不用固定 sleep，见夹具说明）。
+  await settleFeedback(h);
   t += 500;
   await btn(h.root, '再写一次').click();
   t += 9000;                                   // 第二轮 composing 停留 9s
+  byTag(h.root, 'textarea')[0].value = 'I put my mug on the desk.';
   await btn(h.root, '提交造句').click();
+  await settleFeedback(h);
   await btn(h.root, '下一个词').click();
 
   assert.equal(h.machine.state, 'done');
@@ -297,7 +304,9 @@ test('完成页：零改写的会话不许说发生过改写（提交 1 次 ≠ 
   await btn(h.root, '快门').click();
   await btn(h.root, '我会读了（开始跟读）').click();
   await btn(h.root, '我读完了').click();
+  byTag(h.root, 'textarea')[0].value = 'This is my mug.';
   await btn(h.root, '提交造句').click();
+  await settleFeedback(h);
   await btn(h.root, '下一个词').click();
 
   assert.equal(h.machine.state, 'done');
@@ -324,7 +333,9 @@ test('完成页：被退回一次、没跳过跟读的会话 → 指标各自如
   await btn(h.root, '快门').click();           // 第 2 帧通过
   await btn(h.root, '我会读了（开始跟读）').click();
   await btn(h.root, '我读完了').click();       // 不是跳过跟读
+  byTag(h.root, 'textarea')[0].value = 'I put the mug on the desk.';
   await btn(h.root, '提交造句').click();
+  await settleFeedback(h);
   await btn(h.root, '下一个词').click();
 
   assert.equal(h.machine.state, 'done');
@@ -338,10 +349,15 @@ test('完成页：被退回一次、没跳过跟读的会话 → 指标各自如
 
 test('造句原文交给注入的钩子（Task 8/9 的接线点），不自己落盘', async () => {
   const seen = [];
+  // 造句链路注入一个假提交器：本用例测的是**钩子接线**，不是网络。
+  // 不注入的话，`mount()` 会去打真的 `/api/feedback`（本用例的全局 fetch 只认识物那条路径，
+  // 于是它必然失败——那会把"钩子有没有被调用"这条断言混进一次网络失败里）。
+  const compose = { submitSentence: async () => ({ status: 'pending', reason: 'timeout', error: 'timeout', sentence: '' }) };
   const h = await withFetch({
     fetchImpl: okFetch,
     recognize: realRecognizeWithFallback,
     onCompose: (x) => seen.push(x),
+    compose,
   });
   await btn(h.root, '拍照').click();
   await btn(h.root, '快门').click();
@@ -351,6 +367,7 @@ test('造句原文交给注入的钩子（Task 8/9 的接线点），不自己�
   assert.ok(ta, 'composing 态必须有输入框');
   ta.value = 'I put the mug on the desk.';
   await btn(h.root, '提交造句').click();
+  // 钩子是**提交即回调**（不等反馈）：造句原文的采集不该被模型那边的快慢牵连。
   assert.equal(seen.length, 1);
   assert.equal(seen[0].text, 'I put the mug on the desk.');
   assert.equal(seen[0].rewriteCount, 1);
@@ -358,11 +375,13 @@ test('造句原文交给注入的钩子（Task 8/9 的接线点），不自己�
   // 事件表里没有 compose_submitted —— 那是 Task 9 的口径，本任务不抢着记一遍（免得重复计数）
   assert.equal(h.events.filter((e) => e.type === 'compose_submitted').length, 0);
   // 回改时带出上一版原文：改写回环的意义就是"改"，不该让人重打一遍
+  await settleFeedback(h);
   await btn(h.root, '再写一次').click();
   assert.equal(byTag(h.root, 'textarea')[0].value, 'I put the mug on the desk.');
   await btn(h.root, '提交造句').click();
   assert.equal(seen.length, 2);
   assert.equal(seen[1].rewriteCount, 2, '第二轮提交时轮次应为 2');
+  await settleFeedback(h);
   h.restoreFetch();
 });
 

@@ -351,14 +351,23 @@ test('正常请求不受影响：路由/405/未实现端点在该守卫落地后
   assert.equal(noImage.status, 400);
   assert.equal((await noImage.json()).error, 'bad_request');
 
-  // `/api/feedback` 仍是 Task 8 的占位：`ok:false` 的"未实现"标记，绝不长得像成功
+  // `/api/feedback` 自 Task 8 起也是**真实端点**：本用例的 app 由 before 起、**没有注入任何 env**，
+  // 所以这里只断言"它不再是占位、并且对不合形状的请求如实回客户端错误"。这条同时钉住两件事：
+  //   · 占位分支真的被换掉了（否则这里会是 200 not_implemented）；
+  //   · 校验顺序是"先看请求形状，再看密钥"——缺 sentence 的请求在解析完 body 时就返回了，
+  //     根本走不到需要密钥的那一步（否则每次扫描器打过来都在打上游）。
+  // 真实判定路径由 tests/feedback-endpoint.test.mjs（本地桩上游）与报告里的实弹探针覆盖。
   const stub = await fetch(`${origin}/api/feedback`, {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ probe: true }),
+    body: JSON.stringify({ sentence: '   ', word: 'mug', scene: 'kitchen' }),
   });
-  assert.equal(stub.status, 200);
-  assert.deepEqual(await stub.json(), { ok: false, error: 'not_implemented_until_task_8' });
+  assert.equal(stub.status, 400);
+  const stubBody = await stub.json();
+  assert.equal(stubBody.error, 'bad_request');
+  assert.match(String(stubBody.detail), /sentence/, '要说清缺的是什么');
+  assert.notEqual(stubBody.error, 'not_implemented_until_task_8', '占位必须已经被换掉');
+  assert.equal(stubBody.ok, undefined, '失败响应里不许有 ok:true');
 });
 
 test('进程级回归闸：真实子进程 `node server/index.mjs` 被畸形请求打过之后仍然活着', async () => {
@@ -426,16 +435,20 @@ test('POST /api/recognize：占位已换成真实端点（不再回 not_implemen
   assert.equal(body.ok, undefined, '失败响应里不许有 ok:true');
 });
 
-test('POST /api/feedback：同样返回 ok:false 的"未实现"标记', async () => {
+test('POST /api/feedback：占位已换成真实端点（不再回 not_implemented，也不再回 200 的假成功）', async () => {
   const res = await fetch(`${origin}/api/feedback`, {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ sentence: 'I am using a mug.' }),
+    body: JSON.stringify({ sentence: 'I am using a mug.', word: 'mug', scene: 'desk' }),
   });
-  assert.equal(res.status, 200);
+  // 本文件的 app 由 before 起、**没有注入 env**（没有密钥），所以真实判定那一步走不到：
+  // 这条断言的是"它已经不是占位"，而不是"它能判定"。真实判定路径见
+  // tests/feedback-endpoint.test.mjs（本地桩上游）与报告里的实弹探针。
+  assert.notEqual(res.status, 200, '占位时代这里回的是 200 + not_implemented');
   const body = await res.json();
-  assert.equal(body.ok, false);
-  assert.equal(body.error, 'not_implemented_until_task_8');
+  assert.equal(body.ok, false, '失败必须明说 ok:false —— 绝不长得像成功（全局约束 3）');
+  assert.notEqual(body.error, 'not_implemented_until_task_8', '占位标记必须已经被换掉');
+  assert.equal('verdict' in body, false, '失败响应里不许带一个 verdict 字段（免得被当成一次判定）');
 });
 
 test('PUT /：未处理的方法 → 405 {"error":"method_not_allowed"}', async () => {
