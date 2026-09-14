@@ -8,7 +8,7 @@
  * 变异体是被测试抓到（DETECTED）还是溜过去了（MISSED），只要有该抓没抓到的就以非零码退出。
  *
  * 用法（在仓库根）：
- *   node scripts/mutation-probe.mjs            # 全部 79 个变异体
+ *   node scripts/mutation-probe.mjs            # 全部 81 个变异体
  *   node scripts/mutation-probe.mjs --only=M2  # 只跑 M2（`--only=F` = 整个 F 系列；规则见下）
  *   KEEP_TMP=1 node scripts/mutation-probe.mjs # 保留临时工作树以便排查
  *
@@ -17,7 +17,7 @@
  *   1. 先按 ID **全串相等**——`--only=M1` 只跑 M1（不再连带 M10–M14），`--only=F12` 只跑 F12；
  *   2. 没有精确命中时退化为**族匹配**（ID 以该串开头）——`--only=F` 跑 F1…F12，`--only=Q` 跑 Q1…Q4，
  *      `--only=S` 跑 Task 6 的状态机 13 条，`--only=C` 跑相机/灰度 13 条，
- *      `--only=R` 跑 Task 7 的 14 条（R1–R14），`--only=U` 跑上游响应校验与超时的 6 条（U1–U6）；
+ *      `--only=R` 跑 Task 7 的 15 条（R1–R15），`--only=U` 跑上游响应校验与超时的 7 条（U1–U7）；
  *   3. 两者皆空即当场 FAIL（并列出全部可用 ID），绝不"跑 0 个然后 PASS"。
  * 这修掉了原先的子串匹配：那时 `--only=F` 会把 `M9_terminalNoFlag`、`Q2_topScoreFirst`、
  * `Q4_hypernymFallback` 一起选中（14 个而不是 11 个），选中的集合与"只看 F 系列"的意图不符。
@@ -47,6 +47,9 @@
  * Task 7 修复轮：R9–R14 与 U1–U6 → 12/12 DETECTED，见 `task-7-report.md` 修复轮一节——
  * 这一轮同时把 `server/recognize-upstream.mjs` 接进了探针（此前它的响应校验规则没有变异证据），
  * 仍**未接入**的是 `server/index.mjs`（路由层与魔数/超时守卫），理由见 TEST_FILES 上方注释）。
+ * Task 7 复审轮的 R15 / U7 → 2/2 DETECTED，见 `task-7-report.md`「修复轮 2」一节——
+ * 它们钉的是"响应头到了、body 还在流时上限到点"必须归**超时**（而不是"响应非法"），
+ * 抓它的是两条真桩（真 createServer + 真 fetch，半截 body 挂住）的用例。
  */
 import { spawn } from 'node:child_process';
 import { createHash } from 'node:crypto';
@@ -763,6 +766,20 @@ const MUTANTS = [
     find: '  const signal = AbortSignal.timeout(timeoutMs);',
     replace: '  const signal = undefined;',
   },
+  {
+    name: 'R15_stalledBodyLooksInvalid', target: REC, expect: 'detected',
+    why: '响应头到了、body 还在流时被上限中止，不再认"这是我们那条上限到点了"（复审 Important 1）：'
+      + '一次**网络停滞**被归成 `response_invalid`，而这一档的处置方向是"改服务端或模型契约"——'
+      + 'Task 10 从 `recognize_failed.reason` 的分布里会读成"契约有问题"',
+    find: `    if (isTimeoutAbort(err, signal)) {
+      const timedOut = new Error(
+        \`识物请求超时（\${timeoutMs}ms 未返回，已主动中止）：\${String(err?.message ?? err)}\`,
+      );
+      timedOut.code = RECOGNIZE_FAIL_REASONS.REQUEST_FAILED;
+      throw timedOut;
+    }`,
+    replace: '    // 变异体：不再区分"上限到点"与"响应体不是 JSON"',
+  },
   // ── 上游响应校验（Task 7 修复轮 · Important 4：把这份模块接进探针）：U1–U5 ──
   // 这批是 review 点名的"没有变异证据"的四条规则（逐条 label 校验 / score → null /
   // 3 条截断 / 32 MiB 上限），外加一条鉴权头。它们全在 server/recognize-upstream.mjs 里，
@@ -808,6 +825,20 @@ const MUTANTS = [
       + '路由与连接都收不回来——本项目反复出现的"挂死而不是失败"',
     find: `  const signal = AbortSignal.timeout(timeoutMs);`,
     replace: '  const signal = undefined;',
+  },
+  {
+    name: 'U7_stalledBodyLooksInvalid', target: UP, expect: 'detected',
+    why: '上游先回响应头、body 再停滞时，不再认"上限到点"（复审 Important 1）：'
+      + '上游停滞被归成 `upstream_invalid` → 路由回 502 upstream_invalid，'
+      + '而这一档的意思是"模型契约不对"——排查的人会去改提示词/模型，真凶却是连接卡住',
+    find: `    if (isTimeoutAbort(err, signal)) {
+      const timedOut = new Error(
+        \`上游请求超时（\${timeoutMs}ms 未返回，已主动中止）：\${String(err?.message ?? err)}\`,
+      );
+      timedOut.code = UPSTREAM_FAILED;
+      throw timedOut;
+    }`,
+    replace: '    // 变异体：不再区分"上限到点"与"响应体不是 JSON"',
   },
 ];
 

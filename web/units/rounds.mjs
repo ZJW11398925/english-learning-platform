@@ -47,6 +47,29 @@
 // 字段"长得像"这一轮不存在"——少算重拍，而看数据的人不会知道（共享上下文全局约束 3
 // 禁止的静默降级）。空轮数（一次都没拍）与"字段缺失"是两件必须分清的事。
 //
+// ── 四个边界条件（Task 7 复审确立，Task 10 必须一并继承）──────────────────────
+// 公式本身是对的，但下面四条边界决定了这些数**在什么范围内才算数**。复审逐条查证过，
+// 不写下来 Task 10 就会各自猜一套口径。
+//
+// 1. **口径是"倾向重拍"的刻意扩展，不是字面照抄。** 判据 B 的字面要求是"需重拍 ≥2 次
+//    **才能取到可用词**"；而 `needs(s) = R(s) ≥ 3` 也把"重拍 ≥2 次、最后**仍然没取到**词"
+//    的会话算进分子。这是**有意的**：重拍两次还是失败，是比"重拍两次终于取到"更糟的结果，
+//    没有理由把它排除在外（把它排除掉，等于奖励"最后干脆放弃"的会话）。
+// 2. **"R = 快门次数"只对"走到了结论"的那些快门成立。** 没有任何结论的轮次——取帧时
+//    `VIDEO_NOT_READY`（画面还没出画）、`judgeFrame` 的 `RangeError`、`grab()` 自身抛错——
+//    **不分配轮次**，事件流里也**一条都不出现**（`app.mjs` 的 `onShutter` 在这三种情形下
+//    return 或原样重抛）。所以 R(s) 读作"产出过结论的快门次数"，不是"用户点过多少次快门"。
+// 3. **分母"全部会话"必须从流里现存的 `sessionId` 反推。** 生产代码**没有任何一处**发出
+//    `session_start`（事件类型表里有它，但没有消费者），所以不存在"一份完整的会话清单"：
+//    - 一次事件都没落的会话**看不见**（例如相机还没打开就退出）；
+//    - 相机被拒的会话只落一条 `blocked_permission`（R(s) = 0，不在 ROUND_EVENT_TYPES 里），
+//      它若进了分母就会**稀释**重拍率（一个压根没拍过的会话被算成"没重拍"）。
+//    因此建议分母定义为 **R(s) ≥ 1 的会话**（即"真的拍过至少一次并走到结论的会话"）；
+//    这个定义由 Task 10 落地，本模块只提供 R(s) 与 needs(s) 两个原语。
+// 4. **三轮取最差值（gate 的聚合）不是本模块的事。** 判据 B 的协议是同一批人跑三轮、
+//    取最差的一轮成闸；那是 Task 10 / 协议层的聚合口径，`rounds.mjs` 只算**单个会话**的
+//    R(s) 与 needs(s)，不做任何跨轮、跨会话的合并——免得两处各写一套聚合、各漂移一次。
+//
 // 纯逻辑模块：零 import、零浏览器 API、零 Node API，浏览器与 Node 都能直接用。
 // 真链路上跑出来的事件流由 `tests/recognize-mount.test.mjs` 断言（代码路径与公式对数），
 // 纯公式由 `tests/rounds.test.mjs` 覆盖。
@@ -142,9 +165,28 @@ export function reShootCountOfSession(events, sessionId) {
 /**
  * 判据 B 的分子口径：这一会话是否"需重拍 **≥2** 次"。
  *
- * @param {number} roundCount 会话的轮数 `R(s)`
+ * @param {number} roundCount 会话的轮数 `R(s)`——**一个计数，不是事件列表**
  * @returns {boolean} `roundCount − 1 >= RESHOOTS_FOR_RETRY`（⟺ `roundCount >= 3`）
+ * @throws {TypeError} `roundCount` 不是 ≥0 的整数。**这是一道类型闸，不是洁癖**（复审 Minor 5）：
+ *   传事件数组进来时，`events - 1` 是 `NaN`、`NaN >= 2` 是 `false`——"这一会话需重拍吗"
+ *   会**静默**回答 false，判据 B 的分子永远是 0，而导出的表看起来完全正常。
+ *   与 `roundIndexOf()` 的"缺 roundIndex 就抛"同一条纪律：宁可响亮地炸，不要安静地少算。
+ *   合法的域是 `R(s)` 本身：0（一次都没拍，不成闸）与正整数。
  */
 export function needsReshoot(roundCount) {
+  if (!Number.isInteger(roundCount) || roundCount < 0) {
+    throw new TypeError(
+      `needsReshoot 只接受"轮数"（≥0 的整数），收到 ${describeArg(roundCount)}——`
+      + '若你手上是事件流，请先过 roundCountOfSession(events, sessionId)；'
+      + '传事件列表会静默算出 false（判据 B 的分子永远为 0）',
+    );
+  }
   return roundCount - 1 >= RESHOOTS_FOR_RETRY;
+}
+
+/** 把非法实参说清楚：数组只说长度，不把整条事件流打进入错误信息（错误信息也会进日志）。 */
+function describeArg(value) {
+  if (Array.isArray(value)) return `数组（${value.length} 条事件）`;
+  if (typeof value === 'number') return `数字 ${String(value)}`;
+  return `${typeof value} ${String(value)}`;
 }

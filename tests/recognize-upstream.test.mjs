@@ -10,6 +10,7 @@
 // 真模型那一趟见报告「实弹探针」一节，它**不可重复**，不能当测试。
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { createServer } from 'node:http';
 
 import {
   recognizeUpstream, RECOGNIZE_PROMPT, MAX_CANDIDATES, UPSTREAM_INVALID, UPSTREAM_FAILED,
@@ -290,6 +291,60 @@ test('上游永不回话 → 在上限内抛 upstream_failed（不是永久 pend
   );
   const elapsed = Date.now() - t0;
   assert.ok(elapsed < 2000, `必须在注入的上限（30ms）内收口，实测 ${elapsed}ms`);
+});
+
+/**
+ * 复审 Important 1 用的桩：**先回响应头 + 半截 body，然后挂住不结束**。
+ *
+ * 与上面的 `stalledFetch`（连接半开、连响应头都不回）不是同一条路：这一次 `fetch()` 已经
+ * resolve 了，中止发生在 **`res.json()` 里面**，于是落进 `.json()` 那个 catch——
+ * 修复前它被归成 `upstream_invalid`（"要改的是模型契约"），而真相是**上游停滞**。
+ * 真 `createServer` + 真 `fetch`：这个形状只有真连接能造出来。
+ */
+function startStallingBodyStub() {
+  const server = createServer((req, res) => {
+    req.on('data', () => {});
+    req.on('end', () => {
+      res.writeHead(200, { 'content-type': 'application/json' });
+      res.write('{"choices":[{"message":{"content":"{\\"candidates\\":'); // 半截 JSON
+      // 有意不 res.end()：body 就停在这里
+    });
+  });
+  return new Promise((resolve) => {
+    server.listen(0, '127.0.0.1', () => resolve({
+      origin: `http://127.0.0.1:${server.address().port}`,
+      async close() {
+        server.closeAllConnections();
+        await new Promise((r) => server.close(r));
+      },
+    }));
+  });
+}
+
+test('响应头到了、body 还在流：上游上限到点算"超时"（upstream_failed），不是"响应非法"', async () => {
+  // 复审实测的形状（80ms 上限、实测 ~90ms 收口）：中止在 `res.json()` 里发生，
+  // 被记成 upstream_invalid → 路由回 502 upstream_invalid，而这一档的意思正是"模型契约不对"。
+  // 一次上游停滞被丢进契约那一档，排查的人会去改提示词/模型，而真正的问题是连接卡住了。
+  const stub = await startStallingBodyStub();
+  const t0 = Date.now();
+  let caught = null;
+  try {
+    await settlesWithin((async () => {
+      try {
+        await recognizeUpstream({
+          image: IMAGE, env: { ...ENV, DEEPSEEK_API_BASE: stub.origin }, timeoutMs: 80,
+        });
+      } catch (err) { caught = err; }
+    })(), 3000, '停滞的上游响应体');
+  } finally {
+    await stub.close();
+  }
+  const elapsed = Date.now() - t0;
+  assert.ok(caught !== null, '上限到点必须抛错，不许静默当成"上游没有候选"');
+  assert.equal(caught.code, UPSTREAM_FAILED, '上游停滞 = 上游失败（超时那一档），不是 upstream_invalid');
+  assert.match(String(caught.message), /超时/, '消息里必须说清是超时');
+  assert.doesNotMatch(String(caught.message), /不是合法 JSON/, '不许再落进"形状非法"那套措辞');
+  assert.ok(elapsed < 2000, `必须在注入的上限（80ms）附近收口，实测 ${elapsed}ms`);
 });
 
 test('默认上限是首轮设定值：正整数字面量，且小于客户端那条腿（由客户端一侧的用例钉住关系）', () => {

@@ -119,6 +119,24 @@ test('还没按过快门（没有任何结论事件）→ 轮数 0、重拍 0、
 
 // ─────────────────────────────────── 响亮失败：不许静默少算 ───────────────────────────────────
 
+test('needsReshoot 只吃"轮数"这个数：传事件数组 / 字符串 / 小数一律响亮抛错（Task 10 会调它）', () => {
+  // 复审探到的坑：它的参数是**计数**而不是事件列表。传事件数组时 `[] - 1` 是 NaN，
+  // `NaN >= 2` 是 false——"这一会话需重拍吗"会**静默**回答 false，
+  // 判据 B 的分子永远为 0，而整个导出看起来完全正常。这是全局约束 3 禁止的静默降级。
+  // 与 `roundIndexOf` 的"缺 roundIndex 就抛"同一条纪律：宁可响亮地炸，不要安静地少算。
+  const events = [ev('recognize_ok', 1), ev('recognize_ok', 2), ev('recognize_ok', 3)];
+  for (const bad of [events, [], '3', 2.5, NaN, -1, null, undefined, {}, true]) {
+    assert.throws(
+      () => needsReshoot(bad),
+      (err) => err instanceof TypeError && /轮数|roundCount/.test(String(err.message)),
+      `needsReshoot(${JSON.stringify(bad) ?? String(bad)}) 必须响亮抛错（静默 false = 少算重拍）`,
+    );
+  }
+  // 合法域：轮数是 0（一次都没拍）或正整数——0 不成闸，且**不许**抛
+  assert.equal(needsReshoot(0), false, '一次都没拍 → 不成闸（0 是合法的轮数）');
+  assert.equal(needsReshoot(3), true, '三轮 = 重拍 2 次 → 成闸');
+});
+
 test('结论事件缺 roundIndex → 响亮报错，绝不静默跳过（跳过 = 少算重拍，判据 B 失真）', () => {
   for (const bad of [undefined, null, 0, -1, 1.5, '1', NaN]) {
     const events = [ev('recognize_ok', bad)];

@@ -273,7 +273,10 @@ test('超大 body → 400，且不把整个 body 读进内存', async () => {
   assert.equal((await fetch(`${origin}/nope.js`)).status, 404);
 });
 
-test('content-type 说不是图片时按 JPEG 兜底（不把上游的 mime 交给客户端控制）', async () => {
+test('客户端声明的 mime 不是图片时，上游 data URL 的 mime 由服务端按字节判定（客户端说了不算）', async () => {
+  // 标题原先写"按 JPEG 兜底"：那个分支（"声明不是 image/* 就当 JPEG"）在魔数校验落地后
+  // 已经不存在了——mime 现在是**服务端按字节**判定的（`sniffImageMime`），与客户端的声明无关。
+  // 断言本身仍然有效：这帧字节能通过校验、且上游收到的是 `data:image/jpeg;base64,`。
   upstream.replyJson({ candidates: [] });
   await postFrame({ mime: 'application/octet-stream' });
   const sent = JSON.parse(upstream.seen.at(-1).body);
@@ -332,6 +335,21 @@ test('服务端设了 requestTimeout / headersTimeout 守卫，且都是正数�
   assert.ok(SERVER_HEADERS_TIMEOUT_MS < SERVER_REQUEST_TIMEOUT_MS, '只发头的半开连接应比整个请求更早被收掉');
 });
 
+test('服务端"整个请求"的上限 > 客户端那条腿：慢但活着的上传由服务端收尾，不被客户端先掐', async () => {
+  // Task 7 复审 Important 2 钉住的关系。原先常量注释里写着"两个守卫都大于客户端那条腿"，
+  // 而 headersTimeout = 10s < 12000ms，那句话是错的（复审已确认行为不受影响：headers 那道闸
+  // 只管"收齐请求头为止"，收齐之后就不再拦 live 上传）。**真正必须成立的关系是这一条**：
+  // 上游慢但活着时，服务端要在自己的上游上限（8s）到点后把 502 写回去，客户端才有机会读到
+  // "服务端说的失败形状"；若服务端先收掉连接，客户端只会看到一次网络层中断，
+  // 分不清模型慢、服务端挂了还是网络断。
+  const { SERVER_REQUEST_TIMEOUT_MS } = await import('../server/index.mjs');
+  const { RECOGNIZE_REQUEST_TIMEOUT_MS } = await import('../web/units/recognize.mjs');
+  assert.ok(
+    SERVER_REQUEST_TIMEOUT_MS > RECOGNIZE_REQUEST_TIMEOUT_MS,
+    `服务端整体请求上限 ${SERVER_REQUEST_TIMEOUT_MS}ms 必须 > 客户端那条腿 ${RECOGNIZE_REQUEST_TIMEOUT_MS}ms`,
+  );
+});
+
 test('上游半开（收下请求却不回话）→ 在服务端上限内回 502 upstream_failed，不挂住客户端', async () => {
   // 上游桩：读完请求就**有意不回**（连接半开）。没有超时闸时，这个 Promise 永久 pending，
   // 界面卡在 capturing、每点一次快门就多挂一个请求，而事件一条都不会落。
@@ -363,6 +381,45 @@ test('上游半开（收下请求却不回话）→ 在服务端上限内回 502
     await new Promise((resolve) => slowApp.close(resolve));
     stalled.closeAllConnections();
     await new Promise((resolve) => stalled.close(resolve));
+  }
+});
+
+test('上游先回响应头、再半截 body 卡住 → 502 upstream_failed（停顿不是"契约非法"）', async () => {
+  // Task 7 复审 Important 1 的第二种形状：响应头已经回来了，卡住的是 **body**。
+  // 修复前它在上游模块里被归成 `upstream_invalid` → 路由回 502 `upstream_invalid`，
+  // 而这一档的处置方向是"改模型契约"——真凶却是上游连接停滞。
+  const stalling = createServer((req, res) => {
+    req.on('data', () => {});
+    req.on('end', () => {
+      res.writeHead(200, { 'content-type': 'application/json' });
+      res.write('{"choices":[{"message":{"content":"{\\"cand'); // 半截 JSON
+      // 有意不 res.end()：body 停在这里
+    });
+  });
+  await new Promise((resolve) => stalling.listen(0, '127.0.0.1', resolve));
+  const slowApp = createApp({
+    env: { ...ENV, DEEPSEEK_API_BASE: `http://127.0.0.1:${stalling.address().port}` },
+    fetchImpl: fetch,
+    upstreamTimeoutMs: 60, // 测试专用注入：不真等生产上限
+  });
+  await new Promise((resolve) => slowApp.listen(0, '127.0.0.1', resolve));
+  try {
+    const t0 = Date.now();
+    const res = await settlesWithin(
+      postFrame({ url: `http://127.0.0.1:${slowApp.address().port}/api/recognize` }),
+      5000, '服务端识物请求（上游 body 停滞）',
+    );
+    const elapsed = Date.now() - t0;
+    assert.equal(res.status, 502);
+    const body = await res.json();
+    assert.equal(body.ok, false, '失败绝不长得像成功');
+    assert.equal(body.error, 'upstream_failed', '停顿按"上游失败（超时）"报，不是 upstream_invalid');
+    assert.ok(elapsed < 3000, `必须在上限（注入 60ms）附近收口，实测 ${elapsed}ms`);
+  } finally {
+    slowApp.closeAllConnections();
+    await new Promise((resolve) => slowApp.close(resolve));
+    stalling.closeAllConnections();
+    await new Promise((resolve) => stalling.close(resolve));
   }
 });
 

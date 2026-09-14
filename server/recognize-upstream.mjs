@@ -22,6 +22,9 @@
 // `fetch` 默认不超时，半开的连接会把这条路由永久挂住；而这个上限必须**小于**客户端那条腿
 // （`web/units/recognize.mjs` 的 `RECOGNIZE_REQUEST_TIMEOUT_MS`），否则"上游慢"在数据里
 // 只会表现为"客户端自己等烦了"，服务端什么都没记。取值理由见该常量。
+// 上限到点在 `fetch()` 那一句和 `res.json()` 那一句**都算"超时"**（`upstream_failed`）：
+// 后者是"响应头已经到了、body 还在流"（一次上游停滞），绝不是 `upstream_invalid`
+// ——把停滞记成"契约不对"，排查的人会去改模型契约（Task 7 复审 Important 1）。
 
 /** 上游返回的东西不是我们能用的形状时抛出的错误上挂的 `code`。 */
 export const UPSTREAM_INVALID = 'upstream_invalid';
@@ -87,6 +90,19 @@ function normalizeCandidate(raw) {
 }
 
 /**
+ * 这次中止/异常是不是"我们设的上限到点了"（与 `web/units/recognize.mjs` 同一判定，理由也同）。
+ *
+ * 上限到点可能发生在 `fetch()` 那一句（连接都没建起来），也可能发生在 `res.json()` 那一句
+ * （**响应头已经到了、body 还在流**）。后者原先被归成 `upstream_invalid` → 路由回
+ * `502 upstream_invalid`，而这一档的意思正是"模型契约不对"——一次上游停滞被丢进契约那一档，
+ * 排查的人会去改提示词/模型，真凶却是连接卡住（Task 7 复审 Important 1）。
+ *
+ * 用 `signal?.` 而不是 `signal.`：信号缺失时这里不许多抛一种错误。
+ */
+const isTimeoutAbort = (err, signal) => signal?.aborted === true
+  || err?.name === 'TimeoutError' || err?.name === 'AbortError';
+
+/**
  * 调用视觉模型识别一帧。
  *
  * @param {object} options
@@ -97,9 +113,10 @@ function normalizeCandidate(raw) {
  *   - `timeoutMs`: 上游请求上限，默认 `UPSTREAM_TIMEOUT_MS`（必须小于客户端那条腿，见该常量）
  * @returns {Promise<{ candidates: Array<{label: string, score: number|null, scene: string|null}> }>}
  *   候选已校验、已截到 `MAX_CANDIDATES` 条；`score`/`scene` 缺失时为 `null`（**不编造**）
- * @throws {Error} `code === 'upstream_failed'`：网络错 / 非 2xx / **超时**（message 带状态码或"超时"）
- * @throws {Error} `code === 'upstream_invalid'`：非 JSON 响应体、choices 结构不对、
- *   `candidates` 不是数组、或数组里有**任何一条**连 `label` 都给不出来
+ * @throws {Error} `code === 'upstream_failed'`：网络错 / 非 2xx / **超时**（message 带状态码或"超时"）。
+ *   超时含"响应头到了、body 还在流"时被上限中止的那一种
+ * @throws {Error} `code === 'upstream_invalid'`：非 JSON 响应体（且**不是**被上限中止的）、choices
+ *   结构不对、`candidates` 不是数组、或数组里有**任何一条**连 `label` 都给不出来
  */
 export async function recognizeUpstream({
   image, mime = 'image/jpeg', env, fetchImpl = fetch, timeoutMs = UPSTREAM_TIMEOUT_MS,
@@ -147,8 +164,7 @@ export async function recognizeUpstream({
   } catch (err) {
     // 超时也算上游失败，但消息必须说清是"超时"：它与"连不上"要能分开看
     // （`AbortSignal.timeout` 触发时 fetch 以 `TimeoutError` 拒绝，部分实现报 `AbortError`）。
-    const timedOut = err?.name === 'TimeoutError' || err?.name === 'AbortError';
-    const wrapped = new Error(timedOut
+    const wrapped = new Error(isTimeoutAbort(err, signal)
       ? `上游请求超时（${timeoutMs}ms 未返回，已主动中止）：${String(err?.message ?? err)}`
       : `上游请求发不出去：${String(err?.message ?? err)}`);
     wrapped.code = UPSTREAM_FAILED;
@@ -168,6 +184,17 @@ export async function recognizeUpstream({
   try {
     payload = await res.json();
   } catch (err) {
+    // 与客户端那一腿同一分类（Task 7 复审 Important 1）：这个 catch 里有两种成因——
+    //   · **响应头到了、body 还在流时上限到点**（上游停滞）→ `upstream_failed` + 说清是超时；
+    //   · 响应体真的不是 JSON → `upstream_invalid`（要改的是模型契约）。
+    // 混为一谈会让路由回 `502 upstream_invalid`，把一次连接停滞说成"契约不对"。
+    if (isTimeoutAbort(err, signal)) {
+      const timedOut = new Error(
+        `上游请求超时（${timeoutMs}ms 未返回，已主动中止）：${String(err?.message ?? err)}`,
+      );
+      timedOut.code = UPSTREAM_FAILED;
+      throw timedOut;
+    }
     const wrapped = new Error(`上游响应不是合法 JSON：${String(err?.message ?? err)}`);
     wrapped.code = UPSTREAM_INVALID;
     throw wrapped;
