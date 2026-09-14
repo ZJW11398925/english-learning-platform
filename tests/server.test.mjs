@@ -326,7 +326,7 @@ test('另一个畸形 target `///`：同样 400 + 进程存活（不是只给 `/
   assert.equal(res.status, 404, '畸形请求之后服务必须仍然正常应答');
 });
 
-test('正常请求不受影响：路由/405/两个桩端点在该守卫落地后逐字未变', async () => {
+test('正常请求不受影响：路由/405/未实现端点在该守卫落地后逐字未变', async () => {
   // 与前面各用例有意重叠：守卫若写错（例如把所有请求都判成畸形），会在**这里**响。
   const ok = await fetch(`${origin}/units/store.mjs`);
   assert.equal(ok.status, 200);
@@ -341,15 +341,24 @@ test('正常请求不受影响：路由/405/两个桩端点在该守卫落地后
   assert.equal(wrongMethod.status, 405);
   assert.deepEqual(await wrongMethod.json(), { error: 'method_not_allowed' });
 
-  for (const path of ['/api/recognize', '/api/feedback']) {
-    const stub = await fetch(`${origin}${path}`, {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ probe: true }),
-    });
-    assert.equal(stub.status, 200);
-    assert.deepEqual(await stub.json(), { ok: false, error: 'not_implemented_until_task_8' });
-  }
+  // `/api/recognize` 自 Task 7 起是**真实端点**，不再是占位：本用例（由本文件的 before 起服务、
+  // **不注入任何 env**）发一个没有图片的请求，它必须回**客户端错误** 400，而不是
+  // 200 + not_implemented、也不是 500。这条同时钉住两件事：
+  //   · 占位分支真的被换掉了（否则这里会是 200 not_implemented）；
+  //   · 路由层在**没有密钥配置**时也不会崩——它在解析完 body、发现没图时就返回了，
+  //     根本走不到需要密钥的那一步（缺图要比"缺密钥"先判，否则每次扫描都在打上游）。
+  const noImage = await fetch(`${origin}/api/recognize`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}' });
+  assert.equal(noImage.status, 400);
+  assert.equal((await noImage.json()).error, 'bad_request');
+
+  // `/api/feedback` 仍是 Task 8 的占位：`ok:false` 的"未实现"标记，绝不长得像成功
+  const stub = await fetch(`${origin}/api/feedback`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ probe: true }),
+  });
+  assert.equal(stub.status, 200);
+  assert.deepEqual(await stub.json(), { ok: false, error: 'not_implemented_until_task_8' });
 });
 
 test('进程级回归闸：真实子进程 `node server/index.mjs` 被畸形请求打过之后仍然活着', async () => {
@@ -400,16 +409,21 @@ test('进程级回归闸：真实子进程 `node server/index.mjs` 被畸形请�
 
 // ─────────────────────────────────────────────────────────── 端点占位与未知方法
 
-test('POST /api/recognize：200 但 ok:false 的"未实现"标记（绝不长得像成功）', async () => {
+test('POST /api/recognize：占位已换成真实端点（不再回 not_implemented，也不再回 200 的假成功）', async () => {
+  // Task 7 的验收点之一：这条断言在实现之前是**红的**（那时回的是 200 + not_implemented_until_task_8）。
+  // 本文件的 app 由 before 起、**没有注入 env**，所以这里不能断言"能识别"——只能断言
+  // "它已经是真实端点、并且对缺图的请求如实回客户端错误"。真实识别路径由
+  // tests/recognize-endpoint.test.mjs（本地桩上游）与报告里的实弹探针覆盖。
   const res = await fetch(`${origin}/api/recognize`, {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
     body: JSON.stringify({ image: 'data:image/jpeg;base64,AAAA' }),
   });
-  assert.equal(res.status, 200);
+  assert.equal(res.status, 400);
   const body = await res.json();
-  assert.equal(body.ok, false, 'ok 必须显式为 false——失败不得静默降级为成功');
-  assert.equal(body.error, 'not_implemented_until_task_8');
+  assert.equal(body.error, 'bad_request');
+  assert.notEqual(body.error, 'not_implemented_until_task_8');
+  assert.equal(body.ok, undefined, '失败响应里不许有 ok:true');
 });
 
 test('POST /api/feedback：同样返回 ok:false 的"未实现"标记', async () => {

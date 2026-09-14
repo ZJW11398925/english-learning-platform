@@ -2,116 +2,29 @@
 //
 // `mount()`（web/app.mjs 的浏览器装配层）的测试。用**假 DOM** 跑，所以整份都能在 Node 里跑。
 //
-// 为什么值得测这一层（而不是"骨架而已，等 Task 7 再说"）：这一层是**唯一**判断
-// "这帧能不能送识别"的地方，而它最容易犯的错正是全局约束 3 禁止的那两种：
-//   ① 质检说 { ok: false } 却不落 frame_rejected（用户看到重拍提示，但计数里没有——retry_rate 失真）；
-//   ② judgeFrame 抛的 RangeError 被 catch 成"这张照片不行"（编程缺陷被伪装成用户问题）。
+// 为什么值得测这一层（而不是"骨架而已，等 Task 7 再说"）：这一层是唯一把"识物链路的结论"
+// 翻译成**状态与事件**的地方，而它最容易犯的错正是全局约束 3 禁止的那两种：
+//   ① 识物说 `frame_rejected` 却不落 `frame_rejected` 事件（用户看到重拍提示，但计数里没有——retry_rate 失真）；
+//   ② `judgeFrame` 抛的 RangeError 被 catch 成"这张照片不行"（编程缺陷被伪装成用户问题）。
 // 两条都有专门用例。
 //
-// 注入的是 store / camera / urlApi / 时钟；**不注入** recordEvent 与 judgeFrame——
-// 用真实的 event-log（顺带验证 mount 落的事件类型都是登记过的）与真实的 frame-qc 判定。
+// 注入的是 store / camera / urlApi / 时钟；**不注入** recordEvent——
+// 用真实的 event-log（顺带验证 mount 落的事件类型都是登记过的）。
+//
+// Task 7 起本文件主要测**骨架**：识物接线（识别成功 / 手选降级 / 事件 payload）在
+// `tests/recognize-mount.test.mjs` 里单独覆盖。夹具在 tests/helpers/mount-harness.mjs，
+// 两份测试共用，免得同一个 mount() 在两份夹具有两种行为。
+//
+// 走**真识物链路**的用例写成 `withFetch({ fetchImpl: okFetch, recognize: realRecognizeWithFallback })`：
+// `mount()` 有意不传 `fetchImpl`，"网络出口"就是全局 `fetch`，所以测试接管的是**真实那条路径**。
+// 用完必须调 `h.restoreFetch()`（用例中途抛错时，下一次 `withFetch()` 调用会兜底还原）。
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { mount } from '../web/app.mjs';
-
-// ───────────────────────────── 假 DOM（只实现 mount 用到的那一小片）─────────────────────────────
-
-function makeEl(tag) {
-  const listeners = new Map();
-  const el = {
-    tagName: String(tag).toUpperCase(),
-    children: [],
-    className: '',
-    textContent: '',
-    value: '',
-    disabled: false,
-    attributes: {},
-    setAttribute(k, v) { el.attributes[k] = v; },
-    append(...nodes) { el.children.push(...nodes); },
-    replaceChildren(...nodes) { el.children = nodes; },
-    addEventListener(type, fn) {
-      listeners.set(type, [...(listeners.get(type) ?? []), fn]);
-    },
-    /** 返回回调的返回值：mount 的 click 回调是 async，测试要能 await 到它的拒绝。 */
-    click() {
-      const fns = listeners.get('click') ?? [];
-      const results = fns.map((fn) => fn({ type: 'click' }));
-      return results.length === 1 ? results[0] : Promise.all(results);
-    },
-  };
-  if (el.tagName === 'VIDEO') {
-    el.videoWidth = 640;
-    el.videoHeight = 480;
-    el.srcObject = null;
-    el.playCalls = 0;
-    el.play = async () => { el.playCalls += 1; };
-  }
-  return el;
-}
-
-const walk = (el) => [el, ...el.children.flatMap(walk)];
-const byTag = (root, tag) => walk(root).filter((e) => e.tagName === tag.toUpperCase());
-const btn = (root, text) => byTag(root, 'button').find((b) => b.textContent.includes(text));
-const text = (root) => walk(root).map((e) => `${e.textContent}${e.value}`).join(' ');
-const errorText = (root) => walk(root).filter((e) => e.className === 'error').map((e) => e.textContent).join(' ');
-
-// ───────────────────────────────────── 测试夹具 ─────────────────────────────────────
-
-const OK_STATS = { brightness: 128, laplacianVar: 200 };
-
-/**
- * 夹具参数可以是**值**也可以是**函数**：函数每次调用时求值一次，于是"第一次失败、第二次成功"
- * 这类序列（重试清错、被拒后重拍）才写得出来。值照旧原样返回，既有用例的语义不变。
- */
-const knob = (v) => (typeof v === 'function' ? v() : v);
-
-function harness({
-  grabResult = { blob: { size: 9, type: 'image/jpeg' }, stats: OK_STATS },
-  grabError = null,
-  openError = null,
-  clock = Date.now,
-  onCompose = null,
-  cameraOptions = undefined,
-} = {}) {
-  const root = makeEl('div');
-  const calls = { openCamera: [], grabFrame: [] };
-  const stream = {
-    tracks: [{ stopped: false, stop() { this.stopped = true; } },
-      { stopped: false, stop() { this.stopped = true; } }],
-    getTracks() { return this.tracks; },
-  };
-  const camera = {
-    VIDEO_NOT_READY: 'VIDEO_NOT_READY',
-    async openCamera(video, opts) {
-      calls.openCamera.push({ video, opts });
-      const err = knob(openError);
-      if (err !== null && err !== undefined) throw err;
-      video.srcObject = stream;
-      await video.play();
-      return stream;
-    },
-    async grabFrame(video, canvas, opts) {
-      calls.grabFrame.push({ video, canvas, opts });
-      const err = knob(grabError);
-      if (err !== null && err !== undefined) throw err;
-      return knob(grabResult);
-    },
-  };
-  const store = { appended: [], appendEvent(e) { store.appended.push(e); } };
-  let urls = 0;
-  const urlApi = { createObjectURL: () => `blob:fake-${urls += 1}`, revokeObjectURL: () => {} };
-
-  return mount(root, { doc: { createElement: makeEl }, camera, store, urlApi, clock, onCompose, cameraOptions })
-    .then((mounted) => ({
-      root, calls, stream, store, mounted, events: store.appended, sessionId: mounted.sessionId,
-      machine: mounted.machine,
-    }));
-}
-
-const openCameraAndShoot = async (h) => {
-  await btn(h.root, '拍照').click();
-  await btn(h.root, '快门').click();
-};
+import {
+  harness, openCameraAndShoot, withFetch, makeBlob, OK_STATS, okFetch, realRecognizeWithFallback,
+} from './helpers/mount-harness.mjs';
+import { btn, byTag, text, errorText, makeEl } from './helpers/dom.mjs';
 
 // ───────────────────────────────────── 用例 ─────────────────────────────────────
 
@@ -147,8 +60,8 @@ test('注入的 cameraOptions 覆盖取景默认值（默认后置有断言，�
   assert.deepEqual(h.calls.openCamera[0].opts, { facingMode: 'user', width: { ideal: 640 } });
 });
 
-test('快门：质检通过 → 冻结这一帧进 word，并明说识物未接入（不伪造词）', async () => {
-  const h = await harness();
+test('快门：质检通过 → 冻结这一帧进 word，并显示真实取到的词（占位已拆）', async () => {
+  const h = await withFetch({ fetchImpl: okFetch, recognize: realRecognizeWithFallback });
   await openCameraAndShoot(h);
   assert.equal(h.machine.state, 'word');
   assert.equal(h.calls.grabFrame.length, 1, '快门必须真的取一帧');
@@ -158,13 +71,22 @@ test('快门：质检通过 → 冻结这一帧进 word，并明说识物未接�
   assert.ok(img, 'word 态要显示冻结的那一帧');
   assert.equal(img.src, 'blob:fake-1');
 
-  assert.match(text(h.root), /Task 7/, '占位必须点明识物尚未接入');
+  // Task 7 起这一屏显示的是**真实取到的词**（夹具里是 mug）。此前那句"识物尚未接入"的占位
+  // 已经拆掉——留着它等于在界面上说一句假话。
+  assert.equal(byTag(h.root, 'h2')[0].textContent, 'mug', 'word 态要把取到的词显示出来');
+  assert.doesNotMatch(text(h.root), /尚未接入/, '占位文案必须拆掉（识物已接入）');
+  assert.equal(h.events.filter((e) => e.type === 'recognize_ok').length, 1, '取到词要落 recognize_ok');
   // 镜头必须关掉：摄像头灯亮着整个会话既费电又吓人
   assert.deepEqual(h.stream.tracks.map((t) => t.stopped), [true, true]);
+  h.restoreFetch();
 });
 
 test('快门：质检不通过 → 如实落一条 frame_rejected（带 reason），退回 ready 并提示重拍', async () => {
-  const h = await harness({ grabResult: { blob: { size: 9 }, stats: { brightness: 10, laplacianVar: 10 } } });
+  const h = await withFetch({
+    fetchImpl: okFetch,
+    recognize: realRecognizeWithFallback,
+    grabResult: { blob: makeBlob(9), stats: { brightness: 10, laplacianVar: 10 } },
+  });
   await openCameraAndShoot(h);
   assert.equal(h.machine.state, 'ready', '被拒的帧要退回拍摄态重拍');
   assert.equal(h.machine.snapshot().frameRejections, 1);
@@ -180,30 +102,41 @@ test('快门：质检不通过 → 如实落一条 frame_rejected（带 reason�
   // 也照样绿——一条永不可能红的断言。这里钉住 REJECT_HINT.too_dark 的开头。
   assert.match(text(h.root), /刚才那张太暗/, '要告诉用户为什么被退回（且必须来自拒帧提示，不是首屏静态说明）');
   assert.ok(btn(h.root, '拍照'), '退回后还能重拍');
+  // 判帧只有一处起源：mount 把取帧函数交给识物链路，而不是自己再判一次（追加要求 1）
+  assert.equal(typeof h.calls.recognize[0].grab, 'function');
+  h.restoreFetch();
 });
 
 test('快门：模糊帧同样退回并落 too_blurry（不是一律报太暗）', async () => {
-  const h = await harness({ grabResult: { blob: { size: 9 }, stats: { brightness: 128, laplacianVar: 1 } } });
+  const h = await withFetch({
+    fetchImpl: okFetch,
+    recognize: realRecognizeWithFallback,
+    grabResult: { blob: makeBlob(9), stats: { brightness: 128, laplacianVar: 1 } },
+  });
   await openCameraAndShoot(h);
   assert.equal(h.machine.state, 'ready');
   assert.deepEqual(h.events.filter((e) => e.type === 'frame_rejected')[0].payload, { reason: 'too_blurry' });
   // 同上：/糊/ 会被首屏那句"太糊"满足；只有拒帧提示独有的措辞才能证明理由真的传到了界面。
   assert.match(text(h.root), /刚才那张有点糊/, '模糊这一档也要给出它自己的那句提示');
   assert.doesNotMatch(text(h.root), /刚才那张太暗/, 'too_blurry 不许被渲染成"太暗"（理由不许串档）');
+  h.restoreFetch();
 });
 
 test('落事件用注入的时钟：ts 等于注入值，而不是偷偷回退到 Date.now', async () => {
   // `recordEvent(store, type, fields, now)` 的第四个参数就是时钟注入点。少了它，
   // 事件的 ts 变成"记下来的那一刻"（Date.now）——注入假时钟的测试与重放都对不上时间轴。
   const T = 1_700_000_000_000;                 // 固定值：与真实 Date.now() 必然不等
-  const h = await harness({
+  const h = await withFetch({
+    fetchImpl: okFetch,
+    recognize: realRecognizeWithFallback,
     clock: () => T,
-    grabResult: { blob: { size: 9 }, stats: { brightness: 10, laplacianVar: 10 } },
+    grabResult: { blob: makeBlob(9), stats: { brightness: 10, laplacianVar: 10 } },
   });
   await openCameraAndShoot(h);
   const rejected = h.events.filter((e) => e.type === 'frame_rejected');
   assert.equal(rejected.length, 1);
   assert.equal(rejected[0].ts, T, 'frame_rejected 的 ts 必须来自注入时钟');
+  h.restoreFetch();
 
   const denied = Object.assign(new Error('Permission denied'), { name: 'NotAllowedError' });
   const h2 = await harness({ clock: () => T, openError: denied });
@@ -216,34 +149,41 @@ test('落事件用注入的时钟：ts 等于注入值，而不是偷偷回退�
 test('快门：judgeFrame 抛 RangeError 时绝不改判成"这张照片不行"（显示 + 原样重抛）', async () => {
   // stats 里放 NaN：judgeFrame 按契约抛 RangeError（编程错误）。它必须是**刺眼的**，
   // 不许被 catch 成一次用户可见的拒帧——那会把 bug 记到用户头上，并污染 retry_rate。
-  const h = await harness({ grabResult: { blob: { size: 9 }, stats: { brightness: NaN, laplacianVar: 10 } } });
+  const h = await withFetch({
+    fetchImpl: okFetch,
+    recognize: realRecognizeWithFallback,
+    grabResult: { blob: makeBlob(9), stats: { brightness: NaN, laplacianVar: 10 } },
+  });
   await btn(h.root, '拍照').click();
   await assert.rejects(() => btn(h.root, '快门').click(), RangeError, 'RangeError 必须继续往上冒');
   assert.equal(h.machine.state, 'capturing', '状态不许被这次异常推动');
   assert.equal(h.machine.snapshot().frameRejections, 0);
   assert.equal(h.events.length, 0, '一条 frame_rejected 都不许落');
   assert.match(errorText(h.root), /程序缺陷/, '界面上也要说清这是程序问题，不是照片问题');
+  h.restoreFetch();
 });
 
 test('快门：视频还没出画（按太早）→ 只提示稍候，不落事件、不改状态', async () => {
   const notReady = Object.assign(new Error('grabFrame: 视频还没出画'), { code: 'VIDEO_NOT_READY' });
-  const h = await harness({ grabError: notReady });
+  const h = await withFetch({ fetchImpl: okFetch, recognize: realRecognizeWithFallback, grabError: notReady });
   await btn(h.root, '拍照').click();
   await btn(h.root, '快门').click();
   assert.equal(h.machine.state, 'capturing', '还在取景，等下一按');
   assert.equal(h.events.length, 0, '这不是一次"照片被拒"，不该落 frame_rejected');
   assert.equal(h.machine.snapshot().frameRejections, 0);
   assert.match(text(h.root), /稍等|准备好/);
+  h.restoreFetch();
 });
 
 test('快门：其它取帧错误原样重抛（不静默变成功、也不变成拒帧）', async () => {
   const boom = new Error('取帧时炸了');
-  const h = await harness({ grabError: boom });
+  const h = await withFetch({ fetchImpl: okFetch, recognize: realRecognizeWithFallback, grabError: boom });
   await btn(h.root, '拍照').click();
   await assert.rejects(() => btn(h.root, '快门').click(), /取帧时炸了/);
   assert.equal(h.machine.state, 'capturing');
   assert.equal(h.events.length, 0);
   assert.match(errorText(h.root), /取帧失败/);
+  h.restoreFetch();
 });
 
 test('报错文案清空（开机）：授权被拒后重试成功 → 上一次的报错必须消失', async () => {
@@ -263,13 +203,18 @@ test('报错文案清空（开机）：授权被拒后重试成功 → 上一次
 test('报错文案清空（快门）：按太早之后补按成功 → 那句"稍等"必须消失', async () => {
   const notReady = Object.assign(new Error('grabFrame: 视频还没出画'), { code: 'VIDEO_NOT_READY' });
   let attempt = 0;
-  const h = await harness({ grabError: () => (attempt++ === 0 ? notReady : null) });
+  const h = await withFetch({
+    fetchImpl: okFetch,
+    recognize: realRecognizeWithFallback,
+    grabError: () => (attempt++ === 0 ? notReady : null),
+  });
   await btn(h.root, '拍照').click();
   await btn(h.root, '快门').click();
   assert.match(errorText(h.root), /稍等|准备好/);
   await btn(h.root, '快门').click();
   assert.equal(h.machine.state, 'word', '第二按取到帧 → 进 word');
   assert.equal(errorText(h.root), '', '帧取到之后，那句"稍等"必须被清掉');
+  h.restoreFetch();
 });
 
 test('连点两次「拍照」只开一路相机（手机上双击不该开出两路流）', async () => {
@@ -308,7 +253,7 @@ test('没有 mediaDevices（http:// + 局域网 IP）：落 blocked_permission(u
 
 test('走完一整轮：rewrite 回环、跳过跟读、各态停留时长都进得了快照', async () => {
   let t = 10_000;
-  const h = await harness({ clock: () => t });
+  const h = await withFetch({ fetchImpl: okFetch, recognize: realRecognizeWithFallback, clock: () => t });
   await btn(h.root, '拍照').click();
   t += 3000;                                   // capturing 停留 3s
   await btn(h.root, '快门').click();
@@ -341,12 +286,13 @@ test('走完一整轮：rewrite 回环、跳过跟读、各态停留时长都进
   assert.match(doneText, /reading 1\.0s/);
   assert.match(doneText, /composing 13\.0s/);
   assert.match(doneText, /feedback 0\.5s/);
+  h.restoreFetch();
 });
 
 test('完成页：零改写的会话不许说发生过改写（提交 1 次 ≠ 改写 1 次）', async () => {
   // `rewriteCount` 的口径是**提交次数**：第一次提交后它就已经是 1，而这位学习者一次都没回改。
   // 直接把它渲染成"改写 1 次"是在界面上说一句假话，并会误导后续关于"改写行为"的统计。
-  const h = await harness();
+  const h = await withFetch({ fetchImpl: okFetch, recognize: realRecognizeWithFallback });
   await btn(h.root, '拍照').click();
   await btn(h.root, '快门').click();
   await btn(h.root, '我会读了（开始跟读）').click();
@@ -359,14 +305,19 @@ test('完成页：零改写的会话不许说发生过改写（提交 1 次 ≠ 
   const doneText = text(h.root);
   assert.match(doneText, /改写 0 次/, '一次都没回改 → 改写次数必须是 0');
   assert.doesNotMatch(doneText, /改写 [1-9]\d* 次/, '绝不许声称发生过改写');
+  h.restoreFetch();
 });
 
 test('完成页：被退回一次、没跳过跟读的会话 → 指标各自如实（不是把 0/否 写死）', async () => {
   // 上一轮全轮用例里"被退回的帧：0"与"跳过跟读：是"只钉住了一半：写死常量也能绿。
   // 这一轮把另外两个取值跑出来（被退回 1 次、没跳过），四项指标才算两头都钉住。
   let shot = 0;
-  const h = await harness({
-    grabResult: () => (shot++ === 0 ? { blob: { size: 9 }, stats: { brightness: 10, laplacianVar: 10 } } : { blob: { size: 9 }, stats: OK_STATS }),
+  const h = await withFetch({
+    fetchImpl: okFetch,
+    recognize: realRecognizeWithFallback,
+    grabResult: () => (shot++ === 0
+      ? { blob: makeBlob(9), stats: { brightness: 10, laplacianVar: 10 } }
+      : { blob: makeBlob(9), stats: OK_STATS }),
   });
   await openCameraAndShoot(h);                 // 第 1 帧太暗 → 退回重拍
   await btn(h.root, '拍照').click();
@@ -382,11 +333,16 @@ test('完成页：被退回一次、没跳过跟读的会话 → 指标各自如
   assert.match(doneText, /被退回的帧：1/, '被退回的次数要如实摊出来');
   assert.match(doneText, /跳过跟读：否/);
   assert.match(doneText, /改写 0 次/);
+  h.restoreFetch();
 });
 
 test('造句原文交给注入的钩子（Task 8/9 的接线点），不自己落盘', async () => {
   const seen = [];
-  const h = await harness({ onCompose: (x) => seen.push(x) });
+  const h = await withFetch({
+    fetchImpl: okFetch,
+    recognize: realRecognizeWithFallback,
+    onCompose: (x) => seen.push(x),
+  });
   await btn(h.root, '拍照').click();
   await btn(h.root, '快门').click();
   await btn(h.root, '我会读了（开始跟读）').click();
@@ -407,6 +363,7 @@ test('造句原文交给注入的钩子（Task 8/9 的接线点），不自己�
   await btn(h.root, '提交造句').click();
   assert.equal(seen.length, 2);
   assert.equal(seen[1].rewriteCount, 2, '第二轮提交时轮次应为 2');
+  h.restoreFetch();
 });
 
 test('mount 的入参契约：容器不是元素时抛 TypeError（而不是挂到一半白屏）', async () => {
@@ -416,7 +373,7 @@ test('mount 的入参契约：容器不是元素时抛 TypeError（而不是挂�
   await assert.rejects(() => mount({}, deps), TypeError);
 });
 
-test('mount 返回 Task 7 需要的注入点：machine / sessionId / store / grab', async () => {
+test('mount 返回识物链路需要的注入点：machine / sessionId / store / grab', async () => {
   const h = await harness();
   const { machine, sessionId, store, grab } = h.mounted;
   assert.equal(machine.state, 'ready');

@@ -2,12 +2,12 @@
  * 变异探针（可重复运行的证据生成器，零依赖、非测试文件）。
  *
  * 用途：把 review 轮（`rv3-probe.mjs`）枚举的 18 个变异体 + Task 4 的 12 个变异体 + Task 5 修复轮
- * 的 3 个环境校验变异体 + Task 6 的 26 个（状态机 13 + 相机/灰度 13）固化成仓库内可复跑的证据
- * ——逐个"把实现改坏"，跑 `tests/` 下被登记的那 7 个测试文件，报告每个变异体是被测试抓到
- * （DETECTED）还是溜过去了（MISSED），只要有该抓没抓到的就以非零码退出。
+ * 的 3 个环境校验变异体 + Task 6 的 26 个（状态机 13 + 相机/灰度 13）+ Task 7 的 8 个识物变异体
+ * 固化成仓库内可复跑的证据——逐个"把实现改坏"，跑 `tests/` 下被登记的那 9 个测试文件，报告每个
+ * 变异体是被测试抓到（DETECTED）还是溜过去了（MISSED），只要有该抓没抓到的就以非零码退出。
  *
  * 用法（在仓库根）：
- *   node scripts/mutation-probe.mjs            # 全部 59 个变异体
+ *   node scripts/mutation-probe.mjs            # 全部 67 个变异体
  *   node scripts/mutation-probe.mjs --only=M2  # 只跑 M2（`--only=F` = 整个 F 系列；规则见下）
  *   KEEP_TMP=1 node scripts/mutation-probe.mjs # 保留临时工作树以便排查
  *
@@ -15,7 +15,7 @@
  * `F12_messageDropsValue` → `F12`）：
  *   1. 先按 ID **全串相等**——`--only=M1` 只跑 M1（不再连带 M10–M14），`--only=F12` 只跑 F12；
  *   2. 没有精确命中时退化为**族匹配**（ID 以该串开头）——`--only=F` 跑 F1…F12，`--only=Q` 跑 Q1…Q4，
- *      `--only=S` 跑 Task 6 的状态机 13 条，`--only=C` 跑相机/灰度 13 条；
+ *      `--only=S` 跑 Task 6 的状态机 13 条，`--only=C` 跑相机/灰度 13 条，`--only=R` 跑 Task 7 的 8 条；
  *   3. 两者皆空即当场 FAIL（并列出全部可用 ID），绝不"跑 0 个然后 PASS"。
  * 这修掉了原先的子串匹配：那时 `--only=F` 会把 `M9_terminalNoFlag`、`Q2_topScoreFirst`、
  * `Q4_hypernymFallback` 一起选中（14 个而不是 11 个），选中的集合与"只看 F 系列"的意图不符。
@@ -40,7 +40,8 @@
  * 结论：见文末运行输出的汇总行（Task 3：17/17 可抓变异体 DETECTED + M2 证为等价变异体；
  * Task 4：12/12 可抓变异体 DETECTED，见 `task-4-report.md`；
  * Task 5 修复轮：N1–N3 → 3/3 DETECTED，见 `task-5-report.md` 修复轮一节；
- * Task 6：S1–S13 与 C1–C13 → 26/26 DETECTED，见 `task-6-report.md`）。
+ * Task 6：S1–S13 与 C1–C13 → 26/26 DETECTED，见 `task-6-report.md`；
+ * Task 7：R1–R8 → 8/8 DETECTED，见 `task-7-report.md`）。
  */
 import { spawn } from 'node:child_process';
 import { createHash } from 'node:crypto';
@@ -70,6 +71,7 @@ const MODULE_FILES = {
   'frame-qc': 'web/units/frame-qc.mjs',
   'event-log': 'web/units/event-log.mjs',
   app: 'web/app.mjs',
+  recognize: 'web/units/recognize.mjs',
 };
 const TEST_FILES = [
   'tests/scheduler.test.mjs',
@@ -79,10 +81,31 @@ const TEST_FILES = [
   'tests/state-machine.test.mjs',
   'tests/camera.test.mjs',
   'tests/app-mount.test.mjs',
+  'tests/recognize.test.mjs',
+  'tests/recognize-mount.test.mjs',
 ];
 // `tests/index-html.test.mjs` **有意不进这张表**：它读 `web/index.html` 这个真实文件，
 // 而临时树只复制模块与测试，进来会因缺文件而假红。它由 `node --test` 全量套件守着。
+//
+// `tests/recognize-upstream.test.mjs` / `tests/recognize-endpoint.test.mjs` / `tests/server.test.mjs`
+// 同样**有意不进**（Task 7）：它们 import `server/recognize-upstream.mjs` / `server/index.mjs`，
+// 而后者的路由表里写死了 `../web/` 的绝对路径（`fileURLToPath(new URL('../web/', import.meta.url))`）
+// ——在临时树里那会指向**临时树的 web/**，静态托管用例会对不上。要让它们进来，得先让临时树
+// 复制整个 `web/` 与 `server/`，而这两份测试里还有子进程 + 15s 超时闸的用例：
+// 单次变异体可能要跑一分钟以上，59+8 个变异体就是小时级。探针的价值在于**快**（现在一轮 < 1 分钟），
+// 因此这里只接纯逻辑模块，服务层由 `node --test` 全量套件守着。
 const TEST_ARGS = ['--test', ...TEST_FILES];
+/**
+ * 测试夹具体系（Task 7 起必需）：`tests/recognize-mount.test.mjs` 与 `tests/app-mount.test.mjs`
+ * 都 import `tests/helpers/*.mjs`。少复制一个，临时树里的基线就会因"缺文件"而假红——
+ * 而基线假红会让整轮结论作废（探针最忌讳的假信号）。
+ * 它们不参与变异（没有对应的变异体），进表只为"临时树里 import 得到"。
+ */
+const HELPER_FILES = [
+  'tests/helpers/dom.mjs',
+  'tests/helpers/fakes.mjs',
+  'tests/helpers/mount-harness.mjs',
+];
 const only = (process.argv.find((a) => a.startsWith('--only=')) ?? '').slice('--only='.length);
 
 /** 变异体 ID：名字里第一个 `_` 之前的那段（`F12_messageDropsValue` → `F12`）。 */
@@ -106,6 +129,7 @@ const FEEDBACK = MODULE_FILES.feedback;
 const ENV = MODULE_FILES.env;
 const SM = MODULE_FILES['state-machine'];
 const CAM = MODULE_FILES.camera;
+const REC = MODULE_FILES.recognize;
 
 const PICK_ORIGINAL = `export function pickWord({ candidates, acceptableSets, exclude = [] }) {
   const accepted = new Set();
@@ -605,6 +629,71 @@ const MUTANTS = [
   }`,
     replace: '  // 变异体：不校验 maxEdge',
   },
+  // ── 识物链路（Task 7）：R1–R8 ──
+  // 这批钉的是三条红线：①取不到词**绝不假造**；②判帧只有一处起源、帧被拒不消耗尝试；
+  // ③落空的**原因**要能区分"内容配置问题"与"请求失败"（Task 3 review 指出的数据质量缺口）。
+  {
+    name: 'R1_manualFabricatesWord', target: REC, expect: 'detected',
+    why: '两轮落空时把空串当词返回（`word: ""` 而不是 `null`）：界面与下游会把空串当成一个词，'
+      + '"取不到词"这件事就此被静默降级成"取到了"——全局约束 3 的反面',
+    find: "    mode: 'manual', word: null, candidates: lastCandidates, attempts, ...lastFailure,",
+    replace: "    mode: 'manual', word: '', candidates: lastCandidates, attempts, ...lastFailure,",
+  },
+  {
+    name: 'R2_dropRejectReason', target: REC, expect: 'detected',
+    why: '帧被拒时不带 reason：界面只能给一句通用文案，用户看不出该开灯还是该拿稳手机'
+      + '（REJECT_HINT 的两档文案就此失效）',
+    find: "    return { mode: 'frame_rejected', reason: verdict.reason, word: null, candidates: [], attempts: 0 };",
+    replace: "    return { mode: 'frame_rejected', word: null, candidates: [], attempts: 0 };",
+  },
+  {
+    name: 'R3_judgeTwice', target: REC, expect: 'detected',
+    why: '在两次尝试的循环里**再判一次**同一帧（第二套判定机制）：追加要求 1 明令禁止的两处判帧，'
+      + '同一帧被读两次、拒帧计数与实际不符，且与 mount 侧的判定可能各自漂移',
+    find: '    attempts += 1;',
+    replace: '    if (!frameQC.judgeFrame(stats).ok) lastFailure = null;\n    attempts += 1;',
+  },
+  {
+    name: 'R4_attemptsCountsRejectedFrame', target: REC, expect: 'detected',
+    why: '被拒的帧也计入 attempts：attempts 的口径从"真的问过模型几次"变成"按了几次快门"，'
+      + '下游按它算重试/调用成本会整体偏高',
+    find: "    return { mode: 'frame_rejected', reason: verdict.reason, word: null, candidates: [], attempts: 0 };",
+    replace: "    return { mode: 'frame_rejected', reason: verdict.reason, word: null, candidates: [], attempts: 1 };",
+  },
+  {
+    name: 'R5_missReasonMerged', target: REC, expect: 'detected',
+    why: '落空一律报"识别失败"：内容配置问题（模型给的词不在词表里）与模型能力问题在数据里'
+      + '再也分不开——正是 Task 3 review 记下的那道缺口',
+    find: `  if (candidates.length === 0) {
+    return { reason: RECOGNIZE_FAIL_REASONS.NO_CANDIDATES, detail: '模型没有返回任何候选' };
+  }`,
+    replace: `  if (candidates.length === 0) {
+    return { reason: RECOGNIZE_FAIL_REASONS.NOT_IN_ACCEPTABLE_SET, detail: '模型没有返回任何候选' };
+  }`,
+  },
+  {
+    name: 'R6_twoMissesBecomeOne', target: REC, expect: 'detected',
+    why: '只问一次模型就降级：用户第 2 次尝试的权利被吞掉，而计划写的是"第 2 次仍失败才退手选"'
+      + '（attempts 也会恒为 1）',
+    find: '  for (let i = 0; i < 2; i += 1) {',
+    replace: '  for (let i = 0; i < 1; i += 1) {',
+  },
+  {
+    name: 'R7_httpFailureLooksEmpty', target: REC, expect: 'detected',
+    why: 'HTTP 失败返回空候选而不是抛错：调用方把它当成"识物成功但没认出东西"，'
+      + '服务不可用被记成模型能力不足（全局约束 3）',
+    find: `    const err = new Error(\`识物请求失败 HTTP \${res.status}\`);
+    err.code = RECOGNIZE_FAIL_REASONS.REQUEST_FAILED;
+    throw err;`,
+    replace: '    return { candidates: [] };',
+  },
+  {
+    name: 'R8_uncountedMiss', target: REC, expect: 'detected',
+    why: '落空的那次尝试不计数：`attempts` 记的不是真实调用次数，'
+      + '降级时的"问了几次"与调用成本核算都对不上',
+    find: '    attempts += 1;',
+    replace: '    // 变异体：不计数',
+  },
 ];
 
 // ─────────────────────────────────────────────────────────── 工具
@@ -801,8 +890,8 @@ const results = [];
 let hardFailure = null;
 
 try {
-  // 临时树：测试文件逐字副本 + 模块原实现副本
-  for (const rel of [...Object.values(MODULE_FILES), ...TEST_FILES]) {
+  // 临时树：测试文件逐字副本 + 模块原实现副本 + 测试夹具体系
+  for (const rel of [...Object.values(MODULE_FILES), ...TEST_FILES, ...HELPER_FILES]) {
     const dest = path.join(tmpRoot, rel);
     fs.mkdirSync(path.dirname(dest), { recursive: true });
     fs.copyFileSync(path.join(REPO, rel), dest);
