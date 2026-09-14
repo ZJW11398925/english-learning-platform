@@ -17,11 +17,16 @@
 // `mount()` 里另有一条 `judgeFrame` 前置闸，Task 7 接上识物后它成了第二套判定：
 // 两处判同一帧、两处都可能落 `frame_rejected`，将来各自漂移就会出现"界面说太暗、
 // 记录里写太糊"这种自相矛盾的数据。所以那条闸**已删除**——判帧、拒帧理由、`attempts`
-// 全部改由 `units/recognize.mjs` 一处产出。本层只做三件事：
+// 全部改由 `units/recognize.mjs` 一处产出。本层只做四件事：
 //   · 把结果落到正确的状态与事件上；
 //   · `RangeError`（帧统计契约违约）**绝不 catch 成一次"这张照片不行"**——那是编程错误；
-//   · 取不到词时**绝不显示任何英文单词**，改为明确告知"没认出来"并给手选词（追加要求 4）。
+//   · 取不到词时**绝不显示任何英文单词**，改为明确告知"没认出来"并给手选词（追加要求 4）；
+//   · 给每次**真正产出结论**的快门开一个轮次号 `roundIndex`（一次快门 = 一轮，与这一轮发了
+//     几次模型请求无关），并写进 `frame_rejected`/`recognize_ok`/`recognize_failed` 三类事件。
+//     判据 B（`retry_rate`）只能从事件流里算，而原先的 `attempts` 分不清"一帧两次请求"与
+//     "用户按了两次"——口径与公式见 `units/rounds.mjs` 的文件头（Task 7 修复轮 Critical 1）。
 import { createMachine, STATES } from './units/state-machine.mjs';
+import { createRoundCounter } from './units/rounds.mjs';
 
 export { createMachine, TRANSITIONS, STATES, REJECT_REASONS } from './units/state-machine.mjs';
 
@@ -152,6 +157,11 @@ export async function mount(root, deps = {}) {
   // 状态机已经在 word（"词已取到"之前的最后一格），而这一格此时还没有词。
   // 由它（而不是 `machine.state`）决定渲染手选词包，状态机的语义才不会被撑歪。
   let awaitingManualPick = false;
+  // 轮次计数器：**一次快门 = 一轮**，会话内从 1 开始单调递增，与 `sessionId` 同寿命
+  // （换会话就换实例 → 新会话又从 1 开始）。它与 `payload.attempts`（这一轮真的问过模型几次）
+  // 是两个不同的数：同一帧发两次请求仍只算一轮。判据 B（retry_rate）的公式写在
+  // `units/rounds.mjs` 的文件头——**别在别处另立一套**。
+  const rounds = createRoundCounter();
 
   function stopStream() {
     if (activeStream === null) return;
@@ -434,10 +444,17 @@ export async function mount(root, deps = {}) {
 
     lastPick = picked;
 
+    // 走到这里说明这一按**真的产出了一轮结论** → 开一轮。
+    // 上面那个 `catch` 里的三种情形（按太早、RangeError、其它取帧错误）都到不了这里：
+    // 它们要么 return、要么原样重抛，一条事件都不落——所以事件流里的 roundIndex 是连续的
+    // 1、2、3…，没有空洞（"按了但没产出结论"不是一轮，见 units/rounds.mjs 的定义）。
+    const roundIndex = rounds.next();
+
     if (picked.mode === 'frame_rejected') {
       // 如实记录这一档（设计文档 §5.1）：先落事件再退状态，两件事都不许省。
       // 这一帧没送到模型，所以 attempts 是 0（见 units/recognize.mjs 的口径说明）。
-      record(store, 'frame_rejected', { sessionId, reason: picked.reason }, clock);
+      // 但它**同样是一次快门**，故同样带 roundIndex——端侧拦下的重拍也是重拍（判据 B 的主要来源）。
+      record(store, 'frame_rejected', { sessionId, roundIndex, reason: picked.reason }, clock);
       machine.send('frameBad', { reason: picked.reason });
       return;
     }
@@ -446,13 +463,18 @@ export async function mount(root, deps = {}) {
     freeze(lastShotBlob);
 
     if (picked.mode === 'ok') {
-      // 两个事件分开记，口径互不混淆：
-      //   · `recognize_ok`  = 这一次识物调用是成功的（含它给了几个候选、第几次尝试）
-      //   · `recognize_failed`（只在降到手选时） = 这一轮最终没取到词，以及**为什么**
-      // 降级时两条都记是有意的：只记失败会让"模型其实答得挺好、只是词表没配对"这类
-      // 配置问题彻底看不见（Task 3 review 指出的数据质量缺口）。
+      // 一轮只落**一条**结论事件（三选一，不是"成功与失败都记"）：
+      //   · `recognize_ok`     —— 这一轮取到词了；`attempts` 是"第几次尝试取到的"
+      //   · `recognize_failed` —— 这一轮最终没取到词（降级到手选），带 reason/detail
+      //   · `frame_rejected`   —— 这一帧被端侧质检拦下，一轮到此为止（attempts = 0）
+      // 因此 mount 里是 if/else：**同一个 roundIndex 只会出现一条**，绝不双记。
+      // （Task 7 报告 §7.3 曾写成"降级时两条都记"，与代码不符，已在修复轮改正——
+      //  两条都记会让"识物调用成功次数"与"取到词的轮数"混成一个数。）
+      // 数轮数**不要**把这三类事件相加或只取其一：用 `units/rounds.mjs` 的
+      // `roundCountOfSession`（按 roundIndex 去重、三类都算），判据 B 的公式在那个文件头部。
       record(store, 'recognize_ok', {
         sessionId,
+        roundIndex,
         word: picked.word,
         attempts: picked.attempts,
         candidates: (picked.candidates ?? []).map((c) => c.label),
@@ -460,8 +482,10 @@ export async function mount(root, deps = {}) {
       shownWord = { word: picked.word, scene: sceneOf(picked.word, picked.candidates ?? []), source: 'recognized' };
     } else {
       // 手选档：**不设 shownWord**，渲染的是手选词包，界面上一个英文词都不出现。
+      // 模型这一轮到底答了什么，从下面 payload 的 `candidates` 读（如实带出，不另记一条 recognize_ok）。
       record(store, 'recognize_failed', {
         sessionId,
+        roundIndex,
         reason: picked.reason ?? 'unknown',
         detail: picked.detail ?? null,
         attempts: picked.attempts,
