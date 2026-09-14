@@ -21,6 +21,10 @@
 //    Promise 永久 pending，界面卡在 capturing、每点一次快门多挂一个请求，而且**一条事件都不落**
 //    （判据 B 连这一轮都统计不到）。上限的取值理由、以及"客户端那条腿必须比服务端长"的关系
 //    写在那个常量的注释里。
+//    上限到点**可能发生在两个地方**——`fetch()` 那一句（连接都没建起来），或 `res.json()` 那一句
+//    （**响应头已经到了、body 还在流**）。两处都归"超时"（`request_failed`，消息里说清是超时），
+//    绝不归成 `response_invalid`：后者在枚举里的处置方向是"改服务端或模型契约"，
+//    把一次网络停滞记进那一档，Task 10 从失败分布里会读成"契约有问题"（复审 Important 1）。
 //
 // 纯逻辑模块：零浏览器 API（`fetch` / `grab` / `frameQC` 全是注入点），可在 Node 中直接测。
 import { judgeFrame } from './frame-qc.mjs';
@@ -104,6 +108,23 @@ const reasonOf = (err) => (REASON_CODES.has(err?.code) ? err.code : RECOGNIZE_FA
 const detailOf = (err) => String(err?.message ?? err);
 
 /**
+ * 这次中止/异常是不是"我们设的上限到点了"。
+ *
+ * 为什么单列一个判定（Task 7 复审 Important 1）：上限到点**可能发生在两个地方**——
+ * `fetch()` 那一句（连接都没建起来）或 `res.json()` 那一句（**响应头已经到了、body 还在流**）。
+ * 后者原先落进"响应不是合法 JSON"那一档，于是**一次网络停滞**被记成 `response_invalid`，
+ * 而这一档在 `RECOGNIZE_FAIL_REASONS` 里的处置方向是"改服务端或模型契约"——
+ * Task 10 从 `recognize_failed.reason` 的分布里会读成"契约有问题"。
+ *
+ * 两种证据任一成立即可：① 信号已经 aborted（本模块只装过 `AbortSignal.timeout`，
+ * 所以它一定是我们那条上限）；② 错误本身是超时/中止（`AbortSignal.timeout` 触发时是
+ * DOMException `TimeoutError`，部分实现报 `AbortError`）。
+ * 用 `signal?.` 而不是 `signal.`：信号缺失时这里**不许多抛**一种错误（那会把分类问题变成崩溃）。
+ */
+const isTimeoutAbort = (err, signal) => signal?.aborted === true
+  || err?.name === 'TimeoutError' || err?.name === 'AbortError';
+
+/**
  * 把一帧发给自己的服务端识物，返回服务端给的候选（原样，不选词——选词是 `pickWord` 的事）。
  *
  * @param {Blob} blob 一张 JPEG（`camera.grabFrame` 产出的那一帧）
@@ -112,8 +133,10 @@ const detailOf = (err) => String(err?.message ?? err);
  *   于是"谁是网络出口"始终只有一个决定点，浏览器与测试看到的都是同一个全局。
  *   `timeoutMs` 是这一腿的上限（默认 `RECOGNIZE_REQUEST_TIMEOUT_MS`），测试用小值即可。
  * @returns {Promise<{ candidates: Array<{label: string, score: number, scene: string}> }>}
- * @throws {Error} `code === 'request_failed'`：HTTP 非 2xx，或 fetch 自身抛（断网 / 超时 / 被中断）
- * @throws {Error} `code === 'response_invalid'`：响应不是合法 JSON，或结构不是 `{ ok: true, candidates: [] }`
+ * @throws {Error} `code === 'request_failed'`：HTTP 非 2xx，或 fetch 自身抛（断网 / 超时 / 被中断）。
+ *   上限到点（含"响应头到了、body 还在流"时被中止）一律走这一档，消息里说清是超时。
+ * @throws {Error} `code === 'response_invalid'`：响应不是合法 JSON（且**不是**被我们的上限中止的），
+ *   或结构不是 `{ ok: true, candidates: [] }`
  *   这两种失败**必须抛出**：返回空候选会看起来像"识物成功但没认出东西"，
  *   把"服务不可用"记成"模型能力不足"（全局约束 3）。
  * @throws {TypeError} `timeoutMs` 非法（例如 NaN）时由 `AbortSignal.timeout` 抛出。
@@ -135,8 +158,7 @@ export async function recognize(blob, { fetchImpl = null, timeoutMs = RECOGNIZE_
     // 网络层失败（断网、请求被浏览器中断）也要带上 code，否则调用方分不清它与"响应结构非法"。
     // 超时单独说清楚：`AbortSignal.timeout` 触发时 fetch 会以 `TimeoutError` 拒绝
     // （部分实现报 `AbortError`），这两种都不是"发不出去"，而是"等太久了"。
-    const timedOut = err?.name === 'TimeoutError' || err?.name === 'AbortError';
-    const wrapped = new Error(timedOut
+    const wrapped = new Error(isTimeoutAbort(err, signal)
       ? `识物请求超时（${timeoutMs}ms 未返回，已主动中止）：${String(err?.message ?? err)}`
       : `识物请求发不出去：${String(err?.message ?? err)}`);
     wrapped.code = RECOGNIZE_FAIL_REASONS.REQUEST_FAILED;
@@ -153,6 +175,19 @@ export async function recognize(blob, { fetchImpl = null, timeoutMs = RECOGNIZE_
   try {
     data = await res.json();
   } catch (err) {
+    // 这个 catch 里有**两种完全不同的成因**，必须分开（Task 7 复审 Important 1）：
+    //   · 响应体不是 JSON（例如网关吐了一页 HTML）→ `response_invalid`：要改的是服务端/模型契约；
+    //   · **响应头已经到了、body 还在流时上限到点**（网络停滞）→ `request_failed` + 说清是超时。
+    // 后者原先被归成 `response_invalid`：一次网络停滞被丢进"改服务端契约"那一档，
+    // Task 10 从 `recognize_failed.reason` 的分布里就读不出真实的失败来源。
+    // 判定见 `isTimeoutAbort`（信号已 aborted，或错误本身是 TimeoutError/AbortError）。
+    if (isTimeoutAbort(err, signal)) {
+      const timedOut = new Error(
+        `识物请求超时（${timeoutMs}ms 未返回，已主动中止）：${String(err?.message ?? err)}`,
+      );
+      timedOut.code = RECOGNIZE_FAIL_REASONS.REQUEST_FAILED;
+      throw timedOut;
+    }
     // 非 JSON 响应（例如网关吐了一页 HTML）绝不能被当成"没有候选"。
     const wrapped = new Error(`识物响应不是合法 JSON：${String(err?.message ?? err)}`);
     wrapped.code = RECOGNIZE_FAIL_REASONS.RESPONSE_INVALID;

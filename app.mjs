@@ -363,7 +363,15 @@ export async function mount(root, deps = {}) {
 
   async function onCapture() {
     setError('');
-    // 新一次拍照：上一轮的取词结果与手选态都作废（否则"重拍一张"之后界面还挂着旧的手选词包）。
+    // 上一轮的取词结果作废（否则"重拍一张"之后界面还挂着旧的手选词包）。
+    // 这里只清 `lastPick` / `shownWord`——**手选态 `awaitingManualPick` 不在这一处清**，
+    // 它在 `onShutter` 开头清（见那里的 `awaitingManualPick = false`）。这样写是够的：
+    // 回到 `ready` 的唯一路径是 `capturing --frameBad--> ready`，而 `frameBad` 只在
+    // `onShutter` 里发出——也就是说"能再点拍照"这件事本身，已经蕴含着手选态刚被清过
+    // （state-machine.mjs 的 TRANSITIONS：`word` 没有回 `ready` 的转移）。
+    // 复审 Minor 4 记的就是这一点：原先这句注释写着"手选态也作废"，而代码并没有在这里清它；
+    // 选的是**把注释改成实情**（而不是加一行清 `awaitingManualPick`）——那样加出来的行在
+    // 当前状态机下永远不可达，没有任何用例能钉住它，属于注释之外又添一处不可验证的声明。
     lastPick = null;
     shownWord = null;
     // 双击/连点：第二次点击时状态还是 ready（第一次的 await 还没回来），按钮仍在页面上。
