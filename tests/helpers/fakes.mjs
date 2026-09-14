@@ -14,8 +14,19 @@
  * 三个供测试用的观测/注入点：
  *   - calls：记录 open() 的库名·版本、transaction() 的 (storeName, mode)、objectStore() 的店名
  *   - failNextTransaction()：让下一笔事务失败（request.error + t.onerror 派发），用于错误路径注入
- *   - openBlocked / failNextOpen()：让 open 派发 onblocked 或 onerror，用于开库失败路径注入
+ *   - openBlocked / failNextOpen() / blockNextOpenThenSucceed()：让 open 派发 onblocked、
+ *     onerror，或"先 onblocked 再迟到 onsuccess"，用于开库失败路径注入
+ *   - closedDbs：记录被 close() 掉的连接，用于断言"迟到的成功连接没有被泄漏"
  */
+
+/**
+ * 真 IDB 写入是**结构化克隆**（拷值语义），不是存引用。
+ * Uint8Array → 拷字节；Blob 不可变，直接留引用即可（见下方 put 的注释）。
+ */
+const cloneForStore = (v) => {
+  if (typeof structuredClone === 'function') return structuredClone(v);
+  return JSON.parse(JSON.stringify(v));
+};
 
 export function fakeLocalStorage() {
   const map = new Map();
@@ -32,14 +43,19 @@ export function fakeIndexedDB({ openBlocked = false } = {}) {
   // 下一次 open 的行为：正常 / 被别的连接阻塞（onblocked）/ 开库出错（onerror）
   let nextOpen = openBlocked ? 'blocked' : 'ok';
   let nextOpenError = null;
+  // 阻塞之后是否还会迟到地成功（真 IDB 在挡住升级的旧连接关掉后会补派发 onsuccess）
+  let nextOpenSucceedsAfterBlock = false;
   // 下一笔事务的失败注入
   let pendingFailure = null;
 
   // 调用记录：断言 store.mjs 真的用对了库、店名与事务模式
   const calls = { opens: [], transactions: [], objectStores: [] };
+  // 被关闭的连接：迟到的成功连接若没被 close，就会一直挂在这里没人管
+  const closedDbs = [];
 
   return {
     calls,
+    closedDbs,
     failNextTransaction(error = new Error('注入的事务失败')) {
       pendingFailure = error;
     },
@@ -49,13 +65,20 @@ export function fakeIndexedDB({ openBlocked = false } = {}) {
     },
     blockNextOpen() {
       nextOpen = 'blocked';
+      nextOpenSucceedsAfterBlock = false;
+    },
+    blockNextOpenThenSucceed() {
+      nextOpen = 'blocked';
+      nextOpenSucceedsAfterBlock = true;
     },
 
     open(name, version) {
       const behavior = nextOpen;
       const openError = nextOpenError;
+      const blockedThenSucceeds = nextOpenSucceedsAfterBlock;
       nextOpen = 'ok';
       nextOpenError = null;
+      nextOpenSucceedsAfterBlock = false;
       calls.opens.push({ name, version });
 
       const req = {
@@ -69,6 +92,14 @@ export function fakeIndexedDB({ openBlocked = false } = {}) {
       setTimeout(() => {
         if (behavior === 'blocked') {
           if (req.onblocked) req.onblocked();
+          if (!blockedThenSucceeds) return;
+          // 迟到的成功：阻塞解除后真 IDB 会补派发 onsuccess（调用方可能已经 reject 了）
+          setTimeout(() => {
+            const db = makeDb();
+            req.result = db;
+            if (req.onupgradeneeded) req.onupgradeneeded();
+            if (req.onsuccess) req.onsuccess();
+          }, 0);
           return;
         }
         if (behavior === 'error') {
@@ -76,10 +107,23 @@ export function fakeIndexedDB({ openBlocked = false } = {}) {
           if (req.onerror) req.onerror();
           return;
         }
-        const db = {
+        const db = makeDb();
+        req.result = db;
+        if (req.onupgradeneeded) req.onupgradeneeded();
+        if (req.onsuccess) req.onsuccess();
+      }, 0);
+      return req;
+
+      function makeDb() {
+        return {
+          name,
+          closed: false,
           objectStoreNames: { contains: () => false },
           createObjectStore: () => {},
-          close: () => {},
+          close() {
+            this.closed = true;
+            closedDbs.push(this);
+          },
           transaction(storeName, mode) {
             calls.transactions.push({ storeName, mode });
             const ops = [];
@@ -93,9 +137,11 @@ export function fakeIndexedDB({ openBlocked = false } = {}) {
               objectStore(name) {
                 calls.objectStores.push({ name });
                 return {
-                  put: (v, k) => push(() => data.set(k, v)),
+                  // 真 IDB 的语义：put 把值**结构化克隆**后存入并 resolve 到 key；
+                  // delete resolve 到 undefined。（不是替身自己 Map.set/Map.delete 的返回值）
+                  put: (v, k) => push(() => { data.set(k, cloneForStore(v)); return k; }),
                   get: (k) => push(() => data.get(k)),
-                  delete: (k) => push(() => data.delete(k)),
+                  delete: (k) => push(() => { data.delete(k); return undefined; }),
                 };
               },
               get oncomplete() {
@@ -147,11 +193,7 @@ export function fakeIndexedDB({ openBlocked = false } = {}) {
             return t;
           },
         };
-        req.result = db;
-        if (req.onupgradeneeded) req.onupgradeneeded();
-        if (req.onsuccess) req.onsuccess();
-      }, 0);
-      return req;
+      }
     },
   };
 }

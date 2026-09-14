@@ -70,6 +70,29 @@ test('putWord 缺 createdAt 时补上时间戳（pruneImages 的排序依据）'
   assert.equal(s.readWords()['w-2'].createdAt, 12345);
 });
 
+test('putWord 覆盖已有词时保留其原始 createdAt，不被重新盖上"最新"时间戳', () => {
+  // 设计文档 §4.5 的复现流程会拿已存在的词记录改 stage/dueAt 再写回，且**不带** createdAt。
+  // 若这里重新盖时间戳，pruneImages 就会把真正更老的词的图淘汰掉（错误图片被删的那一类缺陷）。
+  const { s } = makeStore();
+  const old = 1000;
+  s.putWord({ id: 'w-old', text: 'lamp', stage: 'new', createdAt: old });
+  // 第二次写回：带上原 createdAt，把该词"回退"为更老（模拟历史/迁移数据）
+  s.putWord({ id: 'w-old', text: 'lamp', stage: 'seen', createdAt: 500 });
+  assert.equal(s.readWords()['w-old'].createdAt, 500, '显式带 createdAt 时以调用方为准');
+
+  // 第三次写回：只更新 stage，不带 createdAt —— 不得重新盖时间戳
+  const before = Date.now();
+  s.putWord({ id: 'w-old', text: 'lamp', stage: 'review', dueAt: 42 });
+  const after = Date.now();
+  const w = s.readWords()['w-old'];
+  assert.equal(w.createdAt, 500, '已有记录的 createdAt 必须原样保留，不能被重新盖成 Date.now()');
+  assert.ok(!(w.createdAt >= before && w.createdAt <= after), 'createdAt 落进 [before, after] 说明被重新盖了时间戳');
+  // 载荷的其余字段照常被覆盖
+  assert.equal(w.stage, 'review');
+  assert.equal(w.dueAt, 42);
+  assert.equal(w.text, 'lamp');
+});
+
 test('putMeta/getMeta 往返，未设置的键返回 null', () => {
   const { s } = makeStore();
   assert.equal(s.getMeta('missing'), null);
@@ -86,9 +109,15 @@ test('putImage/getImage 往返真实二进制（Uint8Array 与 Blob 保类型、
   // 生产写入的是 512px canvas 出来的 Blob；这里两种真实二进制形状都过一遍
   const bytes = new Uint8Array([1, 2, 3]);
   await s.putImage('w-1', bytes);
+  // 真 IndexedDB 是结构化克隆：入队后调用方再改自己的 buffer，不得影响已存的值。
+  // 若替身/实现存的是入参引用，下面这条断言必然失败（这正是本测试的目的）。
+  bytes[0] = 99;
+  bytes[1] = 99;
+  bytes[2] = 99;
   const back = await s.getImage('w-1');
   assert.ok(back instanceof Uint8Array, `应以 Uint8Array 取回，实际为 ${Object.prototype.toString.call(back)}`);
-  assert.deepEqual(back, bytes);
+  assert.deepEqual([...back], [1, 2, 3], 'put 之后调用方改动自己的 Uint8Array，不得改变已存字节（结构化克隆语义）');
+  assert.notEqual(back, bytes, '取回值不应是调用方那个对象的同一个引用');
 
   const blob = new Blob(['x']);
   await s.putImage('w-2', blob);
@@ -97,6 +126,35 @@ test('putImage/getImage 往返真实二进制（Uint8Array 与 Blob 保类型、
   assert.equal(blobBack.type, blob.type);
   assert.equal(blobBack.size, blob.size);
   assert.equal(await blobBack.text(), await blob.text());
+});
+
+test('putImage 解析为词 id（与真 IDB 的 put 一致），delete 解析为 undefined', TIMEOUT, async () => {
+  const { s } = makeStore();
+  // 真 IDB：put 的 request.result 是 key（store.mjs 会把它当 putImage 的返回值透出）
+  assert.equal(await s.putImage('w-1', new Uint8Array([1, 2, 3])), 'w-1');
+  assert.deepEqual(await s.getImage('w-1'), new Uint8Array([1, 2, 3]));
+});
+
+test('替身的事务请求解析值与真 IDB 一致（put→key，delete→undefined）', TIMEOUT, async () => {
+  // store.mjs 不暴露 delete 请求的返回值，所以这一条直接走替身的事务 API 钉住 request.result；
+  // 替身若退回 Map.set / Map.delete 的返回值（Map / 布尔），这两条断言会失败。
+  const idb = fakeIndexedDB();
+  const s = createStore({ localStorage: fakeLocalStorage(), indexedDB: idb });
+  await s.putImage('w-1', new Uint8Array([1])); // 先把库打开，下面复用同一条连接
+
+  const db = await new Promise((resolve, reject) => {
+    const req = idb.open('contract-check', 1);
+    req.onsuccess = () => resolve(req.result);
+    req.onerror = () => reject(req.error);
+  });
+  const putReq = db.transaction('images', 'readwrite').objectStore('images').put(new Uint8Array([9]), 'k1');
+  const delReq = db.transaction('images', 'readwrite').objectStore('images').delete('k1');
+  const readReq = db.transaction('images', 'readonly').objectStore('images').get('k1');
+  await new Promise((r) => setTimeout(r, 20));
+
+  assert.equal(putReq.result, 'k1', 'put 必须解析为 key（真 IDB 语义），不是 Map');
+  assert.equal(delReq.result, undefined, 'delete 必须解析为 undefined（真 IDB 语义），不是布尔');
+  assert.equal(readReq.result, undefined, '删除后 get 必须为 undefined');
 });
 
 test('putImage 走 readwrite / getImage 走 readonly，且都寻址 images 对象仓', TIMEOUT, async () => {
@@ -136,6 +194,24 @@ test('open 被阻塞时 reject 并给出清晰错误；解除阻塞后重试可�
   });
 
   // 阻塞解除后（例如用户关掉了旧标签页）重试必须成功——失败不能被永久缓存
+  await s.putImage('w-1', new Uint8Array([7]));
+  assert.deepEqual(await s.getImage('w-1'), new Uint8Array([7]));
+});
+
+test('被阻塞拒绝后迟到的 open 成功必须关掉连接（不留无人关闭的活连接）', TIMEOUT, async () => {
+  // 真 IDB：onblocked 之后旧标签页关掉，同一个 request 仍会派发 onsuccess。
+  // 那时 promise 已经 reject 了，若 onsuccess 还在 resolve，这个连接就永远没人 close。
+  const { s, idb } = makeStore();
+  idb.blockNextOpenThenSucceed();
+
+  await assert.rejects(() => s.getImage('w-1'), /阻塞|blocked/i);
+
+  // 迟到的 onsuccess 在同一个宏任务队列里派发，且必须被 close 掉
+  await new Promise((r) => setTimeout(r, 20));
+  assert.equal(idb.closedDbs.length, 1, '迟到的成功连接必须被 close，而不是被静默 resolve 掉');
+  assert.equal(idb.closedDbs[0].name, 'elp-images');
+
+  // 拒绝后的重试仍然正常（既没被污染，也没复活那个已拒绝的 promise）
   await s.putImage('w-1', new Uint8Array([7]));
   assert.deepEqual(await s.getImage('w-1'), new Uint8Array([7]));
 });
