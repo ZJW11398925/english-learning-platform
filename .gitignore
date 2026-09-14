@@ -1,0 +1,50 @@
+# ── 密钥与配置：绝不入库 ──────────────────────────────
+.env
+.env.*
+!.env.example
+*.key
+*.pem
+secrets/
+**/secrets/
+wrangler.toml
+cloudflared/*.yml
+!cloudflared/*.example.yml
+
+# ── 真人数据：一旦误提交不可撤回，必须挡在门外 ──────────
+participants/
+recordings/
+transcripts/
+interviews/
+data/
+exports/
+**/participants.csv
+**/roster*
+**/*.wav
+**/*.m4a
+**/*.mp3
+
+# ── 实验素材与采集结果（体积大且含真人影像）────────────
+testset/
+**/captures/
+**/frames/
+**/*.heic
+
+# ── 构建产物与依赖 ──────────────────────────────────
+node_modules/
+dist/
+build/
+.cache/
+*.tsbuildinfo
+
+# ── 系统与编辑器 ────────────────────────────────────
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/*
+!.vscode/extensions.json
+
+# ── 日志与临时文件 ──────────────────────────────────
+*.log
+npm-debug.log*
+tmp/
+.tmp/
