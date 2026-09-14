@@ -194,12 +194,19 @@ export async function mount(root, deps = {}) {
     return view;
   }
 
-  /** 完成页把两个关键指标摊出来（设计文档 §3.2：停留时长 + 改写次数用来筛敷衍样本）。 */
+  /**
+   * 完成页把关键指标摊出来（设计文档 §3.2：停留时长 + 改写次数用来筛敷衍样本）。
+   *
+   * `rewriteCount` 的口径是**提交次数**（状态机里每次 `submit` 自增，见 `units/state-machine.mjs`），
+   * 所以第一版就提交、一次都没回改的会话读到的是 1。**改写次数 = 提交次数 - 1**：这里显示的是
+   * 派生出来的改写次数，否则"没改过"的人会看到"改写 1 次"——界面上的一句假话。
+   * 快照里的字段本身不改名、不改口径（下游怎么持久化由 Task 9 定，见 task-6-report 修复轮）。
+   */
   function summary() {
     const s = machine.snapshot();
     const secs = (k) => `${k} ${(s.dwellMs[k] / 1000).toFixed(1)}s`;
     return [
-      `改写 ${s.rewriteCount} 次`,
+      `改写 ${s.rewriteCount - 1} 次`,
       `跳过跟读：${s.skippedReading ? '是' : '否'}`,
       `被退回的帧：${s.frameRejections}`,
       `各态停留：${STATES.map(secs).join(' / ')}`,
