@@ -233,8 +233,16 @@ test('width 为小数（4.5）时抛 RangeError', () => {
 });
 
 test('width 为 NaN 时抛 RangeError', () => {
-  // 注：NaN 尺寸同时也会被长度校验拦下，故本条覆盖该分支但无法单独隔离它。
+  // 既有断言（保留）：NaN 尺寸抛 RangeError。
   assert.throws(() => computeStats(new Uint8Array(16), NaN, 4), RangeError);
+  // 上面的断言**不能**隔离整数校验：NaN 尺寸下长度校验 `pixels.length !== NaN` 恒真，
+  // 整数校验整条删掉本测试依旧全绿（NaN 会被长度校验顺带拦下）。
+  // 故再钉住"抛出来的是哪条分支"——整数校验的消息是 `width/height 必须是整数，收到 NaN×4`，
+  // 含「整数」；长度分支的消息是 `pixels.length 必须恰好等于 width*height = NaN…`，不含该词。
+  // 于是删掉整数校验后本条立即变红（该变异实验已做，见报告）。
+  const err = thrownBy(() => computeStats(new Uint8Array(16), NaN, 4));
+  assert.ok(err instanceof RangeError, `应为 RangeError，实际 ${err.name}: ${err.message}`);
+  assert.match(err.message, /整数/);
 });
 
 test('width/height 为负数（-4）时抛 RangeError', () => {
