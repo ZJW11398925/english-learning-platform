@@ -59,12 +59,19 @@ const errorText = (root) => walk(root).filter((e) => e.className === 'error').ma
 
 const OK_STATS = { brightness: 128, laplacianVar: 200 };
 
+/**
+ * 夹具参数可以是**值**也可以是**函数**：函数每次调用时求值一次，于是"第一次失败、第二次成功"
+ * 这类序列（重试清错、被拒后重拍）才写得出来。值照旧原样返回，既有用例的语义不变。
+ */
+const knob = (v) => (typeof v === 'function' ? v() : v);
+
 function harness({
   grabResult = { blob: { size: 9, type: 'image/jpeg' }, stats: OK_STATS },
   grabError = null,
   openError = null,
   clock = Date.now,
   onCompose = null,
+  cameraOptions = undefined,
 } = {}) {
   const root = makeEl('div');
   const calls = { openCamera: [], grabFrame: [] };
@@ -77,22 +84,24 @@ function harness({
     VIDEO_NOT_READY: 'VIDEO_NOT_READY',
     async openCamera(video, opts) {
       calls.openCamera.push({ video, opts });
-      if (openError !== null) throw openError;
+      const err = knob(openError);
+      if (err !== null && err !== undefined) throw err;
       video.srcObject = stream;
       await video.play();
       return stream;
     },
     async grabFrame(video, canvas, opts) {
       calls.grabFrame.push({ video, canvas, opts });
-      if (grabError !== null) throw grabError;
-      return grabResult;
+      const err = knob(grabError);
+      if (err !== null && err !== undefined) throw err;
+      return knob(grabResult);
     },
   };
   const store = { appended: [], appendEvent(e) { store.appended.push(e); } };
   let urls = 0;
   const urlApi = { createObjectURL: () => `blob:fake-${urls += 1}`, revokeObjectURL: () => {} };
 
-  return mount(root, { doc: { createElement: makeEl }, camera, store, urlApi, clock, onCompose })
+  return mount(root, { doc: { createElement: makeEl }, camera, store, urlApi, clock, onCompose, cameraOptions })
     .then((mounted) => ({
       root, calls, stream, store, mounted, events: store.appended, sessionId: mounted.sessionId,
       machine: mounted.machine,
@@ -130,6 +139,14 @@ test('点「拍照」：开后置相机、把流接上 video，进 capturing 并
   assert.ok(btn(h.root, '快门'));
 });
 
+test('注入的 cameraOptions 覆盖取景默认值（默认后置有断言，覆盖这半边此前没人看守）', async () => {
+  // `mount(root, { cameraOptions })` 是文档化的注入点：注入了就以注入的为准。
+  // 少了实现里的 `...cameraOptions`，这类覆盖会被静默忽略（用户拿到的是另一颗镜头）。
+  const h = await harness({ cameraOptions: { facingMode: 'user', width: { ideal: 640 } } });
+  await btn(h.root, '拍照').click();
+  assert.deepEqual(h.calls.openCamera[0].opts, { facingMode: 'user', width: { ideal: 640 } });
+});
+
 test('快门：质检通过 → 冻结这一帧进 word，并明说识物未接入（不伪造词）', async () => {
   const h = await harness();
   await openCameraAndShoot(h);
@@ -158,7 +175,10 @@ test('快门：质检不通过 → 如实落一条 frame_rejected（带 reason�
   assert.equal(rejected[0].sessionId, h.sessionId);
   assert.equal(rejected[0].wordId, null);
   assert.ok(Number.isFinite(rejected[0].ts));
-  assert.match(text(h.root), /太暗/, '要告诉用户为什么被退回');
+  // 断言必须匹配**拒帧提示独有**的措辞：首屏那句静态说明里本来就有"画面太暗或太糊"，
+  // 所以 /太暗/ 这种关键词即使 `send('frameBad')` 丢掉了 `{ reason }`（界面退化成通用文案）
+  // 也照样绿——一条永不可能红的断言。这里钉住 REJECT_HINT.too_dark 的开头。
+  assert.match(text(h.root), /刚才那张太暗/, '要告诉用户为什么被退回（且必须来自拒帧提示，不是首屏静态说明）');
   assert.ok(btn(h.root, '拍照'), '退回后还能重拍');
 });
 
@@ -167,7 +187,30 @@ test('快门：模糊帧同样退回并落 too_blurry（不是一律报太暗）
   await openCameraAndShoot(h);
   assert.equal(h.machine.state, 'ready');
   assert.deepEqual(h.events.filter((e) => e.type === 'frame_rejected')[0].payload, { reason: 'too_blurry' });
-  assert.match(text(h.root), /糊/);
+  // 同上：/糊/ 会被首屏那句"太糊"满足；只有拒帧提示独有的措辞才能证明理由真的传到了界面。
+  assert.match(text(h.root), /刚才那张有点糊/, '模糊这一档也要给出它自己的那句提示');
+  assert.doesNotMatch(text(h.root), /刚才那张太暗/, 'too_blurry 不许被渲染成"太暗"（理由不许串档）');
+});
+
+test('落事件用注入的时钟：ts 等于注入值，而不是偷偷回退到 Date.now', async () => {
+  // `recordEvent(store, type, fields, now)` 的第四个参数就是时钟注入点。少了它，
+  // 事件的 ts 变成"记下来的那一刻"（Date.now）——注入假时钟的测试与重放都对不上时间轴。
+  const T = 1_700_000_000_000;                 // 固定值：与真实 Date.now() 必然不等
+  const h = await harness({
+    clock: () => T,
+    grabResult: { blob: { size: 9 }, stats: { brightness: 10, laplacianVar: 10 } },
+  });
+  await openCameraAndShoot(h);
+  const rejected = h.events.filter((e) => e.type === 'frame_rejected');
+  assert.equal(rejected.length, 1);
+  assert.equal(rejected[0].ts, T, 'frame_rejected 的 ts 必须来自注入时钟');
+
+  const denied = Object.assign(new Error('Permission denied'), { name: 'NotAllowedError' });
+  const h2 = await harness({ clock: () => T, openError: denied });
+  await btn(h2.root, '拍照').click();
+  const blocked = h2.events.filter((e) => e.type === 'blocked_permission');
+  assert.equal(blocked.length, 1);
+  assert.equal(blocked[0].ts, T, 'blocked_permission 同样要走注入时钟');
 });
 
 test('快门：judgeFrame 抛 RangeError 时绝不改判成"这张照片不行"（显示 + 原样重抛）', async () => {
@@ -201,6 +244,32 @@ test('快门：其它取帧错误原样重抛（不静默变成功、也不变�
   assert.equal(h.machine.state, 'capturing');
   assert.equal(h.events.length, 0);
   assert.match(errorText(h.root), /取帧失败/);
+});
+
+test('报错文案清空（开机）：授权被拒后重试成功 → 上一次的报错必须消失', async () => {
+  // 报错元素不属于任何一屏（它挂在 root 上，不在会被 replaceChildren 换掉的 body 里），
+  // 所以**只有**显式的 setError('') 能清掉它。少了那一句，用户改好权限、第二次成功进到
+  // 拍摄画面后，屏幕上仍然挂着"相机没有授权……"，看起来像又失败了。
+  const denied = Object.assign(new Error('Permission denied'), { name: 'NotAllowedError' });
+  let attempt = 0;
+  const h = await harness({ openError: () => (attempt++ === 0 ? denied : null) });
+  await btn(h.root, '拍照').click();
+  assert.match(errorText(h.root), /相机没有授权/, '第一次失败要说清原因');
+  await btn(h.root, '拍照').click();
+  assert.equal(h.machine.state, 'capturing', '权限改好后重试应当成功');
+  assert.equal(errorText(h.root), '', '重试成功后，上一次的报错必须被清掉');
+});
+
+test('报错文案清空（快门）：按太早之后补按成功 → 那句"稍等"必须消失', async () => {
+  const notReady = Object.assign(new Error('grabFrame: 视频还没出画'), { code: 'VIDEO_NOT_READY' });
+  let attempt = 0;
+  const h = await harness({ grabError: () => (attempt++ === 0 ? notReady : null) });
+  await btn(h.root, '拍照').click();
+  await btn(h.root, '快门').click();
+  assert.match(errorText(h.root), /稍等|准备好/);
+  await btn(h.root, '快门').click();
+  assert.equal(h.machine.state, 'word', '第二按取到帧 → 进 word');
+  assert.equal(errorText(h.root), '', '帧取到之后，那句"稍等"必须被清掉');
 });
 
 test('连点两次「拍照」只开一路相机（手机上双击不该开出两路流）', async () => {
@@ -260,7 +329,59 @@ test('走完一整轮：rewrite 回环、跳过跟读、各态停留时长都进
   assert.equal(snap.skippedReading, true);
   assert.equal(snap.dwellMs.composing >= 13_000, true, `composing 停留应 ≥13s，实测 ${snap.dwellMs.composing}`);
   assert.equal(snap.dwellMs.capturing, 3000);
-  assert.match(text(h.root), /改写 2 次/, '完成页要把这两个指标摊出来，别只写"完成"');
+  // 完成页四项指标逐项钉住（只验"改写次数"的话，另外三项被删掉测试不会红）：
+  // 提交了 2 次 = 改写过 1 版，所以显示的是 **改写 1 次**（见下一条用例的口径说明）。
+  const doneText = text(h.root);
+  assert.match(doneText, /改写 1 次/, '完成页要把这些指标摊出来，别只写"完成"');
+  assert.doesNotMatch(doneText, /改写 2 次/, '显示的必须是改写次数（提交次数 - 1），不是提交次数');
+  assert.match(doneText, /跳过跟读：是/);
+  assert.match(doneText, /被退回的帧：0/);
+  assert.match(doneText, /各态停留：/);
+  assert.match(doneText, /capturing 3\.0s/, '各态停留要摊出真实数值（capturing 实测 3s）');
+  assert.match(doneText, /reading 1\.0s/);
+  assert.match(doneText, /composing 13\.0s/);
+  assert.match(doneText, /feedback 0\.5s/);
+});
+
+test('完成页：零改写的会话不许说发生过改写（提交 1 次 ≠ 改写 1 次）', async () => {
+  // `rewriteCount` 的口径是**提交次数**：第一次提交后它就已经是 1，而这位学习者一次都没回改。
+  // 直接把它渲染成"改写 1 次"是在界面上说一句假话，并会误导后续关于"改写行为"的统计。
+  const h = await harness();
+  await btn(h.root, '拍照').click();
+  await btn(h.root, '快门').click();
+  await btn(h.root, '我会读了（开始跟读）').click();
+  await btn(h.root, '我读完了').click();
+  await btn(h.root, '提交造句').click();
+  await btn(h.root, '下一个词').click();
+
+  assert.equal(h.machine.state, 'done');
+  assert.equal(h.machine.snapshot().rewriteCount, 1, '快照里的字段仍是"提交次数"口径（本任务不重命名字段）');
+  const doneText = text(h.root);
+  assert.match(doneText, /改写 0 次/, '一次都没回改 → 改写次数必须是 0');
+  assert.doesNotMatch(doneText, /改写 [1-9]\d* 次/, '绝不许声称发生过改写');
+});
+
+test('完成页：被退回一次、没跳过跟读的会话 → 指标各自如实（不是把 0/否 写死）', async () => {
+  // 上一轮全轮用例里"被退回的帧：0"与"跳过跟读：是"只钉住了一半：写死常量也能绿。
+  // 这一轮把另外两个取值跑出来（被退回 1 次、没跳过），四项指标才算两头都钉住。
+  let shot = 0;
+  const h = await harness({
+    grabResult: () => (shot++ === 0 ? { blob: { size: 9 }, stats: { brightness: 10, laplacianVar: 10 } } : { blob: { size: 9 }, stats: OK_STATS }),
+  });
+  await openCameraAndShoot(h);                 // 第 1 帧太暗 → 退回重拍
+  await btn(h.root, '拍照').click();
+  await btn(h.root, '快门').click();           // 第 2 帧通过
+  await btn(h.root, '我会读了（开始跟读）').click();
+  await btn(h.root, '我读完了').click();       // 不是跳过跟读
+  await btn(h.root, '提交造句').click();
+  await btn(h.root, '下一个词').click();
+
+  assert.equal(h.machine.state, 'done');
+  assert.equal(h.machine.snapshot().frameRejections, 1);
+  const doneText = text(h.root);
+  assert.match(doneText, /被退回的帧：1/, '被退回的次数要如实摊出来');
+  assert.match(doneText, /跳过跟读：否/);
+  assert.match(doneText, /改写 0 次/);
 });
 
 test('造句原文交给注入的钩子（Task 8/9 的接线点），不自己落盘', async () => {
