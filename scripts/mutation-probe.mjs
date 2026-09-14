@@ -1,19 +1,20 @@
 /**
- * Task 3 变异探针（可重复运行的证据生成器，零依赖、非测试文件）。
+ * 变异探针（可重复运行的证据生成器，零依赖、非测试文件）。
  *
- * 用途：把 review 轮（`rv3-probe.mjs`）枚举的 18 个变异体固化成仓库内可复跑的证据——
- * 逐个"把实现改坏"，跑 `tests/scheduler.test.mjs` + `tests/pick-word.test.mjs`，报告每个变异体
- * 是被测试抓到（DETECTED）还是溜过去了（MISSED），只要有该抓没抓到的就以非零码退出。
+ * 用途：把 review 轮（`rv3-probe.mjs`）枚举的 18 个变异体 + Task 4 的 10 个变异体固化成仓库内
+ * 可复跑的证据——逐个"把实现改坏"，跑 `tests/scheduler.test.mjs` + `tests/pick-word.test.mjs` +
+ * `tests/feedback.test.mjs`，报告每个变异体是被测试抓到（DETECTED）还是溜过去了（MISSED），
+ * 只要有该抓没抓到的就以非零码退出。
  *
  * 用法（在仓库根）：
- *   node scripts/mutation-probe.mjs            # 全部 18 个变异体
- *   node scripts/mutation-probe.mjs --only=M2  # 只跑名字含 M2 的
+ *   node scripts/mutation-probe.mjs            # 全部 28 个变异体
+ *   node scripts/mutation-probe.mjs --only=M2  # 只跑名字含 M2 的（F/Q 同理）
  *   KEEP_TMP=1 node scripts/mutation-probe.mjs # 保留临时工作树以便排查
  *
  * 三条护栏（少一条结论就可能是假阴性）：
  * 1. **不碰仓库源码**。变异只写进 `os.tmpdir()` 下的临时工作树（`<tmp>/web/units/*.mjs` +
  *    `<tmp>/tests/*.test.mjs` 的逐字副本），跑完把临时模块按字节还原，并用 sha256 逐次核对；
- *    同时每次变异后都核对仓库里两个模块的哈希未变。进程被强杀也不会留下被改坏的仓库文件。
+ *    同时每次变异后都核对仓库里各模块的哈希未变。进程被强杀也不会留下被改坏的仓库文件。
  * 2. **基线必须先绿**。临时树跑原实现若不 0 退出，整轮结论作废（直接失败退出）。
  * 3. **退出码取自子进程的 `exit` 事件**。本环境不允许 piped 子进程 stdio，且 `node:test` 在
  *    `beforeExit` 时还没写 `process.exitCode`（那时仍是 0）——所以既不能用管道拿输出，也不能
@@ -23,8 +24,8 @@
  * 等价**（构造上不可能被抓到，见该条 why）。等价的那些不算漏网，但必须由差分核对证明等价，
  * 证明不过就反过来算漏网（说明它其实可被抓到）。
  *
- * 结论（2026-09-14）：17/17 可抓变异体全部 DETECTED；M2 证为等价变异体（见下），
- * 它正是 `dueWords` 里那条冗余 `w.dueAt !== null` 的"无法被测试钉住"的那一面。
+ * 结论：见文末运行输出的汇总行（Task 3：17/17 可抓变异体 DETECTED + M2 证为等价变异体；
+ * Task 4：10/10 可抓变异体 DETECTED，见 `task-4-report.md`）。
  */
 import { spawn } from 'node:child_process';
 import { createHash } from 'node:crypto';
@@ -34,8 +35,12 @@ import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 
 const REPO = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
-const MODULE_FILES = { scheduler: 'web/units/scheduler.mjs', 'pick-word': 'web/units/pick-word.mjs' };
-const TEST_FILES = ['tests/scheduler.test.mjs', 'tests/pick-word.test.mjs'];
+const MODULE_FILES = {
+  scheduler: 'web/units/scheduler.mjs',
+  'pick-word': 'web/units/pick-word.mjs',
+  feedback: 'web/units/feedback.mjs',
+};
+const TEST_FILES = ['tests/scheduler.test.mjs', 'tests/pick-word.test.mjs', 'tests/feedback.test.mjs'];
 const TEST_ARGS = ['--test', ...TEST_FILES];
 const only = (process.argv.find((a) => a.startsWith('--only=')) ?? '').slice('--only='.length);
 
@@ -46,6 +51,7 @@ const sha256 = (buf) => createHash('sha256').update(buf).digest('hex');
 // 这样源码漂移不会被悄悄吞掉（探针自己也会被"钉住"）。
 const SCHED = MODULE_FILES.scheduler;
 const PICK = MODULE_FILES['pick-word'];
+const FEEDBACK = MODULE_FILES.feedback;
 
 const PICK_ORIGINAL = `export function pickWord({ candidates, acceptableSets, exclude = [] }) {
   const accepted = new Set();
@@ -217,6 +223,74 @@ const MUTANTS = [
   return loose ? { word: loose.label, reason: \`候选 \${loose.label} 命中可接受集\` } : null;
 }`,
   },
+  // ── feedback（Task 4）：F1–F10 ──
+  {
+    name: 'F1_binaryVerdicts', target: FEEDBACK, expect: 'detected',
+    why: '从合法档位里删掉 uncertain，逼模型在"对/错"二选一（全局约束 4 的反面：拿不准会被逼成自信的错答案）',
+    find: "export const VERDICTS = Object.freeze(['correct', 'flawed', 'uncertain']);",
+    replace: "export const VERDICTS = Object.freeze(['correct', 'flawed']);",
+  },
+  {
+    name: 'F2_disguiseUncertain', target: FEEDBACK, expect: 'detected',
+    why: '把 uncertain 改写成 flawed 后照样报成功——最坏的静默降级：调用方看不出异常，'
+      + 'uncertain 单独统计的口径（全局约束 4）被污染',
+    find: '  return errors.length === 0 ? { ok: true, value: raw } : { ok: false, errors };',
+    replace: '  if (errors.length > 0) return { ok: false, errors };\n'
+      + "  return { ok: true, value: raw.verdict === 'uncertain' ? { ...raw, verdict: 'flawed' } : raw };",
+  },
+  {
+    name: 'F3_blankRewriteOk', target: FEEDBACK, expect: 'detected',
+    why: '空白串 rewrite 被当成合法改写建议（模型没真给出改写，界面会显示一段空白当建议）',
+    find: "    if (typeof raw.rewrite !== 'string' || raw.rewrite.trim() === '') {",
+    replace: "    if (typeof raw.rewrite !== 'string') {",
+  },
+  {
+    name: 'F4_correctSideInverted', target: FEEDBACK, expect: 'detected',
+    why: 'correct 一侧的搭配关系反向：判"对"却带着错误类型的数据会入库（统计里"通过的句子"带着语法错误）',
+    find: "    if (raw.verdict === 'correct' && raw.error_type !== 'none') {",
+    replace: "    if (raw.verdict === 'correct' && raw.error_type === 'none') {",
+  },
+  {
+    name: 'F5_flawedSideInverted', target: FEEDBACK, expect: 'detected',
+    why: 'flawed 一侧的关系反向：放行"有错却说不清错在哪"，同时把正常的 flawed 响应全判成不可用',
+    find: "    if (raw.verdict === 'flawed' && raw.error_type === 'none') {",
+    replace: "    if (raw.verdict === 'flawed' && raw.error_type !== 'none') {",
+  },
+  {
+    name: 'F6_failFast', target: FEEDBACK, expect: 'detected',
+    why: '在第一条缺字段上短路：调用方一次只看到一个缺失字段（brief 的用例要求同时报出 rewrite 与 note）',
+    find: `  for (const k of REQUIRED_FIELDS) {
+    if (!(k in raw)) errors.push(\`缺少字段 \${k}\`);
+  }`,
+    replace: '  const missing = REQUIRED_FIELDS.find((k) => !(k in raw));\n'
+      + '  if (missing) return { ok: false, errors: [`缺少字段 ${missing}`] };',
+  },
+  {
+    name: 'F7_arrayAllowed', target: FEEDBACK, expect: 'detected',
+    why: '去掉 Array.isArray 拦截：数组（typeof 也是 object）被当成"缺四个字段"的对象，'
+      + '诊断指向错误的原因——真正的问题是它根本不是响应对象',
+    find: "  if (raw === null || typeof raw !== 'object' || Array.isArray(raw)) {",
+    replace: "  if (raw === null || typeof raw !== 'object') {",
+  },
+  {
+    name: 'F8_relationshipUnguarded', target: FEEDBACK, expect: 'detected',
+    why: '搭配关系不再等两个字段各自合法：取值越界时叠加一句"搭配错了"，把诊断带偏',
+    find: '  if (verdictInRange && errorTypeInRange) {',
+    replace: "  if ('verdict' in raw && 'error_type' in raw) {",
+  },
+  {
+    name: 'F9_doubleReportOnMissing', target: FEEDBACK, expect: 'detected',
+    why: '字段缺失时同时按缺字段和"取值越界: undefined"各报一遍：同一件事说两遍，诊断翻倍',
+    find: "  if ('verdict' in raw && !verdictInRange) {",
+    replace: '  if (!verdictInRange) {',
+  },
+  {
+    name: 'F10_valueCopy', target: FEEDBACK, expect: 'detected',
+    why: '成功时返回入参的副本而不是入参本身：破坏"原样返回"的同一引用契约（调用方拿着返回值'
+      + '与库里那条记录不是同一个对象，就地更新/同一性判断会失配）',
+    find: '  return errors.length === 0 ? { ok: true, value: raw } : { ok: false, errors };',
+    replace: '  return errors.length === 0 ? { ok: true, value: { ...raw } } : { ok: false, errors };',
+  },
 ];
 
 // ─────────────────────────────────────────────────────────── 工具
@@ -262,24 +336,74 @@ function syntaxOk(source, rel) {
   }
 }
 
-/** 差分核对：变异体与真实现是否在给定输入域上给出完全相同的输出。 */
-async function differentialAgreement(pristinePath, mutantPath) {
-  const NOW = 1757850000000;
+/**
+ * 差分核对用的"可观察输出视图"：按**目标模块**取，每个模块各一份。
+ * 键与 `MUTANTS[].target` 同空间（模块相对路径，本文件一路以路径为模块键）。
+ * 视图必须只看被测模块真正承诺的行为（scheduler 的四个输出、pick-word 的选词结果、
+ * feedback 的常量与校验结果），这样"差分一致"才有资格当"语义等价"的证据。
+ */
+const DIFF_VIEWS = {
+  [SCHED]: (mod) => {
+    const NOW = 1757850000000;
+    const shapes = [
+      { dueAt: NOW - 1 }, { dueAt: NOW }, { dueAt: NOW + 1 }, { dueAt: 0 }, { dueAt: -1 },
+      { dueAt: null }, {}, { dueAt: undefined }, { dueAt: Number.NaN }, { dueAt: 'abc' }, { dueAt: '' },
+      { dueAt: Number.POSITIVE_INFINITY }, { dueAt: Number.NEGATIVE_INFINITY },
+      { dueAt: NOW, maintained: true }, { dueAt: null, maintained: false }, { dueAt: NOW - 1, maintained: false },
+    ];
+    const words = Object.fromEntries(shapes.map((s, i) => [`w${i}`, { id: `w${i}`, stage: 1, ...s }]));
+    return JSON.stringify({
+      due: mod.dueWords(words, NOW).map((w) => w.id),
+      flags: Object.values(words).map((w) => mod.isMaintained(w)),
+      next: Object.values(words).map((w) => mod.nextState({ ...w }, NOW)),
+      intervals: [...mod.INTERVALS_DAYS],
+    });
+  },
+  [PICK]: (mod) => {
+    const sets = { mug: ['mug', 'cup'], kettle: ['kettle'] };
+    const cases = [
+      { candidates: [{ label: 'mug', score: 0.9 }], acceptableSets: sets, exclude: [] },
+      { candidates: [{ label: 'container', score: 0.95 }, { label: 'cup', score: 0.6 }], acceptableSets: sets, exclude: [] },
+      { candidates: [{ label: 'kettle', score: 0.5 }, { label: 'mug', score: 0.5 }], acceptableSets: sets, exclude: [] },
+      { candidates: [{ label: 'mug', score: 0.9 }], acceptableSets: sets, exclude: ['mug'] },
+      { candidates: [{ label: 'container', score: 0.9 }], acceptableSets: sets, exclude: [] },
+      { candidates: [], acceptableSets: sets, exclude: [] },
+      { candidates: [{ label: 'kettle', score: 0.5 }], acceptableSets: sets },
+    ];
+    return JSON.stringify(cases.map((c) => mod.pickWord(c)));
+  },
+  [FEEDBACK]: (mod) => {
+    const inputs = [
+      null, undefined, 42, 'correct', true, () => {}, [],
+      ['correct', 'none', null, 'note'],
+      {}, { verdict: 'correct' }, { verdict: 'bad', error_type: 'none', rewrite: null, note: 'x' },
+      { verdict: 'correct', error_type: 'none', rewrite: null, note: 'x' },
+      { verdict: 'correct', error_type: 'grammar', rewrite: 'a', note: 'b' },
+      { verdict: 'correct', error_type: 'spelling', rewrite: null, note: 'x' },
+      { verdict: 'flawed', error_type: 'none', rewrite: 'a', note: 'b' },
+      { verdict: 'flawed', error_type: 'collocation', rewrite: 'a', note: 'b' },
+      { verdict: 'flawed', error_type: 'spelling', rewrite: 42, note: 7 },
+      { verdict: 'uncertain', error_type: 'none', rewrite: null, note: '拿不准' },
+      { verdict: 'uncertain', error_type: 'grammar', rewrite: '   ', note: ' ' },
+      { verdict: 'uncertain', error_type: 'word_choice', rewrite: '  spaced  ', note: ' ok ' },
+    ];
+    return JSON.stringify({
+      verdicts: [...mod.VERDICTS],
+      errorTypes: [...mod.ERROR_TYPES],
+      results: inputs.map((i) => mod.validateFeedback(i)),
+    });
+  },
+};
+
+/**
+ * 差分核对：变异体与真实现是否在给定输入域上给出完全相同的输出。
+ * 目标模块没有定义视图时**返回不一致**（保守方向：等价主张证明不过，就按漏网处理），而不是抛错中断整轮。
+ */
+async function differentialAgreement(targetKey, pristinePath, mutantPath) {
+  const view = DIFF_VIEWS[targetKey];
+  if (!view) return { agree: false, real: '（无）', mutant: `未为 ${targetKey} 定义差分视图` };
   const load = async (p) => import(`${pathToFileURL(p).href}?v=${Date.now()}${Math.random()}`);
   const [real, mutant] = [await load(pristinePath), await load(mutantPath)];
-  const shapes = [
-    { dueAt: NOW - 1 }, { dueAt: NOW }, { dueAt: NOW + 1 }, { dueAt: 0 }, { dueAt: -1 },
-    { dueAt: null }, {}, { dueAt: undefined }, { dueAt: Number.NaN }, { dueAt: 'abc' }, { dueAt: '' },
-    { dueAt: Number.POSITIVE_INFINITY }, { dueAt: Number.NEGATIVE_INFINITY },
-    { dueAt: NOW, maintained: true }, { dueAt: null, maintained: false }, { dueAt: NOW - 1, maintained: false },
-  ];
-  const words = Object.fromEntries(shapes.map((s, i) => [`w${i}`, { id: `w${i}`, stage: 1, ...s }]));
-  const view = (mod) => JSON.stringify({
-    due: mod.dueWords(words, NOW).map((w) => w.id),
-    flags: Object.values(words).map((w) => mod.isMaintained(w)),
-    next: Object.values(words).map((w) => mod.nextState({ ...w }, NOW)),
-    intervals: [...mod.INTERVALS_DAYS],
-  });
   const [a, b] = [view(real), view(mutant)];
   return { agree: a === b, real: a, mutant: b };
 }
@@ -319,7 +443,7 @@ try {
   if (!hardFailure) {
     for (const m of selected) {
       const target = tmpModule[m.target];
-      const rel = MODULE_FILES[m.target];
+      const rel = m.target; // 模块键就是相对路径（原先误写成 MODULE_FILES[m.target]，诊断里会打印 undefined）
       // 每条 find 必须命中当前实现且唯一，否则视为探针自身失效
       const count = pristine[m.target].toString('utf8').split(m.find).length - 1;
       if (count !== 1) {
@@ -355,7 +479,7 @@ try {
         // 声称等价的：必须由差分核对证明等价，证明不过则反过来按漏网处理
         const equivPath = path.join(tmpRoot, `equiv-${m.name}.mjs`);
         fs.writeFileSync(equivPath, mutated);
-        const diff = await differentialAgreement(target, equivPath);
+        const diff = await differentialAgreement(m.target, target, equivPath);
         const proved = !detected && diff.agree;
         verdict = proved ? 'EQUIVALENT（差分核对一致，构造上不可抓）'
           : `OVERCLAIM（差分不一致或其实被抓到 → 按漏网处理）`;
