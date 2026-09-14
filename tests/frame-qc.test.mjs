@@ -127,3 +127,62 @@ test('合法输入不得抛错，且返回值形状不变', () => {
   assert.equal(Number.isNaN(stats.brightness), false);
   assert.equal(Number.isNaN(stats.laplacianVar), false);
 });
+
+// 以下为修复轮 2 补充（finding：judgeFrame 对非有限输入静默放行）：
+// `judgeFrame({ brightness: NaN, laplacianVar: 500 })` 曾返回 `{ ok: true, reason: 'ok' }`——
+// 因为 `NaN < DARK_THRESHOLD` 与 `NaN < BLUR_THRESHOLD` 都是 false。于是一张完全不可用的
+// 帧被判为可用，下游走 recognize_ok 路径，frame_rejected 计数（retry_rate 判据所依赖的信号）
+// 永不触发，属共享上下文 Global Constraint 3 禁止的静默降级。
+// 本轮与 computeStats 采用同一策略：契约被违反就抛 RangeError，而不是返回一个看起来合理的判定。
+//
+// 小工具：捕获同步抛出的错误；若函数根本没抛错，立即断言失败（否则测试会因
+// “没有错误对象可查”而以更难读的方式崩掉）。
+function thrownBy(fn) {
+  let caught;
+  try {
+    fn();
+  } catch (err) {
+    caught = err;
+  }
+  assert.ok(caught !== undefined, 'judgeFrame 应当抛错，但它没抛（静默放行）');
+  return caught;
+}
+
+test('brightness 为 NaN 时抛 RangeError，消息点名字段与收到的值', () => {
+  const err = thrownBy(() => judgeFrame({ brightness: NaN, laplacianVar: 500 }));
+  assert.ok(err instanceof RangeError, `应为 RangeError，实际 ${err.name}: ${err.message}`);
+  assert.match(err.message, /brightness/);
+  assert.match(err.message, /NaN/);
+});
+
+test('laplacianVar 为 NaN 时抛 RangeError，消息点名字段与收到的值', () => {
+  const err = thrownBy(() => judgeFrame({ brightness: 100, laplacianVar: NaN }));
+  assert.ok(err instanceof RangeError, `应为 RangeError，实际 ${err.name}: ${err.message}`);
+  assert.match(err.message, /laplacianVar/);
+  assert.match(err.message, /NaN/);
+});
+
+test('字符串 "100" 不被隐式转成数字，抛 RangeError', () => {
+  const err = thrownBy(() => judgeFrame({ brightness: '100', laplacianVar: 500 }));
+  assert.ok(err instanceof RangeError, `应为 RangeError，实际 ${err.name}: ${err.message}`);
+  assert.match(err.message, /brightness/);
+  assert.match(err.message, /100/);
+});
+
+test('±Infinity 也是非有限数，抛 RangeError（契约是“有限数”，不只是“非 NaN”）', () => {
+  assert.ok(thrownBy(() => judgeFrame({ brightness: Infinity, laplacianVar: 500 })) instanceof RangeError);
+  assert.ok(thrownBy(() => judgeFrame({ brightness: 100, laplacianVar: -Infinity })) instanceof RangeError);
+});
+
+test('缺少入参（judgeFrame(undefined)）抛 RangeError——契约是显式的，不靠解构碰巧报错', () => {
+  const err = thrownBy(() => judgeFrame(undefined));
+  assert.ok(err instanceof RangeError, `应为 RangeError，实际 ${err.name}: ${err.message}`);
+  assert.match(err.message, /undefined/);
+});
+
+test('合法调用判定不变：{ brightness: 128, laplacianVar: 200 } 仍为 { ok: true, reason: "ok" }', () => {
+  assert.deepEqual(judgeFrame({ brightness: 128, laplacianVar: 200 }), { ok: true, reason: 'ok' });
+  // 阈值边界语义不变：恰好等于阈值的帧仍然可用（新守卫只拒绝非有限数，不动 "<" 的取等）
+  assert.deepEqual(judgeFrame({ brightness: DARK_THRESHOLD, laplacianVar: BLUR_THRESHOLD }),
+    { ok: true, reason: 'ok' });
+});
