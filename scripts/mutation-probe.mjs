@@ -1,13 +1,14 @@
 /**
  * 变异探针（可重复运行的证据生成器，零依赖、非测试文件）。
  *
- * 用途：把 review 轮（`rv3-probe.mjs`）枚举的 18 个变异体 + Task 4 的 12 个变异体固化成仓库内
- * 可复跑的证据——逐个"把实现改坏"，跑 `tests/scheduler.test.mjs` + `tests/pick-word.test.mjs` +
- * `tests/feedback.test.mjs`，报告每个变异体是被测试抓到（DETECTED）还是溜过去了（MISSED），
+ * 用途：把 review 轮（`rv3-probe.mjs`）枚举的 18 个变异体 + Task 4 的 12 个变异体 + Task 5 修复轮
+ * 的 3 个环境校验变异体固化成仓库内可复跑的证据——逐个"把实现改坏"，跑
+ * `tests/scheduler.test.mjs` + `tests/pick-word.test.mjs` + `tests/feedback.test.mjs` +
+ * `tests/env.test.mjs`，报告每个变异体是被测试抓到（DETECTED）还是溜过去了（MISSED），
  * 只要有该抓没抓到的就以非零码退出。
  *
  * 用法（在仓库根）：
- *   node scripts/mutation-probe.mjs            # 全部 30 个变异体
+ *   node scripts/mutation-probe.mjs            # 全部 33 个变异体
  *   node scripts/mutation-probe.mjs --only=M2  # 只跑 M2（`--only=F` = 整个 F 系列；规则见下）
  *   KEEP_TMP=1 node scripts/mutation-probe.mjs # 保留临时工作树以便排查
  *
@@ -37,7 +38,8 @@
  * 证明不过就反过来算漏网（说明它其实可被抓到）。
  *
  * 结论：见文末运行输出的汇总行（Task 3：17/17 可抓变异体 DETECTED + M2 证为等价变异体；
- * Task 4：12/12 可抓变异体 DETECTED，见 `task-4-report.md`）。
+ * Task 4：12/12 可抓变异体 DETECTED，见 `task-4-report.md`；
+ * Task 5 修复轮：N1–N3 → 3/3 DETECTED，见 `task-5-report.md` 修复轮一节）。
  */
 import { spawn } from 'node:child_process';
 import { createHash } from 'node:crypto';
@@ -51,8 +53,14 @@ const MODULE_FILES = {
   scheduler: 'web/units/scheduler.mjs',
   'pick-word': 'web/units/pick-word.mjs',
   feedback: 'web/units/feedback.mjs',
+  env: 'server/env.mjs',
 };
-const TEST_FILES = ['tests/scheduler.test.mjs', 'tests/pick-word.test.mjs', 'tests/feedback.test.mjs'];
+const TEST_FILES = [
+  'tests/scheduler.test.mjs',
+  'tests/pick-word.test.mjs',
+  'tests/feedback.test.mjs',
+  'tests/env.test.mjs',
+];
 const TEST_ARGS = ['--test', ...TEST_FILES];
 const only = (process.argv.find((a) => a.startsWith('--only=')) ?? '').slice('--only='.length);
 
@@ -74,6 +82,7 @@ const sha256 = (buf) => createHash('sha256').update(buf).digest('hex');
 const SCHED = MODULE_FILES.scheduler;
 const PICK = MODULE_FILES['pick-word'];
 const FEEDBACK = MODULE_FILES.feedback;
+const ENV = MODULE_FILES.env;
 
 const PICK_ORIGINAL = `export function pickWord({ candidates, acceptableSets, exclude = [] }) {
   const accepted = new Set();
@@ -328,6 +337,34 @@ const MUTANTS = [
       + '*点名字段 + 带上实际取值*（措辞可以变，取值必须在）',
     find: '    errors.push(`error_type 取值越界: ${String(raw.error_type)}`);',
     replace: "    errors.push('error_type 取值越界');",
+  },
+  // ── env（Task 5 修复轮）：N1–N3 ──
+  // 这三条是 Task 5 实施者用一次性脚本测出来"改回去测试仍然全绿"的三处，现在固化成探针条目。
+  // 注意：它们只跑 tests/env.test.mjs 能覆盖的纯函数层；`server/index.mjs` 未接入本探针
+  // （它有 import 语句，过不了下面的 `new Function` 语法闸；其路由层由 tests/server.test.mjs 覆盖）。
+  {
+    name: 'N1_dropPortValidation', target: ENV, expect: 'detected',
+    why: '删掉 PORT 正整数校验：PORT=abc → NaN / PORT=0 / PORT=8.5 都会被原样交给 listen()，'
+      + '把"配置写错"推迟成一句难懂的绑端口错误（甚至绑到随机端口）',
+    find: `  if (!Number.isInteger(env.PORT) || env.PORT <= 0) {
+    throw new Error(\`PORT 非法: \${String(source.PORT)}\`);
+  }`,
+    replace: '',
+  },
+  {
+    name: 'N2_dropStringCoercion', target: ENV, expect: 'detected',
+    why: '必需项不再 String() 转换：注入数字/布尔等 source 时返回值不再是字符串，'
+      + '下游按字符串用它（拼 URL、trim、比较）会静默变形',
+    find: '  for (const k of REQUIRED) env[k] = String(source[k]);',
+    replace: '  for (const k of REQUIRED) env[k] = source[k];',
+  },
+  {
+    name: 'N3_messageDropsStartCommand', target: ENV, expect: 'detected',
+    why: '报错信息丢掉"启动方式: node --env-file=.env server/index.mjs"那半句：'
+      + '读者分不清"密钥没填"和".env 没加载"，只能回头翻文档',
+    find: `      \`缺少必需的环境变量: \${missing.join(', ')}（见 .env.example）\\n\`
+      + \`启动方式: \${START_COMMAND}（.env 由 Node 运行时加载，不是由本程序解析）\`,`,
+    replace: `      \`缺少必需的环境变量: \${missing.join(', ')}\`,`,
   },
 ];
 

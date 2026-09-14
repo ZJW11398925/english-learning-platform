@@ -14,6 +14,11 @@ export const START_COMMAND = 'node --env-file=.env server/index.mjs';
 /** 缺失判定：undefined 与空字符串（含纯空白）同等对待，防 `.env` 里留空键。 */
 const isBlank = (v) => v === undefined || String(v).trim() === '';
 
+/**
+ * 返回契约：必需项与 `VISION_DETAIL` 一律是**字符串**（注入非字符串的 source 也强制 `String()`），
+ * `PORT` 一律是**数字**：接受字符串或数字，经 `Number()` 后用"正整数"一条尺子裁——`'abc'`、`'0'`、
+ * `'-1'`、`'8.5'`、`NaN`、`Infinity` 全部抛错，绝不把非法端口放行成 `NaN` 交给 `listen()`。
+ */
 export function loadEnv(source = process.env) {
   const missing = REQUIRED.filter((k) => isBlank(source[k]));
   if (missing.length > 0) {
