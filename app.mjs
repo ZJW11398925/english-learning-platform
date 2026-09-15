@@ -567,6 +567,33 @@ export async function mount(root, deps = {}) {
    * `said === true` → 落 `reading_done` 并推进；否则**留在 reading 态**（重试是同一格里的选择，
    * 不新增状态机状态），界面如实说"这次没听到 X"。引擎报错与超时同样如实说，绝不改判成"读对了"。
    */
+  /**
+   * 引擎报错/超时的**每会话首条**落 `speech_unsupported`（DEC-OPI-…15）。
+   *
+   * 事件契约（`units/event-log.mjs` 头注释）本就预设"转写不可用 / 引擎报错 / 超时 →
+   * `speech_unsupported` 或什么都不落"，此前选了"不落"，于是"跟读判定为什么是 0"
+   * 在诊断页与导出里无从归因——真机实测（2026-09-15：引擎存在、启动即败、
+   * 界面闪一下恢复、事件流零记录）暴露的正是这一段。
+   *
+   * `reason` 与"浏览器无构造器"的 `no_speech_recognition` 分列：
+   * `engine_error:<引擎原样错误码>`（现场归因靠它区分没网/没权限/没服务）与 `timeout`。
+   * 只记首条：同会话重试失败不重复记，"多少会话语音不可用"的计数不许被重试灌水。
+   */
+  let speechUnavailableNoted = false;
+  function noteSpeechUnavailable(message) {
+    if (speechUnavailableNoted) return;
+    speechUnavailableNoted = true;
+    const engineCode = /语音识别失败：(.+)$/.exec(message)?.[1];
+    record(store, 'speech_unsupported', {
+      sessionId,
+      roundIndex: lastRoundIndex,
+      wordId: null,
+      word: shownWord?.word ?? null,
+      scene: shownWord?.scene ?? null,
+      reason: engineCode != null ? `engine_error:${engineCode}` : 'timeout',
+    }, clock);
+  }
+
   async function onSpeak() {
     setError('');
     speechAttempt = { busy: true, said: null, error: null, transcript: null };
@@ -575,7 +602,9 @@ export async function mount(root, deps = {}) {
     try {
       transcript = await listenOnce();
     } catch (err) {
-      speechAttempt = { busy: false, said: null, error: String(err?.message ?? err), transcript: null };
+      const message = String(err?.message ?? err);
+      speechAttempt = { busy: false, said: null, error: message, transcript: null };
+      noteSpeechUnavailable(message);
       render(machine.state);
       return;
     }
@@ -817,7 +846,11 @@ export async function mount(root, deps = {}) {
           }
           if (speechAttempt?.error != null) {
             // 引擎报错与上限到点都走这里：如实说"这次没能听清"，并把引擎给的话摊出来（诊断要用）。
-            view.push(hint(`这次没能听清（${speechAttempt.error}）。可以再试一次，或者跳过跟读。`));
+            // 不用 hint()：muted 灰字在真机上等于看不见（2026-09-15 实机缺陷的直接成因，
+            // DEC-OPI-…15），失败提示必须是全色文本。
+            const failLine = doc.createElement('p');
+            failLine.textContent = `这次没能听清（${speechAttempt.error}）。可以再试一次，或者跳过跟读。`;
+            view.push(failLine);
           }
           action(
             speechAttempt?.busy === true ? '正在听…' : SPEAK_BUTTON_LABEL,
