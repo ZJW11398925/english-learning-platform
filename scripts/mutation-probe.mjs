@@ -6,11 +6,13 @@
  * + Task 7 修复轮的 12 个（轮次/判据 B 口径 6 + 上游响应校验与超时 6）
  * + Task 7 复审轮的 2 个（停滞的响应体归超时）+ Task 8 的 16 个（造句反馈：客户端 10 + 上游 6）
  * + Task 9 的 28 个（跟读判定 K1–K6 + 已证等价的 K7，接线 P1–P22）
+ * + Task 9B 的 13 个（待补反馈队列 Q1–Q8、storage_full Q9–Q11、reading_missed Q12–Q13）
+ * + Task 10 的 11 个（导出统计口径 X1–X11）
  * 固化成仓库内可复跑的证据——逐个"把实现改坏"，跑 `tests/` 下被登记的那 15 个测试文件，报告每个
  * 变异体是被测试抓到（DETECTED）还是溜过去了（MISSED），只要有该抓没抓到的就以非零码退出。
  *
  * 用法（在仓库根）：
- *   node scripts/mutation-probe.mjs            # 全部 125 个变异体
+ *   node scripts/mutation-probe.mjs            # 全部变异体
  *   node scripts/mutation-probe.mjs --only=M2  # 只跑 M2（`--only=F` = 整个 F 系列；规则见下）
  *   KEEP_TMP=1 node scripts/mutation-probe.mjs # 保留临时工作树以便排查
  *
@@ -24,6 +26,7 @@
  *      `--only=R` 跑 Task 7 的 15 条（R1–R15），`--only=U` 跑上游响应校验与超时的 7 条（U1–U7），
  *      `--only=V` 跑 Task 8 的服务端造句上游 6 条（V1–V6），
  *      `--only=K` 跑 Task 9 的跟读判定 7 条（K1–K7），`--only=P` 跑 Task 9 的接线 22 条（P1–P22）；
+ *      `--only=Q` 跑 Task 9B 的 13 条（Q1–Q13），`--only=X` 跑 Task 10 的导出统计 11 条（X1–X11）；
  *   3. 两者皆空即当场 FAIL（并列出全部可用 ID），绝不"跑 0 个然后 PASS"。
  * 这修掉了原先的子串匹配：那时 `--only=F` 会把 `M9_terminalNoFlag`、`Q2_topScoreFirst`、
  * `Q4_hypernymFallback` 一起选中（14 个而不是 11 个），选中的集合与"只看 F 系列"的意图不符。
@@ -67,6 +70,12 @@
  * → 28/28 DETECTED，见 `task-9-report.md`——这一轮把 `speak` 接进了探针，
  * 并把两份**挂载**测试（跟读接线、复现与落盘）也接进 TEST_FILES：不接它们，
  * P 系列（本任务的重头）就没有任何变异证据。
+ * Task 9B 的 Q1–Q13（待补队列 / storage_full / reading_missed）→ 13/13 DETECTED，
+ * 见 `task-9b-report.md`。
+ * Task 10 的 X1–X11（`scripts/export.mjs` 的统计口径：造句总数不相加、判据 B 的分子与分母、
+ * 两个失败率的分母、sceneChanged 的方向、top-3 的切片、补交成功率的分母、CSV 的 BOM）
+ * → 见 `task-10-report.md`——这是唯一一批**在 `scripts/` 下的**变异体，
+ * 它把"数算错了没人看得出来"这一类缺陷第一次纳入了变异证据。
  */
 import { spawn } from 'node:child_process';
 import { createHash } from 'node:crypto';
@@ -116,6 +125,11 @@ const MODULE_FILES = {
   // 它**零 import**（只用注入的 localStorage/indexedDB 句柄），进得来；
   // 而它承载的正是"存储写满"那一档——此前全项目没有任何代码发出 `storage_full`。
   store: 'web/units/store.mjs',
+  // Task 10 接入：数据导出（判据统计）。它是**唯一一个在 scripts/ 下的变异目标**——
+  // 临时树按相对路径建（`<tmp>/scripts/export.mjs`），它的 `import '../web/units/rounds.mjs'`
+  // 正好指向临时树里的 `rounds`（同在上述 MODULE_FILES 里），故临时树 import 得到。
+  // 它承载的是"判据 B 与各口径的数到底怎么算"——数算错了没有任何东西会报错，只会得出错的结论。
+  export: 'scripts/export.mjs',
 };
 const TEST_FILES = [
   'tests/scheduler.test.mjs',
@@ -151,6 +165,10 @@ const TEST_FILES = [
   'tests/pending-mount.test.mjs',
   'tests/storage-full.test.mjs',
   'tests/event-log.test.mjs',
+  // Task 10 接入：导出的口径证据（X 系列的全部变异体都靠它抓）。
+  // 它进得来：只 import `scripts/export.mjs` 与 `node:fs/os/path/child_process/url`，
+  // 不起服务、不 import `server/index.mjs`（那条纪律见下面的长注释）。
+  'tests/export.test.mjs',
 ];
 // `tests/index-html.test.mjs` **有意不进这张表**：它读 `web/index.html` 这个真实文件，
 // 而临时树只复制模块与测试，进来会因缺文件而假红。它由 `node --test` 全量套件守着。
@@ -217,6 +235,8 @@ const APP = MODULE_FILES.app;
 // Task 9B 的三个新目标
 const PENDING = MODULE_FILES.pending;
 const STORE = MODULE_FILES.store;
+// Task 10 的新目标（唯一一个在 scripts/ 下的）
+const EXPORT = MODULE_FILES.export;
 
 const PICK_ORIGINAL = `export function pickWord({ candidates, acceptableSets, exclude = [] }) {
   const accepted = new Set();
@@ -1434,6 +1454,92 @@ const MUTANTS = [
   // 于是处置是：**不登记**那条变异体，改成在 `pending-mount.test.mjs` 里直接钉住
   // "入口给不出空列表"这个可观察行为（实测：把入口层的结果清空，8 条用例变红）。
   // 留着这一段是为了让下一个人不必重新发现一遍"app.mjs 不能登记等价变异体"。
+
+  // ── Task 10：导出的口径（`scripts/export.mjs`）：X1–X11 ──────────────────────
+  //
+  // 这一批钉的是**计数的口径**，不是"函数会不会跑"。判据统计的坏法全都长得一样：
+  // 数字仍然是个数字，只是它回答的不是原来那个问题——而看数据的人无从发觉。
+  // 因此每一条都对着 brief §2 的某一条口径，且每一条都被 `tests/export.test.mjs`
+  // 里一条**正向**用例抓住（用"某个数等于几"而不是"没抛错"）。
+  {
+    name: 'X1_composeTotalAddsFeedback', target: EXPORT, expect: 'detected',
+    why: '造句总数把判定事件（feedback_ok）里的同一句也加进来：同一句话被数两遍，'
+      + '而"成人愿为造句付多少成本"这个成本数就此虚高（诊断页把这句口径写在页面上，两处必然漂移）',
+    find: `  const composeTotal = countOf(list, 'compose_submitted');`,
+    replace: `  const composeTotal = countOf(list, 'compose_submitted') + countOf(list, 'feedback_ok');`,
+  },
+  {
+    name: 'X2_retriedAnyTruthy', target: EXPORT, expect: 'detected',
+    why: '`retried` 判成"有个真值就算"（`Boolean(...)`）：契约是**只有 `retried: true` 才算补交**'
+      + '（`units/pending.mjs` 的 `retryEventFor`），杂值（`"yes"` / `1`）被算成补交后，'
+      + '"补交来的判定"与"补交成功率"的分母一起被污染',
+    find: `const isRetried = (e) => e?.payload?.retried === true;`,
+    replace: `const isRetried = (e) => Boolean(e?.payload?.retried);`,
+  },
+  {
+    name: 'X3_uncertaintyDenominatorIncludesPending', target: EXPORT, expect: 'detected',
+    why: '`uncertain` 的分母把"没拿到判定"（feedback_pending）也算进去——**plan 示例的写法**。'
+      + '后果方向恰好反了：网络越差、拿不到判定越多，线上看起来就越"判得不含糊"',
+    find: `  const feedbackJudged = list.filter((e) => JUDGED_TYPES.includes(e?.type)).length;`,
+    replace: `  const feedbackJudged = list.filter((e) => JUDGED_TYPES.includes(e?.type) || e?.type === 'feedback_pending').length;`,
+  },
+  {
+    name: 'X4_readingDenominatorIncludesUnjudged', target: EXPORT, expect: 'detected',
+    why: '跟读失败率的分母混进 `speech_unsupported` 与 `skipped_reading`（那两个是"没判过"）：'
+      + '浏览器不支持的会话越多，跟读失败率看起来越低',
+    find: `  const readingJudged = readingDone + readingMissed;`,
+    replace: `  const readingJudged = readingDone + readingMissed + countOf(list, 'speech_unsupported') + countOf(list, 'skipped_reading');`,
+  },
+  {
+    name: 'X5_sceneChangedNotTrue', target: EXPORT, expect: 'detected',
+    why: '`sceneChanged` 反过来判（`!== false`）：缺字段/拿不准的那些也记成"换了场景"，'
+      + '§3.4 要看的"跨场景到底有没有被兑现"直接虚高',
+    find: `  const sceneChangedTrue = recurrence.filter((e) => e?.payload?.sceneChanged === true).length;`,
+    replace: `  const sceneChangedTrue = recurrence.filter((e) => e?.payload?.sceneChanged !== false).length;`,
+  },
+  {
+    name: 'X6_gateOffByOne', target: EXPORT, expect: 'detected',
+    why: '判据 B 的门槛从"需重拍 ≥2 次"（R ≥ 3）松一格到"重拍 ≥1 次"（R ≥ 2）：'
+      + '重拍率整体虚高，`retry_rate ≤ 0.2` 这条闸变得更容易不达标（或更容易被误判达标）',
+    find: `  const needing = counted.filter(([, r]) => needsReshoot(r));`,
+    replace: `  const needing = counted.filter(([, r]) => r - 1 >= 1);`,
+  },
+  {
+    name: 'X7_denominatorAllSessions', target: EXPORT, expect: 'detected',
+    why: '判据 B 的分母用"事件流里出现过的全部会话"（含只有 `blocked_permission`、'
+      + '一次快门都没按过的会话）：相机没授权的用户被算成"没重拍"，重拍率被稀释',
+    find: `  const counted = [...roundCounts.entries()].filter(([, r]) => r >= 1);`,
+    replace: `  const counted = [...roundCounts.entries()];`,
+  },
+  {
+    name: 'X8_top3NotSliced', target: EXPORT, expect: 'detected',
+    why: 'top-3 命中不切前 3 个候选（整个候选数组里有没有就算命中）：'
+      + 'top3 退化成"候选里含不含可接受词"，`top3 ≥ 0.85` 这条判据直接被放水',
+    find: `      if (cands.slice(0, 3).some((c) => set.includes(c))) top3Hits += 1;`,
+    replace: `      if (cands.some((c) => set.includes(c))) top3Hits += 1;`,
+  },
+  {
+    name: 'X9_retrySuccessDenominator', target: EXPORT, expect: 'detected',
+    why: '补交成功率的分母用"拿到判定的补交"而不是"试过几次补交"：'
+      + '**补交失败的那些拿不到判定、会被分母剔掉**，于是分母只剩成功的那几条，'
+      + '成功率恒为 1——而"补交到底能不能救回反馈"正是那条队列存在的理由（首版真写错过这一处）',
+    find: `    retrySuccessRate: rate(retriedResolved, retriedAttempts.length),`,
+    replace: `    retrySuccessRate: rate(retriedResolved, retriedJudged),`,
+  },
+  {
+    name: 'X10_retriedResolvedNoPointerCheck', target: EXPORT, expect: 'detected',
+    why: '"补上了"只判 `retriedPendingId` 这个键**存在**而不判它是非空字符串：'
+      + '补交**又失败**那条若带了空值指针，会被读成"补上了"，欠账被凭空勾掉',
+    find: `    (e) => typeof e?.payload?.retriedPendingId === 'string' && e.payload.retriedPendingId !== '',`,
+    replace: `    (e) => e?.payload?.retriedPendingId !== undefined,`,
+  },
+  {
+    name: 'X11_csvNoBom', target: EXPORT, expect: 'detected',
+    why: 'CSV 去掉 UTF-8 BOM：Excel 按本地编码（简中 Windows 上是 GBK）解释含中文的 payload，'
+      + '整张表变乱码——而乱码会让人以为"数据坏了"，正是 brief §2 第 8 条要避免的那件事',
+    find: '  return `\\uFEFF${[header, ...rows].map((r) => r.map(escapeCell).join(\',\')).join(\'\\n\')}\\n`;',
+    replace: '  return `${[header, ...rows].map((r) => r.map(escapeCell).join(\',\')).join(\'\\n\')}\\n`;',
+  },
 ];
 
 // ─────────────────────────────────────────────────────────── 工具
@@ -1441,12 +1547,17 @@ const MUTANTS = [
  * 单个变异体子进程的**墙钟上限**（护栏 4）。`node:test` 默认超时是 `Infinity`，所以一条把测试
  * 跑挂的变异体会让探针无限期挂住、不给诊断（本项目 Task 2 已吃过同款亏：手写测试替身的
  * `oncomplete` 永不触发 → 零输出挂死，看起来像"还在跑"而不是"失败"）。
- * 取值理由：整套测试当前约 1.5s（改前/改后全量 `node --test` 的 `duration_ms` 为 1515 / 1528），30s 已是
- * **约 20 倍**整套测试、**三个数量级**于单文件耗时的余量——正常变异体绝无可能撞上，而它能保证
+ * 取值理由：整套测试当前约 1.5s（改前/改后全量 `node --test` 的 `duration_ms` 为 1515 / 1528），
+ * 30s 已是**约 20 倍**整套测试、**三个数量级**于单文件耗时的余量——正常变异体绝无可能撞上，而它能保证
  * 卡死的那一个在 30s 内变成一条可读的诊断而不是一次无限等待。成本上界从"无限"变成
  * `30 个变异体 × 30s`（最坏 15 分钟，且首个超时即 FAIL 退出，实际远小于此）。
+ *
+ * **Task 10 提到 60s**：`tests/export.test.mjs` 里有 6 条用例会 `execFileSync` 起子进程跑 CLI，
+ * 全是**冷启动**（每次约 60–70ms，但机器忙时会拉长），这一整套的墙钟比纯逻辑那套高一个量级。
+ * 提高这一道闸的代价只是"真卡死时多等一会儿"，而**降低它的代价是把一次慢启动误判成 TIMEOUT**
+ * （TIMEOUT 按"未抓到"单列，会污染结论）。宁可等，不要误判。
  */
-const CHILD_TIMEOUT_MS = 30_000;
+const CHILD_TIMEOUT_MS = 60_000;
 /** 强杀后再等这么久还没收到 `exit` 就自己结算：否则"杀不掉"又会退化成永久挂住。 */
 const KILL_GRACE_MS = 5_000;
 
@@ -1532,6 +1643,13 @@ function failingTests(logPath) {
  * Task 9 起还要**先整条剥掉"再导出"**（`export { … } from '…';`）：只去掉行首那个 `export `
  * 的话，剩下的 `{ … } from '…';` 不是合法语句——而 `web/app.mjs` 顶上正好有这么一条，
  * 于是 P 系列（本任务的全部接线变异体）第一次跑全是 PATCH-FAILED。
+ *
+ * Task 10 起还要**把 `import.meta` 换掉**：`scripts/export.mjs` 用
+ * `import.meta.main`（Node 24 的"是不是被当命令跑"判定）与 `import.meta.url`，
+ * 而 `import.meta` 只在 ES 模块里合法——`new Function` 见它同样报语法错，
+ * 于是 X 系列第一次跑全部 PATCH-FAILED（与 Task 9 那条同源、同一种失效形状：
+ * **探针的语法门把"新模块的新语法"误判成"变异体坏了"**）。
+ * 换成 `({})` 之后它的取值不再被检查（与"剥掉 import/export 行"同一个代价）。
  * **局限（如实记，别当成没这回事）**：剥掉 import/export 行之后再查语法，等于不再检查那些行本身。
  * 现有变异体的 `find` 全在函数体/常量里，没有一条动 import/export 行，所以这道门对当前变异集
  * 的能力不变；将来若出现改 import 行的变异体，这里会漏，届时应换成真编译检查（例如 `node --check`）。
@@ -1548,7 +1666,9 @@ function syntaxOk(source, rel) {
       // 它一旦漏掉，整个 P 系列都会以"变异体语法错误"收场（看起来像探针坏了，
       // 而根因是这行正则）—— 与 Task 9 §5.4 那条 `export { … } from` 的坑同源。
       // 剥掉之后不再检查这些行（它们本来也不参与变异），局限写在文件头。
-      .replace(/^import [\s\S]*?from\s*['"][^'"]*['"];\s*$/gm, '');
+      .replace(/^import [\s\S]*?from\s*['"][^'"]*['"];\s*$/gm, '')
+      // `import.meta`（Task 10：`scripts/export.mjs` 的"被当成命令跑"判定）
+      .replace(/import\.meta/g, '({})');
     // eslint-disable-next-line no-new-func
     new Function(stripped);
     return null;
