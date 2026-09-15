@@ -4,12 +4,13 @@
  * 用途：把 review 轮（`rv3-probe.mjs`）枚举的 18 个变异体 + Task 4 的 12 个变异体 + Task 5 修复轮
  * 的 3 个环境校验变异体 + Task 6 的 26 个（状态机 13 + 相机/灰度 13）+ Task 7 的 8 个识物变异体
  * + Task 7 修复轮的 12 个（轮次/判据 B 口径 6 + 上游响应校验与超时 6）
- * + Task 7 复审轮的 2 个（停滞的响应体归超时）+ Task 8 的 15 个（造句反馈：客户端 9 + 上游 6）
- * 固化成仓库内可复跑的证据——逐个"把实现改坏"，跑 `tests/` 下被登记的那 13 个测试文件，报告每个
+ * + Task 7 复审轮的 2 个（停滞的响应体归超时）+ Task 8 的 16 个（造句反馈：客户端 10 + 上游 6）
+ * + Task 9 的 28 个（跟读判定 K1–K6 + 已证等价的 K7，接线 P1–P22）
+ * 固化成仓库内可复跑的证据——逐个"把实现改坏"，跑 `tests/` 下被登记的那 15 个测试文件，报告每个
  * 变异体是被测试抓到（DETECTED）还是溜过去了（MISSED），只要有该抓没抓到的就以非零码退出。
  *
  * 用法（在仓库根）：
- *   node scripts/mutation-probe.mjs            # 全部 97 个变异体
+ *   node scripts/mutation-probe.mjs            # 全部 125 个变异体
  *   node scripts/mutation-probe.mjs --only=M2  # 只跑 M2（`--only=F` = 整个 F 系列；规则见下）
  *   KEEP_TMP=1 node scripts/mutation-probe.mjs # 保留临时工作树以便排查
  *
@@ -18,10 +19,11 @@
  *   1. 先按 ID **全串相等**——`--only=M1` 只跑 M1（不再连带 M10–M14），`--only=F12` 只跑 F12；
  *   2. 没有精确命中时退化为**族匹配**（ID 以该串开头）——`--only=F` 跑 F1…F12，`--only=Q` 跑 Q1…Q4，
  *      `--only=S` 跑 Task 6 的状态机 13 条，`--only=C` 跑相机/灰度 13 条 **与 Task 8 的
- *      compose 9 条**（两批的 ID 都是 `C<数字>`，族匹配会一起选中：想单跑后者请用
+ *      compose 10 条**（两批的 ID 都是 `C<数字>`，族匹配会一起选中：想单跑后者请用
  *      `--only=C1_empty` 这样的全串，或看下面的说明），
  *      `--only=R` 跑 Task 7 的 15 条（R1–R15），`--only=U` 跑上游响应校验与超时的 7 条（U1–U7），
- *      `--only=V` 跑 Task 8 的服务端造句上游 6 条（V1–V6）；
+ *      `--only=V` 跑 Task 8 的服务端造句上游 6 条（V1–V6），
+ *      `--only=K` 跑 Task 9 的跟读判定 7 条（K1–K7），`--only=P` 跑 Task 9 的接线 22 条（P1–P22）；
  *   3. 两者皆空即当场 FAIL（并列出全部可用 ID），绝不"跑 0 个然后 PASS"。
  * 这修掉了原先的子串匹配：那时 `--only=F` 会把 `M9_terminalNoFlag`、`Q2_topScoreFirst`、
  * `Q4_hypernymFallback` 一起选中（14 个而不是 11 个），选中的集合与"只看 F 系列"的意图不符。
@@ -60,6 +62,11 @@
  * Task 8 复审轮的 C10（`web/units/compose.mjs` 的 504/408 分支）→ 1/1 DETECTED，
  * 见 `task-8-report.md`「修复轮 2」一节——这一轮同时把 `server/redact.mjs` 放进
  * MODULE_FILES（只为临时树里 import 得到，没有变异体）。
+ * Task 9 的 K1–K7（`web/units/speak.mjs` 的跟读判定，含一次口径变更：多词目标词改连续 token 匹配）
+ * 与 P1–P22（`web/app.mjs` 的接线：入队幂等 / 到期提示 / 复现两种模式 / 不谎报换场景 / 落盘口径）
+ * → 28/28 DETECTED，见 `task-9-report.md`——这一轮把 `speak` 接进了探针，
+ * 并把两份**挂载**测试（跟读接线、复现与落盘）也接进 TEST_FILES：不接它们，
+ * P 系列（本任务的重头）就没有任何变异证据。
  */
 import { spawn } from 'node:child_process';
 import { createHash } from 'node:crypto';
@@ -99,6 +106,9 @@ const MODULE_FILES = {
   // Task 8 复审轮接入：两条上游腿共用的密钥形状抹除（进临时树只为"import 得到"，
   // 没有对应变异体——它是个逐条替换的纯函数，坏法太多而断言面很窄）。
   redact: 'server/redact.mjs',
+  // Task 9 接入：跟读判定（token 规则 + 原样保留转写 + 可用性判定）。零 import 的纯逻辑模块，
+  // 与 frame-qc / pick-word 同一个处境：它判的是"用户有没有说出目标词"，判错了没人看得出来。
+  speak: 'web/units/speak.mjs',
 };
 const TEST_FILES = [
   'tests/scheduler.test.mjs',
@@ -120,6 +130,13 @@ const TEST_FILES = [
   // `feedback-upstream`（零 import 的纯逻辑模块，理由同 recognize-upstream）。
   // 两条都进得来：只 import 模块本身，不起子进程、不写死 `../web/` 的绝对路径。
   'tests/compose.test.mjs',
+  // Task 9 接入：`speak`（跟读判定的纯逻辑）与两份**挂载**测试（跟读接线、复现与落盘）。
+  // 后两条进得来是因为 `web/app.mjs` 本来就在 MODULE_FILES 里，夹具也都在 HELPER_FILES 里；
+  // 它们 import 的东西（app / scheduler / speak / helpers）临时树里一个不少。
+  // 不接它们的话，P 系列（入队幂等、复现两种模式、落盘口径）就没有任何变异证据。
+  'tests/speak.test.mjs',
+  'tests/speak-mount.test.mjs',
+  'tests/recurrence-mount.test.mjs',
 ];
 // `tests/index-html.test.mjs` **有意不进这张表**：它读 `web/index.html` 这个真实文件，
 // 而临时树只复制模块与测试，进来会因缺文件而假红。它由 `node --test` 全量套件守着。
@@ -181,6 +198,8 @@ const ROUNDS = MODULE_FILES.rounds;
 const UP = MODULE_FILES['recognize-upstream'];
 const COMPOSE = MODULE_FILES.compose;
 const FBUP = MODULE_FILES['feedback-upstream'];
+const SPEAK = MODULE_FILES.speak;
+const APP = MODULE_FILES.app;
 
 const PICK_ORIGINAL = `export function pickWord({ candidates, acceptableSets, exclude = [] }) {
   const accepted = new Set();
@@ -1010,6 +1029,251 @@ const MUTANTS = [
     }`,
     replace: '    // 变异体：不再区分"上限到点"与"响应体不是 JSON"',
   },
+  // ── 跟读判定（Task 9 · `web/units/speak.mjs`）：K1–K7 ──
+  // 这批钉的是设计文档 §4.3 那条判据的全部内容：**只判有没有说出目标词**。
+  // 判错了有两种方向，两种都很贵：判成"说出了"（用户没念也过关，跟读这一步等于没有）
+  // 与判成"没说"（用户念对了却说没听到，只能靠跳过跟读逃出去）。所以 token 边界、
+  // 大小写、转写原样保留、可用性只认函数、空序列默认值，各有一条。
+  //
+  // 口径变更（控制器裁定，见 task-9-report）：多词目标词从"永远判不出"改成"连续 token 子序列"。
+  // K7 也随之从"已证等价"变成**可抓**的一条——重构把空序列的处理收敛成唯一一处
+  // （`containsSequence` 的第一句），`checkSpeech` 不再另加早退，于是这一句是承重的。
+  {
+    name: 'K1_substringMatch', target: SPEAK, expect: 'detected',
+    why: '把"连续 token 出现"退化成"拼成串再做子串包含"：`mugshot` 会被判成说出了 `mug`'
+      + '（计划自带的用例就是为这条写的），于是"有没有说出这个词"不再成其为判据',
+    find: '  return { said: containsSequence(tokenize(raw), tokenize(targetWord)), transcript: raw };',
+    replace: "  return { said: tokenize(raw).join(' ').includes(tokenize(targetWord).join(' ')), transcript: raw };",
+  },
+  {
+    name: 'K2_caseSensitive', target: SPEAK, expect: 'detected',
+    why: '切词不做小写归一：语音引擎常把句首词首字母大写（`I see a Mug.`），'
+      + '于是"念对了"被判成"没听到"——用户只能跳过跟读，而数据里看不出是判定坏了',
+    find: "const tokenize = (s) => String(s ?? '').toLowerCase().split(/[^a-z']+/).filter(Boolean);",
+    replace: "const tokenize = (s) => String(s ?? '').split(/[^a-z']+/).filter(Boolean);",
+  },
+  {
+    name: 'K3_trimTranscript', target: SPEAK, expect: 'detected',
+    why: '返回的转写被 trim 过：它是"用户到底说了什么"的唯一证据（复核引擎听错、将来做人工标注'
+      + '都靠它），在这里顺手规整一下就把证据改掉了，而且改得没人看得见',
+    find: '  return { said: containsSequence(tokenize(raw), tokenize(targetWord)), transcript: raw };',
+    replace: '  return { said: containsSequence(tokenize(raw), tokenize(targetWord)), transcript: raw.trim() };',
+  },
+  {
+    name: 'K4_availabilityTruthyNotFunction', target: SPEAK, expect: 'detected',
+    why: '可用性判定只看"有没有这个字段"而不看它是不是函数：调用方会 `new` 它，'
+      + '一个占位对象就能让界面进到"开始说"那条路，用户点下去的那一刻抛错',
+    find: `  return typeof win?.SpeechRecognition === 'function'
+    || typeof win?.webkitSpeechRecognition === 'function';`,
+    replace: '  return win?.SpeechRecognition != null || win?.webkitSpeechRecognition != null;',
+  },
+  {
+    name: 'K5_availabilityIgnoresWebkit', target: SPEAK, expect: 'detected',
+    why: '只认 `SpeechRecognition`、丢掉 `webkitSpeechRecognition`：Safari / 旧 Chrome 只挂 webkit 那个名字，'
+      + '于是整个跟读判定在这些浏览器上永远走降级（speech_unsupported 虚高）',
+    find: `  return typeof win?.SpeechRecognition === 'function'
+    || typeof win?.webkitSpeechRecognition === 'function';`,
+    replace: "  return typeof win?.SpeechRecognition === 'function';",
+  },
+  {
+    name: 'K6_availabilityReadsGlobalThis', target: SPEAK, expect: 'detected',
+    why: '可用性判定不看传进来的对象、直接读全局：注入点就此失效（测试注入假引擎也没用），'
+      + '而且这个模块不再是纯逻辑——它再也不能在 Node 里直接测',
+    find: `  return typeof win?.SpeechRecognition === 'function'
+    || typeof win?.webkitSpeechRecognition === 'function';`,
+    replace: "  return typeof globalThis?.SpeechRecognition === 'function';",
+  },
+  {
+    name: 'K7_dropEmptySeqGuard', target: SPEAK, expect: 'detected',
+    why: '`containsSequence` 里"空序列不算出现"那一句被删掉：空目标词（空串 / 纯符号 / 纯空白 / null）'
+      + '会**命中任何非空转写**——词表里一个配置错误（空串）就让所有人**自动**通过跟读。'
+      + '这一句是该模块里**唯一**处理空序列的地方（`checkSpeech` 不再另加早退），所以它承重、'
+      + '也必须能被抓到（口径变更前它是"等价变异体"，重构后是可抓的一条）',
+    find: '  if (seq.length === 0) return false;',
+    replace: '  // 变异体：空序列也当"出现"',
+  },
+  // ── Task 9 的接线（`web/app.mjs`）：P1–P22 ──
+  // 这批钉的是这一轮新接的四条链：**入队幂等**（回环不许重置排期）、**复现两种模式分列**
+  // （识物命中 / 手选，绝不合并）、**不许谎报换了场景**、**落盘口径**（submitCount /
+  // revisions / dwellMs 是"这一轮"的停留）。每一条都对应一个"改坏了看不出来"的地方：
+  // 排期被推回原点 → 复现永远不发生；sceneChanged 说谎 → 跨场景主张变成假数据；
+  // dwellMs 记成累计值 → "这句花了多久"这个数永远拿不到。
+  // 编号里**没有 P3**：原本想放"手写 dueAt 而不经 nextState"，但 `INTERVALS_DAYS[0]` 就是 1 天，
+  // 手写出来的数值与原实现逐位相同——**行为不可分**，登记成 detected 只会得到一条假的 MISSED。
+  // 它记在 task-9-report 的弱断言清单里（"dueAt 是否经 nextState 产出"这件事没有行为证据）。
+  {
+    name: 'P1_enqueueOverwritesExisting', target: APP, expect: 'detected',
+    why: '入队不看是否已存在，直接按 stage 0 重排一次：**回环**（feedback → rewrite → composing → feedback）'
+      + '每次提交都把 dueAt 推到新的 now，于是这个词永远到不了期——跨场景复现永远不会发生。'
+      + 'brief §3.3.1 点名的就是这个坑，单次提交的用例照样全绿，只有回环用例抓得住',
+    find: `    const id = wordIdOf(word);
+    if (store.readWords()[id] !== undefined) return false;
+    store.putWord(nextState({ id, word, stage: 0, lastScene: scene }, now));`,
+    replace: `    const id = wordIdOf(word);
+    store.putWord(nextState({ id, word, stage: 0, lastScene: scene }, now));`,
+  },
+  {
+    name: 'P2_noEnqueue', target: APP, expect: 'detected',
+    why: '学完不写词记录（就是本任务要补的那处缺口本身）：dueAt 永远不存在，'
+      + '"学完即入队"与"到期复现"整条链一起消失，而界面上一切照旧',
+    find: `    store.putWord(nextState({ id, word, stage: 0, lastScene: scene }, now));
+    return true;`,
+    replace: '    return true;',
+  },
+  {
+    name: 'P4_recurrenceWithoutDueCheck', target: APP, expect: 'detected',
+    why: '复现命中不再要求"这个词现在到期"（任一存在的词记录都算）：'
+      + '还没到期的词也会被记一次复现并推进档位，复现率虚高、复现间隔被跳过',
+    find: '    const target = dueList().find((w) => w.id === id);',
+    replace: '    const target = dueList().find((w) => w.id === id) ?? store.readWords()[id];',
+  },
+  {
+    name: 'P5_sceneChangedAlwaysTrue', target: APP, expect: 'detected',
+    why: '`sceneChanged` 恒为 true：**谎报换了场景**（手选那一档根本没有场景、同一场景再拍到也算换了）。'
+      + '跨场景复现是这一轮的核心主张，这个字段说谎等于把主张变成假数据',
+    find: '    const sceneChanged = sceneChangedOf(scene, expectedScene);',
+    replace: '    const sceneChanged = true;',
+  },
+  {
+    name: 'P6_sceneChangedNaiveCompare', target: APP, expect: 'detected',
+    why: '场景比较退化成裸的 `!==`（去掉"未知场景不算换"这条守卫）：手选档的"手动选择"与'
+      + '上次的"kitchen"一比就成了"换了场景"——系统并不知道用户站在哪儿，却替他打了包票',
+    find: `  const sceneChangedOf = (scene, expectedScene) => (
+    isRealScene(scene) && isRealScene(expectedScene) && scene !== expectedScene
+  );`,
+    replace: '  const sceneChangedOf = (scene, expectedScene) => scene !== expectedScene;',
+  },
+  {
+    name: 'P7_sceneChangedAlwaysFalse', target: APP, expect: 'detected',
+    why: '`sceneChanged` 恒为 false：反向的说谎（真换了场景却说没换）。这一档看着"保守"，'
+      + '但同样让"跨场景"这件事无法从数据里看出来',
+    find: '    const sceneChanged = sceneChangedOf(scene, expectedScene);',
+    replace: '    const sceneChanged = false;',
+  },
+  {
+    name: 'P8_recurrenceMergedIntoScene', target: APP, expect: 'detected',
+    why: '手选命中被记成 `recurrence_scene`（**两种模式合并**）：§3.4 要求分列，'
+      + '因为"手选占比高"说明跨场景主张没被兑现——合并成一个总数就把这个信号抹掉了',
+    find: "    record(store, source === 'manual' ? 'recurrence_manual' : 'recurrence_scene', {",
+    replace: "    record(store, 'recurrence_scene', {",
+  },
+  {
+    name: 'P9_manualRecurrenceNotRecorded', target: APP, expect: 'detected',
+    why: '手选那条路不再记复现：用户在没被认出来的情况下自己找回这个词，'
+      + '这次复现与它的排期推进一起消失（而且他下次还会被同一个词催一遍）',
+    find: "    noteRecurrence('manual');",
+    replace: '    // 变异体：手选不算复现',
+  },
+  {
+    name: 'P10_recurrenceNotRecordedOnRecognize', target: APP, expect: 'detected',
+    why: '识物命中那条路不再记复现（`recurrence_scene` 永不落）：整条"到期在新场景复现"的链'
+      + '在数据里不存在，而界面照旧显示取到了词',
+    find: "      noteRecurrence('recognized');",
+    replace: '      // 变异体：识物命中不算复现',
+  },
+  {
+    name: 'P11_speechMissLooksSaid', target: APP, expect: 'detected',
+    why: '跟读判定结果被丢掉、一律当成"说出了"：**没念也过关**，跟读这一步等于没有，'
+      + '而 reading_done 照样落一条——数据上看不出任何异常',
+    find: "    const verdict = checkSpeech(shownWord?.word ?? '', transcript);",
+    replace: '    const verdict = { said: true, transcript };',
+  },
+  {
+    name: 'P12_unsupportedNotRecorded', target: APP, expect: 'detected',
+    why: '转写不可用时不再落 `speech_unsupported`：降级这件事在数据里消失，'
+      + '于是"多少人的浏览器根本做不了跟读判定"永远算不出来（全局约束 3：失败不得静默）',
+    find: `    record(store, 'speech_unsupported', {
+      sessionId,
+      roundIndex: lastRoundIndex,
+      wordId: null,
+      word: shownWord?.word ?? null,
+      scene: shownWord?.scene ?? null,
+      reason: 'no_speech_recognition',
+    }, clock);`,
+    replace: '    // 变异体：不记降级标签',
+  },
+  {
+    name: 'P13_unsupportedPretendsRead', target: APP, expect: 'detected',
+    why: '降级路径**伪装成读对了**：转写不可用时也落一条 `reading_done`。'
+      + '手动打勾只表示"我读了"，不是"系统听到我说出了目标词"——混记会让跟读通过率变成假的',
+    find: '    if (speechOk) return;',
+    replace: `    if (speechOk) return;
+    record(store, 'reading_done', {
+      sessionId,
+      roundIndex: lastRoundIndex,
+      wordId: null,
+      word: shownWord?.word ?? null,
+      scene: shownWord?.scene ?? null,
+      transcript: null,
+    }, clock);`,
+  },
+  {
+    name: 'P14_speechAvailabilityIgnoresInjection', target: APP, expect: 'detected',
+    why: '可用性判定改读全局而不是注入点：测试注入假引擎就再也驱动不了判定那条路，'
+      + '而浏览器里注入点也失去意义（"判定来源只有一个"这条设计就此破掉）',
+    find: '  const speechOk = isSpeechAvailable(speechWin);',
+    replace: '  const speechOk = isSpeechAvailable(globalThis);',
+  },
+  {
+    name: 'P15_composeSubmittedMissing', target: APP, expect: 'detected',
+    why: '提交造句不再落盘（Task 6 曾刻意延后到 Task 9 的那一条）：学习者的句子是本轮'
+      + '"成人愿为造句付多少成本"这批数据的载体，不落盘等于这次练习没有发生过',
+    find: '    recordComposeSubmitted(text);',
+    replace: '    // 变异体：造句不落盘',
+  },
+  {
+    name: 'P16_submitCountOffByOne', target: APP, expect: 'detected',
+    why: '`submitCount` 少算一次（写成"提交次数 - 1"）：零改写会话会记成 0 次提交，'
+      + '整个产出成本的分母从此偏一——progress 必办 1 要消除的正是这个歧义',
+    find: `      submitCount: s.rewriteCount,
+      revisions: s.rewriteCount - 1,`,
+    replace: `      submitCount: s.rewriteCount - 1,
+      revisions: s.rewriteCount - 1,`,
+  },
+  {
+    name: 'P17_dwellIsCumulative', target: APP, expect: 'detected',
+    why: '`dwellMs` 取快照里的累计值而不是"这一轮进入 composing 到提交"：回环之后第二次提交'
+      + '会记成两轮之和（9000 记成 13000），§3.2 要的"这一句花了多久"这个数永远拿不到',
+    find: '      dwellMs: composingEnteredAt === null ? null : clock() - composingEnteredAt,',
+    replace: '      dwellMs: s.dwellMs.composing,',
+  },
+  {
+    name: 'P18_dueHintHidden', target: APP, expect: 'detected',
+    why: 'ready 态不再提示到期的词：复现这件事在界面上没有任何入口，'
+      + '用户（和数据）都不会知道有词欠着一次新场景取词',
+    find: `        const due = dueList();
+        if (due.length > 0) {`,
+    replace: `        const due = [];
+        if (due.length > 0) {`,
+  },
+  {
+    name: 'P19_dueHintDropsOthers', target: APP, expect: 'detected',
+    why: '同时有多个到期词时不再说明还有几个在等：用户以为只有一个，'
+      + '而"到期了却没被复现"的词会一直积压且没人知道',
+    find: "            + (others > 0 ? `另有 ${others} 个词也到期了，先取这一个就行。` : '')));",
+    replace: '            ));',
+  },
+  {
+    name: 'P20_lastSceneOverwrittenByUnknown', target: APP, expect: 'detected',
+    why: '排期写回时把 `lastScene` 无条件改成这次的场景：手选那一档的场景是占位值"手动选择"，'
+      + '于是下次复现提示会说"上次是在「手动选择」场景学的"——一句没有信息量的话',
+    find: '    store.putWord({ ...nextState(target, now), lastScene: isRealScene(scene) ? scene : expectedScene });',
+    replace: '    store.putWord({ ...nextState(target, now), lastScene: scene });',
+  },
+  {
+    name: 'P21_recurrenceNoAdvance', target: APP, expect: 'detected',
+    why: '复现记了事件却不推进排期：这个词的 stage/dueAt 一动不动，'
+      + '于是它永远停在同一个档位上被反复派发（1/3/7 天的阶梯根本没往上走）',
+    find: '    store.putWord({ ...nextState(target, now), lastScene: isRealScene(scene) ? scene : expectedScene });',
+    replace: '    // 变异体：不推进排期',
+  },
+  {
+    name: 'P22_composeSubmittedLosesSentence', target: APP, expect: 'detected',
+    why: '落盘时丢掉原句（只留一个"提交过"的计数）：产出成本能算，'
+      + '但语料本身没了——验证三要拿这些话做人工标注，丢了就补不回来',
+    find: '      sentence: text,',
+    replace: '      sentence: null,',
+  },
 ];
 
 // ─────────────────────────────────────────────────────────── 工具
@@ -1104,13 +1368,20 @@ function failingTests(logPath) {
  * Task 6 起这道门多剥一层 `import`：`web/units/camera.mjs` 有
  * `import { computeStats } from './frame-qc.mjs';`，而 `import` 声明只在 ES 模块里合法，
  * `new Function` 见它就报语法错（原注释里写的"本仓库模块只有 export"已不再成立）。
- * **局限（如实记，别当成没这回事）**：剥掉 import 行之后再查语法，等于不再检查 import 行本身。
- * 现有变异体的 `find` 全在函数体/常量里，没有一条动 import 行，所以这道门对当前变异集的能力不变；
- * 将来若出现改 import 行的变异体，这里会漏，届时应把它换成真编译检查（例如 `node --check`）。
+ *
+ * Task 9 起还要**先整条剥掉"再导出"**（`export { … } from '…';`）：只去掉行首那个 `export `
+ * 的话，剩下的 `{ … } from '…';` 不是合法语句——而 `web/app.mjs` 顶上正好有这么一条，
+ * 于是 P 系列（本任务的全部接线变异体）第一次跑全是 PATCH-FAILED。
+ * **局限（如实记，别当成没这回事）**：剥掉 import/export 行之后再查语法，等于不再检查那些行本身。
+ * 现有变异体的 `find` 全在函数体/常量里，没有一条动 import/export 行，所以这道门对当前变异集
+ * 的能力不变；将来若出现改 import 行的变异体，这里会漏，届时应换成真编译检查（例如 `node --check`）。
  */
 function syntaxOk(source, rel) {
   try {
-    const stripped = source.replace(/^export /gm, '').replace(/^import .*?;$/gm, '');
+    const stripped = source
+      .replace(/^export\s*\{[^}]*\}\s*from\s*['"][^'"]*['"];\s*$/gm, '')
+      .replace(/^export /gm, '')
+      .replace(/^import .*?;$/gm, '');
     // eslint-disable-next-line no-new-func
     new Function(stripped);
     return null;
@@ -1174,6 +1445,27 @@ const DIFF_VIEWS = {
       verdicts: [...mod.VERDICTS],
       errorTypes: [...mod.ERROR_TYPES],
       results: inputs.map((i) => mod.validateFeedback(i)),
+    });
+  },
+  // Task 9：`speak` 的差分视图。**目前没有等价变异体用它**（K7 在口径变更后从"等价"改判为
+  // "可抓"），留着它是为了让将来任何"等价"主张都能被差分核对证明——探针的纪律是
+  // "等价主张必须由差分核对证明，证明不过就反过来按漏网处理"。
+  // 视图取的是这个模块真正承诺的东西：两个函数的返回值，输入域要覆盖空值、大小写、
+  // 标点、多词目标词、数字/非 ASCII 转写这些恰好踩在规则边界上的形状。
+  [SPEAK]: (mod) => {
+    const words = ['mug', 'MUG', 'mugshot', '', null, undefined, 'notebook computer',
+      'ice-cream', 'mug2', '的', 0, 42];
+    const transcripts = ['I see a Mug.', 'a mug, and a MUG!', 'mugshot', 'two mugs', '',
+      '   ', '  mug  ', 'ice cream', 'I use a notebook computer', 'mug2', 'mug的', '一个 mug',
+      null, undefined, 0, 42, 'MUG'];
+    const wins = [undefined, null, 0, 1, 'x', true, {}, { SpeechRecognition: () => {} },
+      { webkitSpeechRecognition: () => {} }, { SpeechRecognition: {} }, { SpeechRecognition: () => {}, webkitSpeechRecognition: {} }];
+    return JSON.stringify({
+      speech: words.flatMap((w) => transcripts.map((t) => {
+        const r = mod.checkSpeech(w, t);
+        return [r.said, String(r.transcript)];
+      })),
+      avail: wins.map((w) => mod.isSpeechAvailable(w)),
     });
   },
 };

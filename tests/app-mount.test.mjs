@@ -303,7 +303,7 @@ test('完成页：零改写的会话不许说发生过改写（提交 1 次 ≠ 
   await btn(h.root, '拍照').click();
   await btn(h.root, '快门').click();
   await btn(h.root, '我会读了（开始跟读）').click();
-  await btn(h.root, '我读完了').click();
+  await btn(h.root, '我读过了').click();      // 转写不可用那条路的手动打勾（reading → composing）
   byTag(h.root, 'textarea')[0].value = 'This is my mug.';
   await btn(h.root, '提交造句').click();
   await settleFeedback(h);
@@ -332,7 +332,7 @@ test('完成页：被退回一次、没跳过跟读的会话 → 指标各自如
   await btn(h.root, '拍照').click();
   await btn(h.root, '快门').click();           // 第 2 帧通过
   await btn(h.root, '我会读了（开始跟读）').click();
-  await btn(h.root, '我读完了').click();       // 不是跳过跟读
+  await btn(h.root, '我读过了').click();       // 不是跳过跟读（转写不可用 → 手动打勾）
   byTag(h.root, 'textarea')[0].value = 'I put the mug on the desk.';
   await btn(h.root, '提交造句').click();
   await settleFeedback(h);
@@ -347,7 +347,7 @@ test('完成页：被退回一次、没跳过跟读的会话 → 指标各自如
   h.restoreFetch();
 });
 
-test('造句原文交给注入的钩子（Task 8/9 的接线点），不自己落盘', async () => {
+test('造句原文交给注入的钩子，并落一条 compose_submitted（Task 9 起本层自己落盘）', async () => {
   const seen = [];
   // 造句链路注入一个假提交器：本用例测的是**钩子接线**，不是网络。
   // 不注入的话，`mount()` 会去打真的 `/api/feedback`（本用例的全局 fetch 只认识物那条路径，
@@ -372,8 +372,16 @@ test('造句原文交给注入的钩子（Task 8/9 的接线点），不自己�
   assert.equal(seen[0].text, 'I put the mug on the desk.');
   assert.equal(seen[0].rewriteCount, 1);
   assert.equal(seen[0].skippedReading, true);
-  // 事件表里没有 compose_submitted —— 那是 Task 9 的口径，本任务不抢着记一遍（免得重复计数）
-  assert.equal(h.events.filter((e) => e.type === 'compose_submitted').length, 0);
+  // Task 9 起句子**真的落盘**了：`compose_submitted` 是"成人愿为造句付多少成本"这批数据的载体
+  // （progress 必办 2；Task 6 曾刻意延后到本任务，免得与 Task 8 的反馈事件重复计数）。
+  // 注意它带的是 `submitCount`/`revisions` 两个口径清楚的名字，**不带** `rewriteCount`
+  // ——那个名字的含义其实是"提交次数"，落进采集数据就是错的（progress 必办 1）。
+  const submitted = h.events.filter((e) => e.type === 'compose_submitted');
+  assert.equal(submitted.length, 1);
+  assert.equal(submitted[0].payload.sentence, 'I put the mug on the desk.', '原句一字不改地落盘');
+  assert.equal(submitted[0].payload.submitCount, 1, '零改写会话的提交次数是 1');
+  assert.equal(submitted[0].payload.revisions, 0);
+  assert.equal('rewriteCount' in submitted[0].payload, false, '错名字的字段不许进采集数据');
   // 回改时带出上一版原文：改写回环的意义就是"改"，不该让人重打一遍
   await settleFeedback(h);
   await btn(h.root, '再写一次').click();
@@ -382,6 +390,51 @@ test('造句原文交给注入的钩子（Task 8/9 的接线点），不自己�
   assert.equal(seen.length, 2);
   assert.equal(seen[1].rewriteCount, 2, '第二轮提交时轮次应为 2');
   await settleFeedback(h);
+  const submitted2 = h.events.filter((e) => e.type === 'compose_submitted');
+  assert.equal(submitted2.length, 2, '回环第二次提交也要落盘（每次提交各一条）');
+  assert.equal(submitted2[1].payload.submitCount, 2);
+  assert.equal(submitted2[1].payload.revisions, 1);
+  h.restoreFetch();
+});
+
+test("「提交造句」按钮只在 composing 态存在：那句 `send('submit')` 的死防御因此不可达", async () => {
+  // progress 必办 3 要求"未验证的分支不许静默留在判定路径上"。处置选的是**保留**那句
+  // `if (!machine.send('submit')) return;`（fail-closed：万一它真被触发了，那次点击什么都不做，
+  // 而不是把一次状态机不知道的提交算进数据），代价是必须给出"它为什么不可能为 false"的证据。
+  // 证据就是这条用例：把七态逐个走一遍，`提交造句` 按钮**当且仅当** state === 'composing' 时存在，
+  // 而 `machine.can('submit')` 与它逐态一致——`onSubmit` 只可能由这个按钮触发、且只在那一格。
+  const compose = { submitSentence: async () => ({ status: 'ok', feedback: {}, sentence: '' }) };
+  const h = await withFetch({ fetchImpl: okFetch, recognize: realRecognizeWithFallback, compose });
+  const seen = [];
+  const record = (label) => {
+    const able = h.machine.can('submit');
+    const hasButton = btn(h.root, '提交造句') !== undefined;
+    seen.push({ label, state: h.machine.state, able, hasButton });
+    assert.equal(hasButton, h.machine.state === 'composing',
+      `${label}：提交按钮的存在必须与状态一致（实测 state=${h.machine.state} hasButton=${hasButton}）`);
+    assert.equal(able, h.machine.state === 'composing', `${label}：can('submit') 同样只在 composing 为真`);
+  };
+
+  record('ready');
+  await btn(h.root, '拍照').click();                 // ready → capturing
+  record('capturing');
+  await btn(h.root, '快门').click();                 // capturing → word
+  record('word');
+  await btn(h.root, '我会读了（开始跟读）').click();  // word → reading
+  record('reading');
+  await btn(h.root, '跳过跟读').click();             // reading → composing
+  record('composing');
+  byTag(h.root, 'textarea')[0].value = 'This is a mug.';
+  await btn(h.root, '提交造句').click();             // composing → feedback
+  await settleFeedback(h);
+  record('feedback');
+  await btn(h.root, '下一个词').click();             // feedback → done
+  record('done');
+
+  assert.deepEqual(seen.map((s) => s.state),
+    ['ready', 'capturing', 'word', 'reading', 'composing', 'feedback', 'done'],
+    '七个状态都要走到（少一个这条证据就不完整）');
+  assert.equal(seen.filter((s) => s.hasButton).length, 1, '全程只有 composing 那一格有提交按钮');
   h.restoreFetch();
 });
 

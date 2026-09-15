@@ -11,7 +11,7 @@
 // shared-context 又要求状态机本身"不得 import 任何浏览器 API"。两者的交集就是本文件只做
 // 转出与装配，状态机独立成 `web/units/state-machine.mjs`。
 //
-// ── 本层的判断责任（Task 7 收口后）──────────────────────────────────────────────
+// ── 本层的判断责任（Task 9 收口后）──────────────────────────────────────────────
 //
 // **`recognizeWithFallback` 是"这一帧能不能用"的唯一起源**（控制器追加要求 1）。此前
 // `mount()` 里另有一条 `judgeFrame` 前置闸，Task 7 接上识物后它成了第二套判定：
@@ -25,8 +25,23 @@
 //     几次模型请求无关），并写进 `frame_rejected`/`recognize_ok`/`recognize_failed` 三类事件。
 //     判据 B（`retry_rate`）只能从事件流里算，而原先的 `attempts` 分不清"一帧两次请求"与
 //     "用户按了两次"——口径与公式见 `units/rounds.mjs` 的文件头（Task 7 修复轮 Critical 1）。
+//
+// Task 9 又给本层加了四件**记录责任**（都是"能测量"层面的事：再好的算法，测量它的数据没被
+// 记下来，整条验证链就是空的）：
+//   · **跟读判定**（§4.3）：转写可用 → `checkSpeech` 判"有没有说出目标词"；不可用 → 如实落
+//     `speech_unsupported` 并给手动打勾，**绝不把降级伪装成"读对了"**（不落 `reading_done`）。
+//   · **学完即入队**（§4.5）：`feedback` 态**拿到结论**那一刻就把词写进复现队列（不是 done 态
+//     ——用户可能不点「下一个词」就关页面），落盘**幂等**（回环不许把排期推回原点）。
+//     此前 `nextState`/`dueWords`/`putWord`/`readWords` 在 `web/` 下**没有任何调用点**。
+//   · **到期复现**（§3.4）：`ready` 态提示到期的词；取到时按**两种模式分列**落
+//     `recurrence_scene`（识物命中）/ `recurrence_manual`（用户手选）并推进排期。
+//   · **造句落盘**（§3.4）：提交成功那一刻落 `compose_submitted`，带
+//     `submitCount`/`revisions`/`dwellMs`——`rewriteCount` 这个既有的名字含义是**提交次数**，
+//     带着它落盘就是把一个错的字段名交到下游（progress 必办 1）。
 import { createMachine, STATES } from './units/state-machine.mjs';
 import { createRoundCounter } from './units/rounds.mjs';
+import { nextState, dueWords } from './units/scheduler.mjs';
+import { checkSpeech, isSpeechAvailable } from './units/speak.mjs';
 import { submitSentence as realSubmitSentence, feedbackEventFor } from './units/compose.mjs';
 
 export { createMachine, TRANSITIONS, STATES, REJECT_REASONS } from './units/state-machine.mjs';
@@ -53,6 +68,31 @@ const PENDING_HINT = {
   response_invalid: '反馈服务这次返回的内容不能用',
   empty_sentence: '这句话是空的',
 };
+
+/**
+ * 单次转写的墙钟上限（毫秒）——**首轮设定值**，浏览器路径上可用 `speechTimeoutMs` 覆盖，
+ * 第一周真机标定后若调整，须记入变更记录（与 `DARK_THRESHOLD` / `RECOGNIZE_REQUEST_TIMEOUT_MS`
+ * 同一条纪律）。
+ *
+ * 为什么必须有它：`onend` 按规范是转写的收口点，但本项目已经三次被"挂住而不是失败"咬过
+ * （`fetch` 无超时、上游半开、响应体停滞）。引擎若因为任何原因不回调，界面会永远停在
+ * "正在听…"、按钮一直是禁用的——那时用户只剩「跳过跟读」一条路，而且没有任何数据能说明
+ * 发生了什么。到点就主动收口（`abort()` 放掉麦克风）并按"没能听清"如实呈现。
+ */
+export const SPEECH_LISTEN_TIMEOUT_MS = 15_000;
+
+/** 跟读屏上"开始说"的按钮文案（测试认它，改文案时那边要跟着改）。 */
+const SPEAK_BUTTON_LABEL = '点一下，念出这个词';
+
+/**
+ * 场景未知时的两种占位值：`recognize` 给不出场景时的 `'未知'`，与手选档界面上写的 `'手动选择'`。
+ * 它们**不参与"换了场景"的判定**——系统并不知道用户实际站在哪儿，拿不准就不许声称他换了地方。
+ * 也不写进词记录的 `lastScene`（否则下次提示会说一句"上次是在「手动选择」场景学的"）。
+ */
+const UNKNOWN_SCENES = Object.freeze(['未知', '手动选择']);
+
+/** "换个地方拍"的例子（与 `DEC-…19` 的生活化场景词包同源，**不参与任何逻辑判定**）。 */
+const RECURRENCE_SCENE_EXAMPLES = '居家 / 通勤 / 职场 / 餐饮';
 
 /** 会话号：安全上下文里有 randomUUID，没有就退到一个够用的随机串（不参与任何安全判断）。 */
 function newSessionId() {
@@ -104,11 +144,17 @@ const FALLBACK_SCENE_WORDS = Object.freeze(['mug', 'cup', 'book', 'pen', 'bottle
  * @param {object} [deps] 注入点（测试与 Task 8/9 用；全部有默认值，浏览器里不传即可）
  *   - `doc` DOM 工厂，默认 `globalThis.document`
  *   - `urlApi` 默认 `globalThis.URL`（冻结画面用 `createObjectURL`）
- *   - `camera` / `store` / `recordEvent` / `recognizeWithFallback` 覆盖懒加载的浏览器依赖
+ *   - `camera` / `store` / `recordEvent` / `recognizeWithFallback` 覆盖懒加载的浏览器依赖。
+ *     ⚠️ `store` 必须提供 `readWords()` 与 `putWord()`（Task 9 起本层要读写复现队列；
+ *     真的 `units/store.mjs` 两个都有）。缺了会**响亮**报错，不会静默跳过入队。
  *   - `sessionId`、`clock`（时间戳函数）、`cameraOptions`、`onCompose`（造句原文的接线点）
  *   - `compose`：造句链路的注入点，形状 `{ submitSentence }`（缺省用 `units/compose.mjs` 的真实现）。
  *     注入它是为了让"界面与事件对不对"能脱离网络单独测（网络路径由 tests/compose.test.mjs 覆盖），
  *     与 `recognizeWithFallback` 的注入点是同一个理由。
+ *   - `speechWin`：转写可用性（`isSpeechAvailable`）与引擎构造的来源，缺省 `globalThis`。
+ *     测试注入 `{ SpeechRecognition: 假构造器 }` 即可驱动跟读判定那条路；
+ *     **不注入**时 Node/不支持的浏览器会走降级路径（落 `speech_unsupported`）。
+ *   - `speechTimeoutMs`：单次转写的墙钟上限，缺省 `SPEECH_LISTEN_TIMEOUT_MS`
  * @returns {Promise<{ machine: object, sessionId: string, store: object, grab: () => Promise<{blob: object, stats: object}> }>}
  *   `grab` 就是传给 `recognizeWithFallback({ grab })` 的取帧函数
  * @throws {TypeError} `root` 不是元素
@@ -132,6 +178,8 @@ export async function mount(root, deps = {}) {
     clock = Date.now,
     cameraOptions = {},
     onCompose = null,
+    speechWin = globalThis,
+    speechTimeoutMs = SPEECH_LISTEN_TIMEOUT_MS,
   } = deps;
 
   // 懒加载浏览器专属依赖：注入了什么就不 import 什么（Node 测试里全都注入，于是不碰这些模块）。
@@ -175,6 +223,19 @@ export async function mount(root, deps = {}) {
   let feedback = null;
   let opening = false;         // 正在开相机（挡住双击：否则会开出两路流，多出来的那路没人关）
   let lastShotBlob = null;     // 最近一次 `grab()` 拿到的帧（识别链走后，freeze 用的是它）
+  // 跟读这一格的现场：`null` = 还没说过；`{ busy: true }` = 正在听；
+  // `{ busy: false, said: false, transcript }` = 这次没听到（可以重试）；`{ busy: false, error }` = 引擎报错。
+  // **它只在同一格里活着**（重试是同一格里的选择，不新增状态机状态），离开 reading 就作废。
+  let speechAttempt = null;
+  // 跟读能不能做（转写可用性）。**判定来源是注入的那个对象**（`speechWin`，浏览器里默认
+  // `globalThis`），本层与 `units/speak.mjs` 都不自己去读浏览器全局——那样就没法在 Node 里测。
+  const speechOk = isSpeechAvailable(speechWin);
+  // 刚发生的这次取词是不是一次"到期复现"（是则记下现场，用于在词卡上如实说明）。
+  // `null` = 这一次不是复现（或还没取到词）。
+  let recurrenceNote = null;
+  // 进入 composing 的时刻：`compose_submitted` 的 `dwellMs` 要的是"进入这一格到提交"这一段，
+  // 而快照里的 `dwellMs.composing` 是**整个会话累计**（回环几轮就累几轮，第二次提交会读到两轮之和）。
+  let composingEnteredAt = null;
   // 最近一次取词的结果（`recognizeWithFallback` 的返回）。**界面上的词只能来自这里或用户手选**：
   // 它同时决定 word 态显示"识别结果"还是"没认出来 + 手选词"。
   let lastPick = null;
@@ -222,7 +283,9 @@ export async function mount(root, deps = {}) {
     const why = lastPick?.reason === 'request_failed' || lastPick?.reason === 'response_invalid'
       ? '识物服务这次没能返回结果'
       : '识物没能从这张照片里认出一个可用的词';
-    return `${why}（${lastPick?.attempts ?? 0} 次尝试）。下面这些词请你**自己挑一个**——`
+    // 文案里**不写 markdown 的强调符**：`hint()` 走 `textContent`，`**` 会一字不差地显示给
+    // 学习者（progress 必办 0）——这一屏正是真机清单第 19 项要看的那一屏。
+    return `${why}（${lastPick?.attempts ?? 0} 次尝试）。下面这些词请你自己挑一个——`
       + '挑出来的词会记成"手选"，不会算作识别成功。也可以重拍一张再试。';
   }
 
@@ -238,10 +301,213 @@ export async function mount(root, deps = {}) {
   /** 落最近一次取词那一轮的轮次号：反馈事件挂在它上面（一次快门 = 一轮，反馈不是新的快门）。 */
   let lastRoundIndex = null;
 
+  // ── Task 9：复现队列（入队 / 到期 / 复现）与跟读判定 ──────────────────────────
+
+  /** 词记录的 id：**词本身的小写形式**（裁决）：同一个词多次学是同一条记录，复现才能推进它的 stage。 */
+  const wordIdOf = (word) => String(word).toLowerCase();
+
+  /** 当前到期的词（按到期时间排序；"有没有到期"只有这一个起源，界面上不另算一套）。 */
+  const dueList = () => dueWords(store.readWords(), clock());
+
+  /** 场景是不是一个**可比较**的真实场景（未知/手选占位值不算，见 `UNKNOWN_SCENES`）。 */
+  const isRealScene = (scene) => typeof scene === 'string' && scene !== '' && !UNKNOWN_SCENES.includes(scene);
+
+  /**
+   * 这次取到的场景能否算作"换了个地方"。
+   * 只要有一边是未知的（识别没给场景、或用户手选那一档）就返回 `false`——
+   * 系统并不知道用户实际站在哪儿，拿不准就不许声称他换了场景（brief §3.3.3）。
+   */
+  const sceneChangedOf = (scene, expectedScene) => (
+    isRealScene(scene) && isRealScene(expectedScene) && scene !== expectedScene
+  );
+
+  /**
+   * 学完即入队（设计文档 §4.5）：把词写进复现队列并定出首个 `dueAt`。返回是否真的新增了记录。
+   *
+   * 三条硬约束（brief §3.3.1），每一条都有用例钉住：
+   *   1. **幂等**：已存在该 id 就什么都不做（保持既有 `stage`/`dueAt`）。回环
+   *      `feedback → rewrite → composing → feedback` 每次都会走到这里；不幂等的话每次回写都把
+   *      排期推回原点，`dueAt` **永远到不了期——复现永远不会发生**，而单次提交的用例照样全绿。
+   *   2. `dueAt` 只由 `nextState` 产出：`scheduler.mjs` 的模块头写明"写词记录的一方必须这么做"
+   *      ——手写或缺失会让这条记录掉进"既不算已维护、又永远不到期"的无声夹缝（`dueWords` 静默略过它）。
+   *   3. **不手写 `createdAt`**：`store.putWord` 会保留既有值；在这里重新盖时间戳会让
+   *      `pruneImages` 把老词的图误判成最新，淘汰掉真正该留的那张。
+   */
+  function enqueueWord(word, scene, now) {
+    const id = wordIdOf(word);
+    if (store.readWords()[id] !== undefined) return false;
+    store.putWord(nextState({ id, word, stage: 0, lastScene: scene }, now));
+    return true;
+  }
+
+  /**
+   * 学完即入队 + 存储写失败时的**响亮**处理。
+   *
+   * 时机是 `feedback` 态**拿到结论**那一刻，不是 `done` 态：用户可能不点「下一个词」就关掉页面，
+   * 而那一刻这个词已经学完了。挂在 done 上等于"必须走到最后一步才作数"，样本会系统性偏向
+   * 愿意走完的人。
+   *
+   * ⚠️ 存储写失败（配额满等）在这里只做到"给界面一句话 + 原样重抛"。项目至今**没有任何代码
+   * 发出 `storage_full` 标签**（Task 1 报告留档的缺口），本任务不擅自沿用别的档位去冒充它，
+   * 详见 task-9-report 的待裁决项。
+   */
+  function registerLearnedWord() {
+    const word = shownWord?.word ?? null;
+    // 没有词就没有可入队的东西。正常流程到不了这里（composing 的前置是 word），
+    // 所以这里不落任何"失败标签"——它不是一个用户情形。
+    if (word === null) return;
+    try {
+      enqueueWord(word, shownWord.scene ?? null, clock());
+    } catch (err) {
+      setError(`这个词没能记进复现队列（存储写入失败，属于程序/存储问题）：${err?.message ?? err}`);
+      throw err;
+    }
+  }
+
+  /**
+   * 这次取到的词正好是**当前到期**的词 → 落一条复现事件并推进它的排期。
+   *
+   * 三条口径（brief §3.3.3）：
+   *   · **两种取词模式分列**（`recurrence_scene` 识物命中 / `recurrence_manual` 用户手选），
+   *     绝不合并成一个总数——手选占比高说明"跨场景"主张没被兑现，那是必须看见的信号（§3.4）。
+   *   · payload 带实际 `scene`、上次的 `expectedScene` 与 `sceneChanged`；**即便为 false，
+   *     复现照记**（重新取词确实发生了），但界面与数据都不声称"换了场景"。
+   *   · 到期词**没被取到**（拍了别的、或手选了别的）→ 什么都不落、排期不动：没复现就是没复现。
+   *
+   * 命中的判定是"取到的词 ∈ 当前到期集合"。提示只展示最先到期的那一个（用户看不到词名，
+   * 只被要求换个地方重拍），但若他恰好取到了另一个**同样到期**的词，那也是一次真实的复现
+   * ——把它丢掉等于用户白跑一趟，而且排期不动会让他下次再被催一遍同一个词。
+   *
+   * @param {'recognized'|'manual'} source 取词模式（决定落哪个事件类型）
+   * @returns {boolean} 这次是不是一次复现
+   */
+  function noteRecurrence(source) {
+    const word = shownWord?.word ?? null;
+    if (word === null) return false;
+    const id = wordIdOf(word);
+    const now = clock();
+    const target = dueList().find((w) => w.id === id);
+    if (target === undefined) return false;   // 没到期 / 取到的不是到期词
+    const scene = shownWord.scene ?? null;
+    const expectedScene = target.lastScene ?? null;
+    const sceneChanged = sceneChangedOf(scene, expectedScene);
+    record(store, source === 'manual' ? 'recurrence_manual' : 'recurrence_scene', {
+      sessionId,
+      roundIndex: lastRoundIndex,
+      wordId: id,
+      word,
+      scene,
+      expectedScene,
+      sceneChanged,
+      source,
+    }, clock);
+    // 写回**同一个 id**，并复用 nextState 定档（stage 是"已完成档数"，返回值才是刚排上那一档）。
+    // lastScene 只在这次场景是**真实场景**时更新：未知时保留上一次的真实场景，
+    // 否则下次提示会说"上次是在「手动选择」场景学的"——一句没有信息量的话。
+    store.putWord({ ...nextState(target, now), lastScene: isRealScene(scene) ? scene : expectedScene });
+    recurrenceNote = { word, scene, expectedScene, sceneChanged, source };
+    return true;
+  }
+
+  /**
+   * 听一次转写。**这是转写这条腿唯一的收口点**：`onend`（正常读完、出错、被 stop）、
+   * `onerror`（引擎报错）与上限到点三条路都从这里出去，绝不留下一个永远 pending 的 Promise。
+   * 上限到点会先 `abort()` 放掉麦克风再收口（挂住而不是失败，是本项目反复吃过的一种收口）。
+   */
+  function listenOnce() {
+    const Ctor = speechWin?.SpeechRecognition ?? speechWin?.webkitSpeechRecognition;
+    return new Promise((resolve, reject) => {
+      const rec = new Ctor();
+      rec.lang = 'en-US';
+      rec.maxAlternatives = 1;
+      rec.interimResults = false;
+      let transcript = '';
+      let settled = false;
+      let timer = null;
+      const finish = (fn, value) => {
+        if (settled) return;
+        settled = true;
+        if (timer !== null) clearTimeout(timer);
+        fn(value);
+      };
+      timer = setTimeout(() => {
+        try { rec.abort(); } catch { /* 引擎已经自己结束了：放不掉也无妨，收口不能因此被跳过 */ }
+        finish(reject, new Error(`语音识别超时（${speechTimeoutMs}ms 内没有结果，已收口）`));
+      }, speechTimeoutMs);
+      rec.onresult = (ev) => {
+        const said = ev?.results?.[0]?.[0]?.transcript;
+        if (typeof said === 'string') transcript = said;
+      };
+      rec.onerror = (ev) => finish(reject, new Error(`语音识别失败：${String(ev?.error ?? 'unknown')}`));
+      rec.onend = () => finish(resolve, transcript);
+      rec.start();
+    });
+  }
+
+  /**
+   * 跟读：说一遍 → `checkSpeech` 判"有没有说出目标词"。
+   *
+   * `said === true` → 落 `reading_done` 并推进；否则**留在 reading 态**（重试是同一格里的选择，
+   * 不新增状态机状态），界面如实说"这次没听到 X"。引擎报错与超时同样如实说，绝不改判成"读对了"。
+   */
+  async function onSpeak() {
+    setError('');
+    speechAttempt = { busy: true, said: null, error: null, transcript: null };
+    render(machine.state);
+    let transcript;
+    try {
+      transcript = await listenOnce();
+    } catch (err) {
+      speechAttempt = { busy: false, said: null, error: String(err?.message ?? err), transcript: null };
+      render(machine.state);
+      return;
+    }
+    const verdict = checkSpeech(shownWord?.word ?? '', transcript);
+    if (verdict.said) {
+      speechAttempt = null;
+      record(store, 'reading_done', {
+        sessionId,
+        roundIndex: lastRoundIndex,
+        wordId: null,
+        word: shownWord?.word ?? null,
+        scene: shownWord?.scene ?? null,
+        transcript: verdict.transcript,
+      }, clock);
+      machine.send('readDone');
+      return;
+    }
+    speechAttempt = { busy: false, said: false, error: null, transcript: verdict.transcript };
+    render(machine.state);
+  }
+
+  /**
+   * 「我会读了（开始跟读）」：进跟读那一格，并在**转写不可用**时如实落一条 `speech_unsupported`。
+   *
+   * 记在"进入这一格"这个时机（`onEnter` 只对每个状态各调一次），不是记在渲染里——
+   * 渲染会被调用很多次，挂在那里会让一条会话刷出好几条降级标签，"多少人的浏览器不支持"
+   * 这个数直接失真。降级路径**不落 `reading_done`**：手动打勾只表示"我读了"，
+   * 不是"系统听到我说出了目标词"，混记会让跟读判定的通过率变成假的。
+   */
+  function onWordReady() {
+    if (!machine.send('wordReady')) return;   // 按钮只长在 word 那一屏；返回 false 时什么都不做
+    if (speechOk) return;
+    record(store, 'speech_unsupported', {
+      sessionId,
+      roundIndex: lastRoundIndex,
+      wordId: null,
+      word: shownWord?.word ?? null,
+      scene: shownWord?.scene ?? null,
+      reason: 'no_speech_recognition',
+    }, clock);
+  }
+
   function onManualPick(word) {
     // 手选：来源标成 manual，界面据此明说"这是你自己挑的"。
     shownWord = { word, scene: lastPick?.scene ?? '手动选择', source: 'manual' };
     awaitingManualPick = false;
+    // 复现的第二种模式（§3.3.3）：用户自己挑中了到期词 → `recurrence_manual`。
+    // 与识物命中**分列**统计（"手选占比高"是必须看见的信号）。
+    noteRecurrence('manual');
     // 取到词了 = 这一格走完（capturing → word）。**重绘由本行负责**：手选界面与"取到的词"
     // 分别是 capturing / word 两格，`send` 触发的那次渲染发生在 `shownWord` 赋值之后，
     // 但 `send` 返回 false（状态没变）时不会触发渲染——所以这里显式再渲染一次，两种情形都对。
@@ -279,6 +545,18 @@ export async function mount(root, deps = {}) {
         view.push(hint('对准物体按「拍照」；画面太暗或太糊会当场退回重拍，不消耗识物调用。'));
         const reason = machine?.snapshot().lastRejectReason ?? null;
         if (reason !== null) view.push(hint(REJECT_HINT[reason] ?? '刚才那张没能用，重拍一张。'));
+        // 到期复现（§3.3.2 / §3.4）：有到期词就催一次，并说明"换个地方"——复现走的是**同一条**
+        // 识物链路（不新增"复现专用"通路），所以这里只多一句提示。
+        // 一次只提示最先到期的那一个（`dueWords` 已按到期时间排序），其余只报个数。
+        const due = dueList();
+        if (due.length > 0) {
+          const others = due.length - 1;
+          // 「居家 / 通勤 / 职场 / 餐饮」只是**例子**：系统不知道用户实际站在哪儿，
+          // 所以这句话是建议，不是判定——它不参与任何逻辑。
+          view.push(hint(`该复习了：这个词上次是在「${due[0].lastScene ?? '未知'}」场景学的。`
+            + `请换一个地方重新拍一张（例如 ${RECURRENCE_SCENE_EXAMPLES}）。`
+            + (others > 0 ? `另有 ${others} 个词也到期了，先取这一个就行。` : '')));
+        }
         action('拍照', onCapture);
         break;
       }
@@ -329,15 +607,41 @@ export async function mount(root, deps = {}) {
         } else {
           view.push(hint(recognizedHint()));
         }
-        action('我会读了（开始跟读）', () => machine.send('wordReady'));
+        // 这次取词是一次到期复现 → 如实说明（**换没换场景都要说清**，不许含糊、更不许谎报）。
+        if (recurrenceNote !== null) {
+          view.push(hint(recurrenceNote.sceneChanged
+            ? `这个词到期了，这次是在「${recurrenceNote.scene}」重新取到的（上次在「${recurrenceNote.expectedScene}」）。`
+            : '这个词到期了，这次又取到了一次；场景没能确认与上次不同，所以只记"又一次取到"。'));
+        }
+        action('我会读了（开始跟读）', onWordReady);
         break;
       }
       case 'reading': {
         view.push(title('跟读一遍'));
-        // 措辞按实情写：**造句反馈**已经在 Task 8 接上了（提交后会真的出反馈），
-        // 还没接的是转写与"有没有念出目标词"的判定（Task 9 的 SpeakingCheck）。
-        view.push(hint('转写与发音判定在 Task 9 接入；现在可以手动标记读完，或跳过（会记 skipped_reading）。'));
-        action('我读完了', () => machine.send('readDone'));
+        if (speechOk) {
+          // 转写可用：判定那条路（设计文档 §4.3）。
+          view.push(hint(`念出这个词：${shownWord?.word ?? ''}。点下面的按钮开始，说完会自动停；`
+            + '只判有没有说出这个词，不打音准分。'));
+          if (speechAttempt?.said === false) {
+            view.push(hint(`这次没听到 ${shownWord?.word ?? '这个词'}。再说一遍，或者跳过跟读。`));
+          }
+          if (speechAttempt?.error != null) {
+            // 引擎报错与上限到点都走这里：如实说"这次没能听清"，并把引擎给的话摊出来（诊断要用）。
+            view.push(hint(`这次没能听清（${speechAttempt.error}）。可以再试一次，或者跳过跟读。`));
+          }
+          action(
+            speechAttempt?.busy === true ? '正在听…' : SPEAK_BUTTON_LABEL,
+            onSpeak,
+            speechAttempt?.busy === true,
+          );
+          action('跳过跟读', () => machine.send('skipReading'));
+          break;
+        }
+        // 转写不可用：**降级路径不许伪装成"读对了"**——只给手动打勾与跳过，
+        // 并明说系统判断不了（真机走查要能一眼看到这句与那个标签）。
+        view.push(hint(`这个浏览器不支持语音识别（会记 speech_unsupported），没法自动判断你有没有念出 `
+          + `${shownWord?.word ?? '这个词'}。请自己出声念一遍，然后手动打勾；也可以跳过跟读。`));
+        action('我读过了', () => machine.send('readDone'));
         action('跳过跟读', () => machine.send('skipReading'));
         break;
       }
@@ -348,7 +652,10 @@ export async function mount(root, deps = {}) {
         composeEl.placeholder = '例如：I put the mug on the desk.';
         composeEl.value = lastComposeText;
         view.push(composeEl);
-        view.push(hint('这一段停留时长与改写次数会进记录（用于事后筛出敷衍样本）；首版不做内容校验。'));
+        // 口径按实情写：落盘的是**提交次数**（`rewriteCount` 那个字段名在下游是错的，
+        // 见 progress 必办 1）；改了几版从提交次数看得出来（改写次数 = 提交次数 - 1）。
+        view.push(hint('这一段停留时长与提交次数会进记录（改了几版从提交次数看得出来），'
+          + '用于事后筛出敷衍样本；首版不做内容校验。'));
         action('提交造句', onSubmit);
         break;
       }
@@ -442,7 +749,16 @@ export async function mount(root, deps = {}) {
   }
 
   // ── 动作 ────────────────────────────────────────────────────────────────────
-  machine = createMachine({ onEnter: render, now: clock });
+  //
+  // `onEnter` 是**唯一"每个状态恰好一次"**的时机，所以"进入 composing 的时刻"记在这里：
+  // `compose_submitted` 的 `dwellMs` 要的是"进入这一格到提交"这一段，而快照里的
+  // `dwellMs.composing` 是整个会话累计（回环两轮时读到的是两轮之和）。
+  function onEnterState(state) {
+    if (state === 'composing') composingEnteredAt = clock();
+    render(state);
+  }
+
+  machine = createMachine({ onEnter: onEnterState, now: clock });
 
   async function onCapture() {
     setError('');
@@ -457,6 +773,8 @@ export async function mount(root, deps = {}) {
     // 当前状态机下永远不可达，没有任何用例能钉住它，属于注释之外又添一处不可验证的声明。
     lastPick = null;
     shownWord = null;
+    // 上一次取词若是一次复现，它的说明不该留到这一轮（`recurrenceNote` 属于"某一次取词"）。
+    recurrenceNote = null;
     // 双击/连点：第二次点击时状态还是 ready（第一次的 await 还没回来），按钮仍在页面上。
     // 不挡就会开出两路 camera stream，其中一路永远不会被 stop（灯亮着、耗电）。
     if (opening) return;
@@ -505,6 +823,7 @@ export async function mount(root, deps = {}) {
     lastPick = null;
     shownWord = null;
     awaitingManualPick = false;
+    recurrenceNote = null;
 
     let picked;
     try {
@@ -574,6 +893,8 @@ export async function mount(root, deps = {}) {
         candidates: (picked.candidates ?? []).map((c) => c.label),
       }, clock);
       shownWord = { word: picked.word, scene: sceneOf(picked.word, picked.candidates ?? []), source: 'recognized' };
+      // 复现的第一种模式（§3.3.3）：识物取到的正是到期词 → `recurrence_scene` 并推进排期。
+      noteRecurrence('recognized');
     } else {
       // 手选档：**不设 shownWord**，渲染的是手选词包，界面上一个英文词都不出现。
       // 模型这一轮到底答了什么，从下面 payload 的 `candidates` 读（如实带出，不另记一条 recognize_ok）。
@@ -613,11 +934,52 @@ export async function mount(root, deps = {}) {
       return;
     }
     setError('');
+    // ⚠️ 这一句是**当前不可达**的死防御（progress 必办 3），保留而**不是**删掉，理由是
+    // fail-closed：按钮只长在 `composing` 那一屏，而 `send` 是同步的（这中间没有 await），
+    // 所以点下去的那一刻状态必然是 composing。万一将来按钮被摆到别处（例如给反馈屏加一个
+    // "再交一次"），这一句会让那次点击**什么都不做**；删掉它的话，同样的情形会走到下面的
+    // `lastComposeText`/`submitForFeedback`，把一次状态机不知道的提交算进数据里，
+    // 而且界面会停在造句屏、结论回来时发现状态不是 feedback 而不重绘（用户看到"点了没反应"）。
+    // 不可达性由 tests/app-mount.test.mjs 的"「提交造句」按钮只在 composing 态存在"钉住。
     if (!machine.send('submit')) return;
     lastComposeText = text;
-    // 落盘（原句、轮次）交给 Task 9 的钩子：事件表里的 compose_submitted 口径归 Task 9，
-    // 本任务不抢着记一遍（记重了会让 compose 相关计数翻倍）。
+    // 落盘（§3.4）：**提交成功那一刻**（已过空句拦截、已推进状态）落 `compose_submitted`。
+    // 它是"成人愿为造句付多少成本"这批数据的载体——Task 6 曾刻意延后到本任务，免得与
+    // Task 8 的反馈事件重复计数。
+    recordComposeSubmitted(text);
     submitForFeedback(text);
+  }
+
+  /**
+   * 落一条 `compose_submitted`（设计文档 §3.4 / progress 必办 1+2）。
+   *
+   * **重复计数防线（写给 Task 10 的统计指引）**：同一句话会同时出现在这条事件与
+   * `feedback_ok`/`uncertain`/`feedback_pending` 的 `payload.sentence` 里。这是**同一句的两次
+   * 不同用途记录**——前者记"产出成本"（一句一份），后者记"判定结果"（一次提交一份判定），
+   * **不是两次产出**。统计造句总数时**只数 `compose_submitted`**，不要与反馈事件相加。
+   *
+   * 字段口径（progress 必办 1：`rewriteCount` 这个名字的含义其实是"提交次数"，带着它落盘就是
+   * 把一个错的字段名交到下游）：
+   *   · `submitCount` = 会话内**提交次数**（零改写会话为 1），取自快照的 `rewriteCount`；
+   *   · `revisions`   = `submitCount - 1`（真的回改了几版）；
+   *   · `dwellMs`     = **进入 composing 到这次提交**的毫秒数（§3.2 筛敷衍样本要用它，
+   *     此前没有任何地方记它）。读不到进入时刻时是 `null`——宁可缺这个数，
+   *     也不要写一个 0 冒充"零停留"（那正好是"敷衍样本"的判定值）。
+   */
+  function recordComposeSubmitted(text) {
+    const s = machine.snapshot();
+    record(store, 'compose_submitted', {
+      sessionId,
+      roundIndex: lastRoundIndex,   // 造句属于取词那一轮（它不是一次新的快门）
+      wordId: null,
+      sentence: text,
+      word: shownWord?.word ?? null,
+      scene: shownWord?.scene ?? null,
+      submitCount: s.rewriteCount,
+      revisions: s.rewriteCount - 1,
+      dwellMs: composingEnteredAt === null ? null : clock() - composingEnteredAt,
+      skippedReading: s.skippedReading,
+    }, clock);
   }
 
   /**
@@ -673,6 +1035,10 @@ export async function mount(root, deps = {}) {
     feedback = { busy: false, result };
     // 用户可能已经点了「再写一次」——那就不再重绘（否则会把他刚回到的输入框换掉）。
     if (machine.state === 'feedback') render(machine.state);
+    // 学完即入队（§4.5）：**拿到结论那一刻**就把这个词放进复现队列。放在最后一行是刻意的
+    // ——存储写失败时（`registerLearnedWord` 会原样重抛）上面那份反馈已经渲染出来了，
+    // 不会因为一次写入失败把刚拿到的反馈弄丢。
+    registerLearnedWord();
   }
 
   return { machine, sessionId, store, grab };

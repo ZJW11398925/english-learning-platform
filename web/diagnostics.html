@@ -27,7 +27,7 @@
 <body>
   <h1>诊断页</h1>
   <p class="muted">
-    这一页把你手机里记录的学习数据翻译成人话。**数据只在你手机上，不会上传**。
+    这一页把你手机里记录的学习数据翻译成人话。数据只在你手机上，不会上传。
     做完走查后，把下面「可复制摘要」整段发我即可，不必再看任何代码或开发者工具。
   </p>
   <div class="row">
@@ -42,14 +42,42 @@
   <p class="muted">一次快门 = 一行。看「次序号」是否 1、2、3… 连续。</p>
   <div id="rounds"></div>
 
-  <h2>造句与反馈</h2>
+  <h2>造句与反馈（判定结果：一次判定一行）</h2>
+  <p class="muted">
+    同一句话在本页会出现两次：一次在这里（记「判定结果」），一次在下面「造句落盘」里（记「产出成本」）。
+    那是同一句的两个用途，<b>不是写了两次</b>——数句子总数时只数「造句落盘」那张表。
+  </p>
   <div id="feedback"></div>
+
+  <h2>造句落盘（产出成本：提交一次一行）</h2>
+  <p class="muted">
+    「提交 1 次」= 一句成型；「改写」= 提交次数 − 1。停留时长是进入造句屏到点提交的那一段。
+    同一句的判定结果在上一张表里。
+  </p>
+  <div id="composed"></div>
+
+  <h2>到期复现（两种取词方式分列）</h2>
+  <p class="muted">
+    「识物命中」= 系统从照片里认出了到期的那个词；「自己手选」= 系统没认出来、你自己从词表里挑的。
+    两者<b>分开看</b>：手选占比高，说明"换个场景还能认出来"这件事没被兑现。
+    换了场景 = 这次和上次的场景确实不同（拿不准时记「否」，不会瞎说换过）。
+  </p>
+  <div id="recurrence"></div>
+
+  <h2>词表（复现排期）</h2>
+  <p class="muted">
+    学完一个词就会自动进这张表，之后按 1 天 → 3 天 → 7 天复现；跑完 7 天档转为「已维护」，不再推送。
+    「下次该复习」到点后，首页就会出现「该复习了」的提示。
+    「改成现在到期」是「走查辅助」按钮：点它再回应用页刷新，就能当天看到复现流程，不用等到第二天。
+  </p>
+  <div id="words"></div>
 
   <h2>可复制摘要（整段发我）</h2>
   <textarea id="dump" readonly></textarea>
 
 <script type="module">
 const EVENTS_KEY = 'elp.events';
+const WORDS_KEY = 'elp.words';
 
 /** 事件类型 → 人话。缺项就原样显示英文，不猜。 */
 const TYPE_LABEL = {
@@ -99,6 +127,18 @@ function readEvents() {
   }
 }
 
+/** 词表（复现排期）：Task 9 起学完即入队，于是这里能看到每个词的档位与下次该复习的时间。 */
+function readWords() {
+  try {
+    const raw = localStorage.getItem(WORDS_KEY);
+    if (raw === null) return {};
+    const parsed = JSON.parse(raw);
+    return parsed !== null && typeof parsed === 'object' ? parsed : {};
+  } catch {
+    return {};
+  }
+}
+
 /** 按会话分组，会话内按 roundIndex 归并成"轮"。 */
 function groupBySession(events) {
   const sessions = new Map();
@@ -143,9 +183,13 @@ function describeConclusion(e) {
 
 function render() {
   const { events, missing, error } = readEvents();
+  const words = readWords();
   const summaryEl = document.getElementById('summary');
   const roundsEl = document.getElementById('rounds');
   const feedEl = document.getElementById('feedback');
+  const composedEl = document.getElementById('composed');
+  const recEl = document.getElementById('recurrence');
+  const wordsEl = document.getElementById('words');
   const dumpEl = document.getElementById('dump');
 
   if (error) {
@@ -156,7 +200,11 @@ function render() {
     summaryEl.innerHTML = `<div class="card warn">还没有任何记录${missing ? '' : ''}。<br>先在应用页里拍一张照、走一轮，再回到这一页点「重新读取」。</div>`;
     roundsEl.innerHTML = '';
     feedEl.innerHTML = '';
-    dumpEl.value = '（无记录）';
+    composedEl.innerHTML = '';
+    recEl.innerHTML = '';
+    wordsEl.innerHTML = wordTable(words);
+    const wl = wordsDump(words);
+    dumpEl.value = wl.length > 0 ? wl.join('\n') : '（无记录）';
     return;
   }
 
@@ -171,6 +219,11 @@ function render() {
     const feedbackOk = list.filter((e) => e.type === 'feedback_ok');
     const feedbackPending = list.filter((e) => e.type === 'feedback_pending');
     const uncertain = list.filter((e) => e.type === 'uncertain');
+    // Task 9 的三类新记录：复现的**两种模式分开数**（合并成一个总数就等于把
+    // "手选占比高 = 跨场景没兑现"这个信号抹掉），以及造句落盘（产出成本）。
+    const recScene = list.filter((e) => e.type === 'recurrence_scene');
+    const recManual = list.filter((e) => e.type === 'recurrence_manual');
+    const composed = list.filter((e) => e.type === 'compose_submitted');
 
     // 判据 B 口径：轮数 = 不同 roundIndex 的个数（三类结论事件取并集）；重拍次数 = 轮数 - 1
     const roundCount = rs.length;
@@ -190,11 +243,15 @@ function render() {
         <div>次序号连续（1…${roundCount}）：${seqOk ? '<span class="ok">是</span>' : `<span class="bad">否，缺 ${esc(gaps.join('、'))}</span>`}</div>
         <div>三类结论事件各几条：退回 ${rejects.length} / 识物成功 ${finishes.filter((e) => e.type === 'recognize_ok').length} / 识物失败 ${finishes.filter((e) => e.type === 'recognize_failed').length}</div>
         <div>拿到反馈 ${feedbackOk.length} 条 / 没拿到 ${feedbackPending.length} 条 / 模型说"拿不准" ${uncertain.length} 条</div>
+        <div>提交造句 <b>${composed.length}</b> 次（产出成本；同一句的判定结果在上面那行里，不是两件事）</div>
+        <div>复现：识物命中 <b>${recScene.length}</b> 条 / 自己手选 <b>${recManual.length}</b> 条（分列，不合并）</div>
       </div>`);
 
     lines.push(`会话 ${String(sid).slice(0, 8)}：轮数=${roundCount} 重拍=${reShoots} 序号连续=${seqOk ? '是' : '否(缺' + gaps.join(',') + ')'}`);
     lines.push(`  退回=${rejects.length} 识物成功=${finishes.filter((e) => e.type === 'recognize_ok').length} 识物失败=${finishes.filter((e) => e.type === 'recognize_failed').length}`);
     lines.push(`  反馈: ok=${feedbackOk.length} pending=${feedbackPending.length} uncertain=${uncertain.length}`);
+    lines.push(`  造句落盘: ${composed.length} 条（产出成本；与反馈事件是同一句的两笔账，不相加）`);
+    lines.push(`  复现: 识物命中=${recScene.length} 手选=${recManual.length}`);
   }
 
   summaryEl.innerHTML = cards.join('');
@@ -241,10 +298,120 @@ function render() {
     ? '<p class="muted">还没有造句记录。去应用页走完一轮并提交一句英文。</p>'
     : `<table><thead><tr><th>结果</th><th>你写的原句</th><th>判定</th><th>问题类型</th><th>说明</th></tr></thead><tbody>${fRows.join('')}</tbody></table>`;
 
+  // 造句落盘（产出成本：提交一次一行）——与上面的判定表是**同一句的两笔账**，不许相加
+  const cRows = [];
+  for (const [, list] of sessions) {
+    for (const e of list) {
+      if (e.type !== 'compose_submitted') continue;
+      const p = e.payload ?? {};
+      const dwell = Number.isFinite(p.dwellMs) ? `${(p.dwellMs / 1000).toFixed(1)} 秒` : '<span class="muted">（没记到）</span>';
+      cRows.push(`<tr>
+        <td>${p.sentence === null || p.sentence === undefined ? '<span class="bad">（没有句子！）</span>' : esc(p.sentence)}</td>
+        <td>${esc(p.word ?? '—')}</td>
+        <td>${esc(p.submitCount ?? '—')}</td>
+        <td>${esc(p.revisions ?? '—')}</td>
+        <td>${dwell}</td>
+        <td>${p.skippedReading === true ? '是' : '否'}</td>
+      </tr>`);
+      lines.push(`  造句提交 原句="${p.sentence ?? '(缺)'}" 提交次数=${p.submitCount ?? '-'} 改写次数=${p.revisions ?? '-'} 停留=${p.dwellMs ?? '-'}ms 跳过跟读=${p.skippedReading === true ? '是' : '否'}`);
+    }
+  }
+  composedEl.innerHTML = cRows.length === 0
+    ? '<p class="muted">还没有造句落盘记录。去应用页走完一轮并提交一句英文。</p>'
+    : `<table><thead><tr><th>你写的原句</th><th>目标词</th><th>提交次数</th><th>改写次数</th><th>造句停留</th><th>跳过跟读</th></tr></thead><tbody>${cRows.join('')}</tbody></table>`;
+
+  // 到期复现：两种取词方式**分列显示**（合并成一个总数就等于把"手选占比高"这个信号抹掉）
+  const rRows = [];
+  for (const [, list] of sessions) {
+    for (const e of list) {
+      if (e.type !== 'recurrence_scene' && e.type !== 'recurrence_manual') continue;
+      const p = e.payload ?? {};
+      const changed = p.sceneChanged === true
+        ? '<span class="ok">是</span>'
+        : '<span class="warn">否（没换场景，仍记了一次复现）</span>';
+      rRows.push(`<tr>
+        <td>${esc(TYPE_LABEL[e.type] ?? e.type)}</td>
+        <td>${e.type === 'recurrence_scene' ? '识物命中' : '自己手选'}</td>
+        <td>${esc(p.word ?? '—')}</td>
+        <td>${esc(p.scene ?? '—')}</td>
+        <td>${esc(p.expectedScene ?? '—')}</td>
+        <td>${changed}</td>
+        <td class="muted">${new Date(e.ts ?? 0).toLocaleTimeString()}</td>
+      </tr>`);
+      lines.push(`  复现[${e.type}] 词=${p.word ?? '-'} 这次场景=${p.scene ?? '-'} 上次场景=${p.expectedScene ?? '-'} 换了场景=${p.sceneChanged === true ? '是' : '否'}`);
+    }
+  }
+  recEl.innerHTML = rRows.length === 0
+    ? '<p class="muted">还没有复现记录。学到期的词要等 1 天以后（走查时可以按清单里的办法把到期时间改到过去）。</p>'
+    : `<table><thead><tr><th>怎么取到的</th><th>取词方式</th><th>词</th><th>这次场景</th><th>上次场景</th><th>换了场景</th><th>时间</th></tr></thead><tbody>${rRows.join('')}</tbody></table>`;
+
+  // 词表（复现排期）：学完即入队，这里能看到档位与下次该复习的时间
+  wordsEl.innerHTML = wordTable(words);
+  for (const line of wordsDump(words)) lines.push(line);
+
   dumpEl.value = lines.join('\n');
 }
 
+/** 「已维护」= 7 天档已跑完，不再主动推送（dueAt 为 null 或 maintained 标志为真）。 */
+const isMaintainedWord = (w) => w?.maintained === true || w?.dueAt === null;
+
+/**
+ * 词表渲染（没有词时给一句人话，而不是空白）。
+ *
+ * 未维护的词带一个「改成现在到期」按钮：**人工走查用的辅助**。计划 Step 6 要求走查时
+ * "把 dueAt 手动改到过去再刷新"，而手机上没有开发者工具——这个按钮就是那一步的落地方式。
+ * 已维护的词不给这个按钮（7 天档跑完就不该再被推送，让它"复活"等于伪造一个不存在的档位）。
+ */
+function wordTable(words) {
+  const list = Object.values(words ?? {});
+  if (list.length === 0) {
+    return '<p class="muted">词表还是空的。走完一轮并提交造句后，那个词就会自动进这里（学完即入队）。</p>';
+  }
+  const rows = list
+    .sort((a, b) => (Number.isFinite(a.dueAt) ? a.dueAt : Infinity) - (Number.isFinite(b.dueAt) ? b.dueAt : Infinity))
+    .map((w) => {
+      const stage = isMaintainedWord(w)
+        ? '<span class="ok">已维护（不再推送）</span>'
+        : `第 ${esc(w.stage ?? '?')} 档`;
+      const due = Number.isFinite(w.dueAt) ? new Date(w.dueAt).toLocaleString() : '—';
+      const aid = isMaintainedWord(w)
+        ? ''
+        : `<button class="due-now" data-word="${esc(w.id ?? w.word ?? '')}">改成现在到期</button>`;
+      return `<tr>
+        <td>${esc(w.word ?? w.id ?? '—')}</td>
+        <td>${esc(w.lastScene ?? '未知')}</td>
+        <td>${stage}</td>
+        <td>${esc(due)}</td>
+        <td>${aid}</td>
+      </tr>`;
+    });
+  return `<table><thead><tr><th>词</th><th>上次学的场景</th><th>档位</th><th>下次该复习</th><th>走查辅助</th></tr></thead><tbody>${rows.join('')}</tbody></table>`;
+}
+
+/** 词表进可复制摘要（判断"回环有没有把排期推回原点"就是看这里的 dueAt 有没有变）。 */
+function wordsDump(words) {
+  const list = Object.values(words ?? {});
+  if (list.length === 0) return [];
+  const out = ['词表（复现排期）：'];
+  for (const w of list) {
+    const due = Number.isFinite(w.dueAt) ? new Date(w.dueAt).toISOString() : '（不再推送）';
+    out.push(`  词=${w.word ?? w.id} 档位=${isMaintainedWord(w) ? '已维护' : (w.stage ?? '?')} 下次该复习=${due} 上次场景=${w.lastScene ?? '未知'}`);
+  }
+  return out;
+}
+
 document.getElementById('refresh').addEventListener('click', render);
+// 走查辅助：把某个词的到期时间改成"现在"，好在当天就看到复现提示（不用等第二天）。
+// 事件委托挂在容器上（行是 innerHTML 铺出来的，逐行绑监听会在每次重绘后重复绑定）。
+document.getElementById('words').addEventListener('click', (ev) => {
+  const id = ev?.target?.dataset?.word;
+  if (typeof id !== 'string' || id === '') return;
+  const all = readWords();
+  if (all[id] === undefined) return;
+  all[id] = { ...all[id], dueAt: Date.now() - 1 };
+  localStorage.setItem(WORDS_KEY, JSON.stringify(all));
+  render();
+});
 document.getElementById('copy').addEventListener('click', async () => {
   const el = document.getElementById('dump');
   el.select();

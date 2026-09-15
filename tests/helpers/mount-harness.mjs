@@ -12,8 +12,9 @@
 // 而不必依赖 `units/recognize.mjs` 的真实网络路径（那条路径由 tests/recognize.test.mjs
 // 与 tests/recognize-mount.test.mjs 用真模块覆盖）。
 import { mount } from '../../web/app.mjs';
+import assert from 'node:assert/strict';
 import { recognizeWithFallback as realRecognizeWithFallback } from '../../web/units/recognize.mjs';
-import { makeEl, btn, text } from './dom.mjs';
+import { makeEl, btn, byTag, text } from './dom.mjs';
 
 export const OK_STATS = { brightness: 128, laplacianVar: 200 };
 
@@ -86,6 +87,45 @@ export const failingFetch = (status = 502) => async (url) => {
 export { realRecognizeWithFallback };
 
 /**
+ * 造一个假的 `SpeechRecognition` 构造器（Task 9 的跟读接线要用）。
+ *
+ * 形状照浏览器给的那一个：`start()` 之后由引擎回调 `onresult`（转写）与 `onend`（收口），
+ * 出错时回调 `onerror`。测试用 `say()` / `fail()` 驱动它——**不在夹具里替应用做判定**，
+ * 夹具只负责"把引擎会发生的事按顺序发生一遍"。
+ *
+ * @returns {{ FakeRecognition: Function, calls: object, instances: object[] }}
+ */
+export function fakeRecognition() {
+  const calls = { constructed: 0, started: 0, stopped: 0, aborted: 0 };
+  const instances = [];
+  class FakeRecognition {
+    constructor() {
+      calls.constructed += 1;
+      instances.push(this);
+    }
+
+    start() { calls.started += 1; }
+
+    stop() { calls.stopped += 1; }
+
+    abort() { calls.aborted += 1; }
+
+    /** 引擎识别完成：先给结果，再收口（顺序与真实引擎一致）。 */
+    say(transcript) {
+      this.onresult?.({ results: [[{ transcript }]] });
+      this.onend?.({});
+    }
+
+    /** 引擎报错（no-speech / not-allowed / network…），随后同样收口。 */
+    fail(error = 'no-speech') {
+      this.onerror?.({ error });
+      this.onend?.({});
+    }
+  }
+  return { FakeRecognition, calls, instances };
+}
+
+/**
  * 挂一份应用。
  *
  * @param {object} [options]
@@ -96,6 +136,11 @@ export { realRecognizeWithFallback };
  *   - `compose`：造句链路的注入点（`{ submitSentence }`，形状同 `units/compose.mjs`）。
  *     缺省不注入 = 走真模块；`tests/compose-mount.test.mjs` 用它把网络那一层换掉，
  *     于是"界面与事件对不对"能单独测。
+ *   - `speechWin`：转写可用性的来源（`mount` 的注入点）。缺省不注入 = `mount` 取 `globalThis`，
+ *     而 Node 里没有 `SpeechRecognition`，于是跟读走**降级路径**（`speech_unsupported`）。
+ *     要测判定那条路就传 `{ SpeechRecognition: fakeRecognition().FakeRecognition }`。
+ *   - `speechTimeoutMs`：单次转写的墙钟上限（默认是生产常量；测试用小值驱动"引擎不回调"那条路）
+ *   - `words`：预置的词记录（模拟"上一次会话学完、现在到期了"）
  *   - `clock` / `onCompose` / `cameraOptions`：透传给 mount()
  * @returns {Promise<object>} `{ root, calls, stream, store, mounted, events, sessionId, machine }`
  */
@@ -109,6 +154,9 @@ export async function harness({
   recognize = null,
   sceneWords = null,
   compose = null,
+  speechWin = null,
+  speechTimeoutMs = undefined,
+  words = null,
 } = {}) {
   const root = makeEl('div');
   const calls = { openCamera: [], grabFrame: [], recognize: [] };
@@ -134,7 +182,24 @@ export async function harness({
       return knob(grabResult);
     },
   };
-  const store = { appended: [], appendEvent(e) { store.appended.push(e); } };
+  /**
+   * 假 store：**只多给清单里真有的那几个方法**（Task 9 起 `mount` 会读词表、写词记录，
+   * 于是夹具也必须像真 `units/store.mjs` 一样有 `readWords` / `putWord`）。
+   *
+   * `putWord` 照抄真实现的归并语义：按 `id` 覆盖、**已存在的记录保留原 `createdAt`**
+   * （那个字段是 `pruneImages` 的淘汰依据，写错会淘汰错图——真实现有专门用例）。
+   * `readWords` 返回新对象（真实现是 JSON 往返，拿到的一定是新副本，不是内部引用）。
+   */
+  const wordMap = { ...(words ?? {}) };
+  const store = {
+    appended: [],
+    words: wordMap,
+    appendEvent(e) { store.appended.push(e); },
+    readWords: () => ({ ...wordMap }),
+    putWord(w) {
+      wordMap[w.id] = { ...w, createdAt: w.createdAt ?? wordMap[w.id]?.createdAt ?? Date.now() };
+    },
+  };
   let urls = 0;
   const urlApi = { createObjectURL: () => `blob:fake-${urls += 1}`, revokeObjectURL: () => {} };
 
@@ -155,11 +220,51 @@ export async function harness({
     recognizeWithFallback,
     ...(compose === null ? {} : { compose }),
     ...(sceneWords === null ? {} : { manualSceneWords: sceneWords }),
+    ...(speechWin === null ? {} : { speechWin }),
+    ...(speechTimeoutMs === undefined ? {} : { speechTimeoutMs }),
   });
   return {
     root, calls, stream, store, mounted, events: store.appended,
     sessionId: mounted.sessionId, machine: mounted.machine,
   };
+}
+
+/**
+ * 走到 `reading` 态（拍照 → 快门 → 我会读了）。
+ *
+ * 与 `openCameraAndShoot` 一样放进夹具：Task 9 的跟读、复现两条链都要从这里起步，
+ * 各写一份的话"怎么走到跟读屏"这件事会在两个文件里各自漂移。
+ */
+export async function reachReading(over = {}) {
+  const h = await harness(over);
+  await openCameraAndShoot(h);
+  await btn(h.root, '我会读了（开始跟读）').click();
+  assert.equal(h.machine.state, 'reading', '夹具必须停在跟读这一格');
+  return h;
+}
+
+/**
+ * 走到 `composing` 态（跟读那一格之后）。
+ *
+ * `skipReading: false` 时改点「我读过了」——那个按钮只在**转写不可用**的降级屏上出现，
+ * 所以它要求不注入 `speechWin`（Node 里没有转写引擎，正是那条降级路径）。
+ */
+export async function reachComposing(over = {}, { skipReading = true } = {}) {
+  const h = await reachReading(over);
+  const label = skipReading ? '跳过跟读' : '我读过了';
+  const button = btn(h.root, label);
+  assert.ok(button, `跟读屏上必须有「${label}」`);
+  await button.click();
+  assert.equal(h.machine.state, 'composing', '夹具必须停在造句这一格');
+  return h;
+}
+
+/** 在 composing 里写下 `sentence` 并提交（返回 click 的 Promise）。 */
+export async function submitCompose(h, sentence) {
+  const box = byTag(h.root, 'TEXTAREA')[0];
+  assert.ok(box, 'composing 态必须有输入框');
+  box.value = sentence;
+  return btn(h.root, '提交造句').click();
 }
 
 /** 按「拍照」→「快门」走一步（绝大多数用例的开头）。 */

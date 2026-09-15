@@ -13,21 +13,23 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
-import { harness, openCameraAndShoot } from './helpers/mount-harness.mjs';
+import { reachComposing as reachComposingShared } from './helpers/mount-harness.mjs';
 import { btn, byTag, text } from './helpers/dom.mjs';
 import { FEEDBACK_FAIL_REASONS, feedbackEventFor } from '../web/units/compose.mjs';
 
 /** 一次合法的模型反馈（flawed）。 */
 const FLAWED = { verdict: 'flawed', error_type: 'word_choice', rewrite: 'I use a mug.', note: '词选得更准' };
 
-/** 走完整条闭环，停在 composing：拍照 → 快门 → 我会读了 → 我读完了。 */
+/**
+ * 走完整条闭环，停在 composing：拍照 → 快门 → 我会读了 → **我读过了**。
+ *
+ * Task 9 起跟读那一格有两副样子（转写可用 → 判定；不可用 → 手动打勾），
+ * 而这里注入的世界里没有转写引擎，所以走的是**手动打勾**那条路（`skipReading: false`，
+ * 为的是让 `skippedReading` 保持 false——本文件的用例不测跳过跟读）。
+ * 路径本身与夹具同源（`tests/helpers/mount-harness.mjs`），免得两份夹具各自漂移。
+ */
 async function reachComposing(over = {}) {
-  const h = await harness(over);
-  await openCameraAndShoot(h);
-  await btn(h.root, '我会读了（开始跟读）').click(); // word → reading
-  await btn(h.root, '我读完了').click();             // reading → composing
-  assert.equal(h.machine.state, 'composing', '夹具必须停在造句这一格');
-  return h;
+  return reachComposingShared(over, { skipReading: false });
 }
 
 /** 在 composing 里写下 `sentence` 并提交（返回 click 的 Promise）。 */
