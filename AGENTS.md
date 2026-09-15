@@ -11,6 +11,7 @@
   - 验证二（识物准确率）：`VAL-OPI-…38` / `VAL-OPI-…50`，三轮 + 现场判定表（清单第 57 步）
   - 验证一（成人接受度）：`VAL-OPI-…36`
   - 验证三（语料对照）
+- **预验收冒烟轮已完成**（`docs/预验收冒烟报告-2026-09-15.md`，决策 `DEC-OPI-5c134c67-9bdd-46d2-b9bc-7d51bfde8585.10`）：电脑侧步骤（1/2A/27/28）+ 导出链路干跑（54–57 命令格式）全部通过。**本机模拟器不可行**（固件 VT-x 关闭，硬门槛；软件模式 5 组参数全部崩溃）；**真机路线 = USB 真机 + `adb reverse tcp:8787 tcp:8787`**（localhost 即安全上下文，getUserMedia 免证书），android 插件按 serial 驱动可半自动跑清单 4–53 步。JDK 17 + Android SDK 已装在 `D:\android-sdk`，换 VT-x 可用机器即可起模拟器。
 - 详细台账（在册对象全集、逐任务证据、Minor 发现累积）：`.superpowers/sdd/progress.md`
 
 ## 常用命令
