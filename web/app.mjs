@@ -410,6 +410,15 @@ export async function mount(root, deps = {}) {
     }
 
     view.push(row);
+    // 诊断页入口（真机走查用）：把记录翻译成人话，省掉"开开发者工具读 JSON"那一步。
+    // 每屏都挂着，因为走查时需要在任意时刻查看记录（例如第 25 步数快门次数）。
+    const diag = doc.createElement('p');
+    diag.className = 'muted';
+    const diagLink = doc.createElement('a');
+    diagLink.href = './diagnostics.html';
+    diagLink.textContent = '查看诊断页（把学习记录翻译成人话）';
+    diag.append(diagLink);
+    view.push(diag);
     return view;
   }
 

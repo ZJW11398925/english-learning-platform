@@ -1,0 +1,263 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <title>诊断页 · 英语学习平台</title>
+  <style>
+    :root { color-scheme: light dark; }
+    body { margin: 0; padding: 16px; font: 15px/1.65 system-ui, sans-serif; max-width: 760px; margin: 0 auto; }
+    h1 { font-size: 1.25rem; margin: 0 0 4px; }
+    h2 { font-size: 1rem; margin: 22px 0 8px; padding-bottom: 4px; border-bottom: 1px solid #8884; }
+    .muted { opacity: .7; font-size: .9rem; }
+    .card { border: 1px solid #8884; border-radius: 10px; padding: 10px 12px; margin: 8px 0; }
+    .ok { color: #0a7d2c; font-weight: 600; }
+    .bad { color: #c0392b; font-weight: 600; }
+    .warn { color: #b8860b; font-weight: 600; }
+    table { width: 100%; border-collapse: collapse; font-size: .92rem; }
+    th, td { text-align: left; padding: 7px 6px; border-bottom: 1px solid #8883; vertical-align: top; }
+    th { font-weight: 600; opacity: .8; }
+    textarea { width: 100%; min-height: 210px; font: 13px/1.5 ui-monospace, monospace; padding: 8px; border-radius: 8px; border: 1px solid #8884; }
+    button { font-size: 1rem; padding: 11px 16px; border-radius: 9px; }
+    .row { display: flex; gap: 10px; flex-wrap: wrap; align-items: center; margin: 10px 0; }
+    code { background: #8882; padding: 1px 5px; border-radius: 4px; }
+    .big { font-size: 1.6rem; font-weight: 700; }
+  </style>
+</head>
+<body>
+  <h1>诊断页</h1>
+  <p class="muted">
+    这一页把你手机里记录的学习数据翻译成人话。**数据只在你手机上，不会上传**。
+    做完走查后，把下面「可复制摘要」整段发我即可，不必再看任何代码或开发者工具。
+  </p>
+  <div class="row">
+    <button id="refresh">重新读取</button>
+    <button id="copy">复制摘要</button>
+    <span id="copied" class="muted"></span>
+  </div>
+
+  <div id="summary"></div>
+
+  <h2>逐次快门（判据 B 的依据）</h2>
+  <p class="muted">一次快门 = 一行。看「次序号」是否 1、2、3… 连续。</p>
+  <div id="rounds"></div>
+
+  <h2>造句与反馈</h2>
+  <div id="feedback"></div>
+
+  <h2>可复制摘要（整段发我）</h2>
+  <textarea id="dump" readonly></textarea>
+
+<script type="module">
+const EVENTS_KEY = 'elp.events';
+
+/** 事件类型 → 人话。缺项就原样显示英文，不猜。 */
+const TYPE_LABEL = {
+  session_start: '会话开始',
+  frame_rejected: '照片被退回（太暗或太糊）',
+  blocked_permission: '相机未授权',
+  recognize_ok: '识物成功',
+  recognize_failed: '识物失败（转手选）',
+  word_shown: '显示了词',
+  reading_done: '跟读完成',
+  skipped_reading: '跳过跟读',
+  speech_unsupported: '浏览器不支持语音识别',
+  compose_submitted: '提交了造句',
+  compose_rewrite: '回改一版',
+  feedback_ok: '拿到反馈',
+  feedback_pending: '没拿到反馈',
+  uncertain: '模型说"拿不准"',
+  recurrence_scene: '复现：在新场景重新取到',
+  recurrence_manual: '复现：自己手选的词',
+  storage_full: '手机存储写满',
+};
+
+const rejectReason = { too_dark: '太暗', too_blurry: '太糊' };
+const verdictLabel = { correct: '这句没问题', flawed: '可以改得更地道', uncertain: '这句我拿不准' };
+const errTypeLabel = { word_choice: '用词不对', collocation: '搭配不地道', grammar: '语法问题', none: '—' };
+const failReasonLabel = {
+  empty_sentence: '句子是空的（当场拦下）',
+  request_failed: '请求发不出去',
+  timeout: '等太久超时',
+  http_error: '服务返回错误',
+  response_invalid: '返回内容不合契约',
+  no_candidates: '模型没给出候选',
+  not_in_acceptable_set: '候选里没有可学的词',
+  all_matched_excluded: '命中的词都被排除',
+};
+
+const esc = (s) => String(s ?? '').replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+
+function readEvents() {
+  try {
+    const raw = localStorage.getItem(EVENTS_KEY);
+    if (raw === null) return { events: [], missing: true };
+    const parsed = JSON.parse(raw);
+    return { events: Array.isArray(parsed) ? parsed : [], missing: false };
+  } catch (err) {
+    return { events: [], error: String(err?.message ?? err) };
+  }
+}
+
+/** 按会话分组，会话内按 roundIndex 归并成"轮"。 */
+function groupBySession(events) {
+  const sessions = new Map();
+  for (const e of events) {
+    const sid = e.sessionId ?? '(无会话号)';
+    if (!sessions.has(sid)) sessions.set(sid, []);
+    sessions.get(sid).push(e);
+  }
+  for (const list of sessions.values()) {
+    list.sort((a, b) => (a.ts ?? 0) - (b.ts ?? 0));
+  }
+  return sessions;
+}
+
+const CONCLUSION_TYPES = new Set(['frame_rejected', 'recognize_ok', 'recognize_failed']);
+
+/** 一轮一行：取该 roundIndex 的结论事件（三类之一）。 */
+function roundsOf(list) {
+  const byRound = new Map();
+  for (const e of list) {
+    if (!CONCLUSION_TYPES.has(e.type)) continue;
+    if (e.roundIndex === null || e.roundIndex === undefined) continue;
+    if (!byRound.has(e.roundIndex)) byRound.set(e.roundIndex, e);
+  }
+  return [...byRound.entries()].sort((a, b) => a[0] - b[0]);
+}
+
+function describeConclusion(e) {
+  if (e.type === 'frame_rejected') {
+    return { text: `照片被退回：${rejectReason[e.payload?.reason] ?? e.payload?.reason ?? '（未给原因）'}`, cls: 'bad' };
+  }
+  if (e.type === 'recognize_ok') {
+    const cands = Array.isArray(e.payload?.candidates) ? e.payload.candidates.map((c) => c?.label).filter(Boolean) : [];
+    return {
+      text: `识物成功，问过模型 ${e.payload?.attempts ?? '?'} 次${cands.length ? '；候选：' + cands.join('、') : ''}`,
+      cls: 'ok',
+    };
+  }
+  const r = e.payload?.reason;
+  return { text: `识物失败（${failReasonLabel[r] ?? r ?? '未给原因'}），转手选`, cls: 'warn' };
+}
+
+function render() {
+  const { events, missing, error } = readEvents();
+  const summaryEl = document.getElementById('summary');
+  const roundsEl = document.getElementById('rounds');
+  const feedEl = document.getElementById('feedback');
+  const dumpEl = document.getElementById('dump');
+
+  if (error) {
+    summaryEl.innerHTML = `<div class="card bad">读不到记录：${esc(error)}</div>`;
+    return;
+  }
+  if (events.length === 0) {
+    summaryEl.innerHTML = `<div class="card warn">还没有任何记录${missing ? '' : ''}。<br>先在应用页里拍一张照、走一轮，再回到这一页点「重新读取」。</div>`;
+    roundsEl.innerHTML = '';
+    feedEl.innerHTML = '';
+    dumpEl.value = '（无记录）';
+    return;
+  }
+
+  const sessions = groupBySession(events);
+  const lines = [];
+  const cards = [];
+
+  for (const [sid, list] of sessions) {
+    const rs = roundsOf(list);
+    const finishes = list.filter((e) => e.type === 'recognize_ok' || e.type === 'recognize_failed');
+    const rejects = list.filter((e) => e.type === 'frame_rejected');
+    const feedbackOk = list.filter((e) => e.type === 'feedback_ok');
+    const feedbackPending = list.filter((e) => e.type === 'feedback_pending');
+    const uncertain = list.filter((e) => e.type === 'uncertain');
+
+    // 判据 B 口径：轮数 = 不同 roundIndex 的个数（三类结论事件取并集）；重拍次数 = 轮数 - 1
+    const roundCount = rs.length;
+    const reShoots = Math.max(0, roundCount - 1);
+    const needsTwo = roundCount >= 3;
+
+    const gaps = [];
+    for (let i = 1; i <= roundCount; i += 1) if (!rs.some(([idx]) => idx === i)) gaps.push(i);
+    const seqOk = gaps.length === 0 && roundCount > 0;
+
+    cards.push(`
+      <div class="card">
+        <div><b>会话 ${esc(String(sid).slice(0, 8))}…</b></div>
+        <div>按了几次快门（轮数）：<span class="big">${roundCount}</span>
+             → 重拍次数：<b>${reShoots}</b>
+             ${needsTwo ? '<span class="bad">（≥2 次重拍，计入判据 B 的分子）</span>' : '<span class="muted">（未达 2 次重拍）</span>'}</div>
+        <div>次序号连续（1…${roundCount}）：${seqOk ? '<span class="ok">是</span>' : `<span class="bad">否，缺 ${esc(gaps.join('、'))}</span>`}</div>
+        <div>三类结论事件各几条：退回 ${rejects.length} / 识物成功 ${finishes.filter((e) => e.type === 'recognize_ok').length} / 识物失败 ${finishes.filter((e) => e.type === 'recognize_failed').length}</div>
+        <div>拿到反馈 ${feedbackOk.length} 条 / 没拿到 ${feedbackPending.length} 条 / 模型说"拿不准" ${uncertain.length} 条</div>
+      </div>`);
+
+    lines.push(`会话 ${String(sid).slice(0, 8)}：轮数=${roundCount} 重拍=${reShoots} 序号连续=${seqOk ? '是' : '否(缺' + gaps.join(',') + ')'}`);
+    lines.push(`  退回=${rejects.length} 识物成功=${finishes.filter((e) => e.type === 'recognize_ok').length} 识物失败=${finishes.filter((e) => e.type === 'recognize_failed').length}`);
+    lines.push(`  反馈: ok=${feedbackOk.length} pending=${feedbackPending.length} uncertain=${uncertain.length}`);
+  }
+
+  summaryEl.innerHTML = cards.join('');
+
+  // 逐次快门
+  const allRoundRows = [];
+  for (const [sid, list] of sessions) {
+    for (const [idx, e] of roundsOf(list)) {
+      const d = describeConclusion(e);
+      allRoundRows.push(`<tr>
+        <td>${esc(idx)}</td>
+        <td class="${d.cls}">${esc(d.text)}</td>
+        <td class="muted">${esc(e.type)}</td>
+        <td class="muted">${new Date(e.ts ?? 0).toLocaleTimeString()}</td>
+      </tr>`);
+      lines.push(`  第${idx}次快门：${e.type}${e.payload?.reason ? ' reason=' + e.payload.reason : ''}${e.payload?.attempts != null ? ' attempts=' + e.payload.attempts : ''}`);
+    }
+  }
+  roundsEl.innerHTML = allRoundRows.length === 0
+    ? '<p class="muted">还没有快门记录。去应用页拍一张照。</p>'
+    : `<table><thead><tr><th>次序号</th><th>结果</th><th>（原始类型）</th><th>时间</th></tr></thead><tbody>${allRoundRows.join('')}</tbody></table>`;
+
+  // 造句与反馈
+  const fRows = [];
+  for (const [, list] of sessions) {
+    for (const e of list) {
+      if (!['feedback_ok', 'feedback_pending', 'uncertain'].includes(e.type)) continue;
+      const p = e.payload ?? {};
+      const sentence = p.sentence;
+      const verdict = p.verdict ? `${verdictLabel[p.verdict] ?? p.verdict}（${p.verdict}）` : '—';
+      const errType = p.error_type ? `${errTypeLabel[p.error_type] ?? p.error_type}（${p.error_type}）` : '—';
+      const note = p.note ?? (p.reason ? (failReasonLabel[p.reason] ?? p.reason) : '') ?? '';
+      fRows.push(`<tr>
+        <td>${esc(TYPE_LABEL[e.type] ?? e.type)}</td>
+        <td>${sentence === null || sentence === undefined ? '<span class="bad">（没有句子！）</span>' : esc(sentence)}</td>
+        <td>${esc(verdict)}</td>
+        <td>${esc(errType)}</td>
+        <td class="muted">${esc(note)}</td>
+      </tr>`);
+      lines.push(`  造句[${e.type}] 原句="${sentence ?? '(缺)'}" verdict=${p.verdict ?? '-'} error_type=${p.error_type ?? '-'}${p.reason ? ' reason=' + p.reason : ''}`);
+    }
+  }
+  feedEl.innerHTML = fRows.length === 0
+    ? '<p class="muted">还没有造句记录。去应用页走完一轮并提交一句英文。</p>'
+    : `<table><thead><tr><th>结果</th><th>你写的原句</th><th>判定</th><th>问题类型</th><th>说明</th></tr></thead><tbody>${fRows.join('')}</tbody></table>`;
+
+  dumpEl.value = lines.join('\n');
+}
+
+document.getElementById('refresh').addEventListener('click', render);
+document.getElementById('copy').addEventListener('click', async () => {
+  const el = document.getElementById('dump');
+  el.select();
+  try {
+    await navigator.clipboard.writeText(el.value);
+    document.getElementById('copied').textContent = '已复制 ✓';
+  } catch {
+    document.getElementById('copied').textContent = '复制失败——请长按上面文本框手动全选复制';
+  }
+  setTimeout(() => { document.getElementById('copied').textContent = ''; }, 2500);
+});
+
+render();
+</script>
+</body>
+</html>
