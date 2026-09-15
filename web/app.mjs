@@ -1109,6 +1109,15 @@ export async function mount(root, deps = {}) {
         word: picked.word,
         attempts: picked.attempts,
         candidates: (picked.candidates ?? []).map((c) => c.label),
+        // 服务端自报的耗时（判据 A 的 `latency_p95` 的**唯一**数据来源，`DEC-OPI-…87` 授权）。
+        // 它与判据 B 的 `attempts` 是两个数：`attempts` = 这一轮问过模型几次；
+        // 本字段 = 取到词的那一次等了多久（attempts=2 时也不把两次相加）。
+        //
+        // **只在服务端真的给了有限数时才写这个键**：缺字段时写 0 会让 p95 看起来完美，
+        // 而真凶（服务端没回这个数）被一个漂亮数字盖住——"缺一个数"远好过"一个假数"。
+        // 判据统计那侧（`scripts/export.mjs`）只在事件里**真的没有**这个字段时报缺口，
+        // 所以两边对"缺"的表达必须一致：**这里省略键，那边 `null` + `gaps`**。
+        ...(Number.isFinite(picked.latencyMs) ? { latencyMs: picked.latencyMs } : {}),
       }, clock);
       shownWord = { word: picked.word, scene: sceneOf(picked.word, picked.candidates ?? []), source: 'recognized' };
       // 复现的第一种模式（§3.3.3）：识物取到的正是到期词 → `recurrence_scene` 并推进排期。

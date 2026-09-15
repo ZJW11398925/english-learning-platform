@@ -474,6 +474,48 @@ test('没有 --expect 时 top1/top3 报为缺口（不假装算出了准确率�
   assert.ok(s.gaps.some((g) => g.includes('expect')), `缺口清单里必须说明缺判定表：${JSON.stringify(s.gaps)}`);
 });
 
+// ── 耗时：写入口径落定（`DEC-OPI-…87`）之后，缺口只在**真的缺**时才报 ─────────
+
+test('recognize_ok 带 latencyMs → 算出 p50/p95，且不报耗时缺口', () => {
+  const events = Array.from({ length: 20 }, (_, i) => ev('recognize_ok', {
+    roundIndex: i + 1, payload: { word: 'mug', candidates: ['mug'], latencyMs: (i + 1) * 100 },
+  }));
+  const s = summarize(events, {});
+  assert.equal(s.latencySamples, 20);
+  assert.equal(s.latencyP50, 1000);
+  assert.equal(s.latencyP95, 1900, '最近秩法：ceil(0.95×20) = 19 → 升序第 19 个 = 1900');
+  assert.equal(s.gaps.some((g) => g.includes('latency')), false, '有数据就不许再报缺口');
+});
+
+test('有 recognize_ok 却一条耗时都没有 → 报缺口（两种成因与处置都写清）', () => {
+  const s = summarize([round(1, { word: 'mug', candidates: ['mug'] })], {});
+  assert.equal(s.latencyP95, null);
+  assert.equal(s.latencySamples, 0);
+  const gap = s.gaps.find((g) => g.includes('latency'));
+  assert.ok(gap, `必须有耗时缺口：${JSON.stringify(s.gaps)}`);
+  assert.match(gap, /加字段之前/, '要说明"这份流可能是加字段之前落的（旧代码）"');
+  assert.match(gap, /服务端没回 latency_ms/, '要给出第二种成因');
+  assert.match(gap, /不要.*填进判据 A/, '要写明不许用 0 或估算值填判据 A');
+});
+
+test('一条 recognize_ok 都没有 → **不算**耗时缺口（那是还没数据，不是数据源坏了）', () => {
+  const s = summarize([
+    ev('frame_rejected', { roundIndex: 1, payload: { reason: 'too_dark' } }),
+    ev('blocked_permission', { sessionId: 'b', payload: { error: 'NotAllowedError' } }),
+  ], {});
+  assert.equal(s.latencySamples, 0);
+  assert.equal(s.gaps.some((g) => g.includes('latency')), false,
+    '只跑过相机那几步的流不该被报成"缺耗时字段"——两者对 Task 11 的处置完全不同');
+});
+
+test('耗时不看 recognize_failed（判据 A 的样本数与 p95 的样本数必须同源）', () => {
+  const s = summarize([
+    ev('recognize_failed', { roundIndex: 1, payload: { reason: 'no_candidates', latencyMs: 5000 } }),
+  ], {});
+  assert.equal(s.latencySamples, 0, 'recognize_failed 的耗时不算进来');
+  assert.equal(s.latencyP95, null);
+});
+
 test('top1/top3 只看前 3 个候选：可接受词排在第 4 位不算 top3 命中', () => {
   const events = [
     ev('recognize_ok', { roundIndex: 1, payload: { word: 'bowl', candidates: ['plate', 'glass', 'dish', 'bowl'] } }),

@@ -51,6 +51,45 @@ test('recognize 把服务端候选原样返回', async () => {
   assert.equal(r.candidates[0].label, 'mug');
 });
 
+// ─────────────────────────── Task 10 收口：服务端自报的耗时必须带出来（判据 A 的 p95）──────
+// 背景：判据 A 要 `latency_p95 ≤ 2000ms`，而服务端**本来就回** `latency_ms`
+// （`server/index.mjs` 的 200 响应信封），客户端此前把它丢在 `res.json()` 的结果里没带出来
+// ——于是事件流里没有任何耗时，判据统计根本算不出这个数（Task 7 那条"能测量"教训的第三次重演）。
+
+test('recognize 带出服务端自报的 latency_ms', async () => {
+  const withLatency = async () => ({
+    ok: true,
+    json: async () => ({
+      ok: true,
+      candidates: [{ label: 'mug', score: 0.9, scene: 'kitchen' }],
+      latency_ms: 1840,
+    }),
+  });
+  const r = await recognize(new Blob(['x']), { fetchImpl: withLatency });
+  assert.equal(r.latencyMs, 1840, '服务端给的耗时必须原样带出来（判据 A 的输入）');
+});
+
+test('服务端没给 latency_ms 时如实报 null，**绝不补 0**', async () => {
+  // 0 是一个**合法且极好**的耗时读数。用 0 代替"不知道"，会让 p95 看起来完美，
+  // 而真凶（写入路径漏了字段）被一个漂亮的数字盖住——这比"缺一个数"危险得多。
+  const noLatency = async () => ({
+    ok: true,
+    json: async () => ({ ok: true, candidates: [{ label: 'mug', score: 0.9, scene: 'kitchen' }] }),
+  });
+  const r = await recognize(new Blob(['x']), { fetchImpl: noLatency });
+  assert.equal(r.latencyMs, null);
+  assert.notEqual(r.latencyMs, 0, '不许用 0 冒充"没拿到耗时"');
+});
+
+test('服务端给的 latency_ms 不是有限数时也如实报 null（不把 "12ms" 这类字符串算成耗时）', async () => {
+  const weird = async () => ({
+    ok: true,
+    json: async () => ({ ok: true, candidates: [{ label: 'mug', score: 0.9, scene: 'kitchen' }], latency_ms: '很快' }),
+  });
+  const r = await recognize(new Blob(['x']), { fetchImpl: weird });
+  assert.equal(r.latencyMs, null);
+});
+
 test('HTTP 失败时抛出，不返回空候选冒充成功', async () => {
   await assert.rejects(() => recognize(new Blob(['x']), { fetchImpl: failFetch }), /502/);
 });

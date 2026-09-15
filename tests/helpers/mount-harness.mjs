@@ -96,7 +96,14 @@ export const okFetch = async (url) => {
   resolveUrl(url);
   return {
     ok: true,
-    json: async () => ({ ok: true, candidates: [{ label: 'mug', score: 0.9, scene: 'kitchen' }] }),
+    json: async () => ({
+      ok: true,
+      candidates: [{ label: 'mug', score: 0.9, scene: 'kitchen' }],
+      // 服务端 200 响应**永远带** `latency_ms`（`server/index.mjs` 的 200 分支实测如此，
+      // `tests/recognize-endpoint.test.mjs` 断言它是整数毫秒）。夹具照真形状给，
+      // 否则"耗时进事件流"这条链路在挂载测试里永远只走"服务端没给"那一半。
+      latency_ms: 1840,
+    }),
   };
 };
 

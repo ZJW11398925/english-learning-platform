@@ -7,7 +7,8 @@
  * + Task 7 复审轮的 2 个（停滞的响应体归超时）+ Task 8 的 16 个（造句反馈：客户端 10 + 上游 6）
  * + Task 9 的 28 个（跟读判定 K1–K6 + 已证等价的 K7，接线 P1–P22）
  * + Task 9B 的 13 个（待补反馈队列 Q1–Q8、storage_full Q9–Q11、reading_missed Q12–Q13）
- * + Task 10 的 11 个（导出统计口径 X1–X11）
+ * + Task 10 的 17 个（导出统计口径 X1–X14 + 耗时落盘的 R16–R17；
+ *   X12 的目标是 `web/app.mjs`，R16–R17 的目标是 `web/units/recognize.mjs`）
  * 固化成仓库内可复跑的证据——逐个"把实现改坏"，跑 `tests/` 下被登记的那 15 个测试文件，报告每个
  * 变异体是被测试抓到（DETECTED）还是溜过去了（MISSED），只要有该抓没抓到的就以非零码退出。
  *
@@ -26,7 +27,9 @@
  *      `--only=R` 跑 Task 7 的 15 条（R1–R15），`--only=U` 跑上游响应校验与超时的 7 条（U1–U7），
  *      `--only=V` 跑 Task 8 的服务端造句上游 6 条（V1–V6），
  *      `--only=K` 跑 Task 9 的跟读判定 7 条（K1–K7），`--only=P` 跑 Task 9 的接线 22 条（P1–P22）；
- *      `--only=Q` 跑 Task 9B 的 13 条（Q1–Q13），`--only=X` 跑 Task 10 的导出统计 11 条（X1–X11）；
+ *      `--only=Q` 跑 Task 9B 的 13 条（Q1–Q13），`--only=X` 跑 Task 10 的导出统计 14 条（X1–X14）；
+ *      `--only=R16` / `--only=R17` 跑 Task 10 收口的耗时落盘两条（**必须写全串**：
+ *      `--only=R` 会连同 Task 7/8 的 R1–R15 一起选中）；
  *   3. 两者皆空即当场 FAIL（并列出全部可用 ID），绝不"跑 0 个然后 PASS"。
  * 这修掉了原先的子串匹配：那时 `--only=F` 会把 `M9_terminalNoFlag`、`Q2_topScoreFirst`、
  * `Q4_hypernymFallback` 一起选中（14 个而不是 11 个），选中的集合与"只看 F 系列"的意图不符。
@@ -72,8 +75,10 @@
  * P 系列（本任务的重头）就没有任何变异证据。
  * Task 9B 的 Q1–Q13（待补队列 / storage_full / reading_missed）→ 13/13 DETECTED，
  * 见 `task-9b-report.md`。
- * Task 10 的 X1–X11（`scripts/export.mjs` 的统计口径：造句总数不相加、判据 B 的分子与分母、
- * 两个失败率的分母、sceneChanged 的方向、top-3 的切片、补交成功率的分母、CSV 的 BOM）
+ * Task 10 的 X1–X14 + R16–R17（`scripts/export.mjs` 的统计口径：造句总数不相加、判据 B 的分子与分母、
+ * 两个失败率的分母、sceneChanged 的方向、top-3 的切片、补交成功率的分母、CSV 的 BOM、
+ * 缺口的触发条件、耗时样本的同源性；`web/app.mjs` 与 `web/units/recognize.mjs` 的
+ * "服务端没给耗时时**不写 0**"）
  * → 见 `task-10-report.md`——这是唯一一批**在 `scripts/` 下的**变异体，
  * 它把"数算错了没人看得出来"这一类缺陷第一次纳入了变异证据。
  */
@@ -1539,6 +1544,45 @@ const MUTANTS = [
       + '整张表变乱码——而乱码会让人以为"数据坏了"，正是 brief §2 第 8 条要避免的那件事',
     find: '  return `\\uFEFF${[header, ...rows].map((r) => r.map(escapeCell).join(\',\')).join(\'\\n\')}\\n`;',
     replace: '  return `${[header, ...rows].map((r) => r.map(escapeCell).join(\',\')).join(\'\\n\')}\\n`;',
+  },
+  {
+    name: 'X12_writeLatencyZeroWhenMissing', target: APP, expect: 'detected',
+    why: '服务端没给耗时时**写 0**（`Number.isFinite(x) ? x : 0`）：0 是一个"合法且极好"的读数，'
+      + '于是 `latency_p95` 永远漂亮，而真凶（服务端没回这个数）被一个假数字盖住。'
+      + '注意它在"服务端给了有限数"那一支上与真实现**完全一致**，所以只有"没给"那条用例能抓它',
+    find: '        ...(Number.isFinite(picked.latencyMs) ? { latencyMs: picked.latencyMs } : {}),',
+    replace: '        latencyMs: Number.isFinite(picked.latencyMs) ? picked.latencyMs : 0,',
+  },
+  {
+    name: 'X13_gapWhenNoRecognizeOk', target: EXPORT, expect: 'detected',
+    why: '缺口判据退回"一条耗时样本都没有就报"：只跑过相机那几步、**一条 recognize_ok 都没有**的流'
+      + '会被报成"缺耗时字段"——那是"还没数据"，不是"数据源坏了"，两者对 Task 11 的处置完全不同',
+    find: '  if (recognized.length > 0 && latencies.length === 0) {',
+    replace: '  if (latencies.length === 0) {',
+  },
+  {
+    name: 'X14_latencyIncludesFailures', target: EXPORT, expect: 'detected',
+    why: '耗时的样本里混进 `recognize_failed`：判据 A 的样本数（分母）是 `recognize_ok` 的条数，'
+      + '把失败那几次的等待也算进 p95，两个数就不是同源的了（"取词成功的等待"被"失败的等待"污染）',
+    find: '  const latencies = recognized\n    .filter((e) => Number.isFinite(e?.payload?.latencyMs))',
+    replace: '  const latencies = list\n    .filter((e) => Number.isFinite(e?.payload?.latencyMs))',
+  },
+  // ── Task 10 收口：`recognize` 带出服务端自报的耗时（判据 A 的 p95 的唯一数据来源）──
+  // 这两条与 X12–X14 同属 Task 10，但目标模块是 `recognize.mjs`，沿用该模块既有的
+  // R 系列编号（R1–R15 已用），故为 R16/R17。
+  {
+    name: 'R16_latencyZeroFallback', target: REC, expect: 'detected',
+    why: '服务端没回 `latency_ms` 时兜底成 **0** 而不是 `null`：0 是"合法且极好"的读数，'
+      + '用它代替"不知道"会让 p95 看起来完美——判据 A 的 p95 不能建立在编造的数据上',
+    find: 'const serverLatencyOr = (data) => (Number.isFinite(data?.latency_ms) ? data.latency_ms : null);',
+    replace: 'const serverLatencyOr = (data) => (Number.isFinite(data?.latency_ms) ? data.latency_ms : 0);',
+  },
+  {
+    name: 'R17_latencyAcceptsNonFinite', target: REC, expect: 'detected',
+    why: '耗时不做有限性校验（原样带出 `data.latency_ms`）：服务端回一个字符串/`null`/`NaN` '
+      + '会被下游当成耗时读数，p95 算出 `NaN` 或参与字符串比较，而**看起来仍是"算过了"**',
+    find: '  return { candidates: data.candidates, latencyMs: serverLatencyOr(data) };',
+    replace: '  return { candidates: data.candidates, latencyMs: data.latency_ms ?? null };',
   },
 ];
 

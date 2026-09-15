@@ -74,6 +74,80 @@ test('识别成功：界面显示取到的词、落 recognize_ok，并说明是�
   h.restoreFetch();
 });
 
+// ───────────────────── Task 10 收口：耗时进事件流（判据 A 的 latency_p95 的唯一数据来源）─────
+// 契约变更（`DEC-OPI-…87` 授权）：`recognize_ok.payload.latencyMs` = **服务端自报**的耗时。
+// 为什么必须落在这一条既有事件上、而不是新开一条：一轮只落一条结论事件的纪律
+// （下面 if/else 的三选一）不能破——多一条事件会让"识物成功率"与"取到词的轮数"混成一个数。
+
+const latencyFetch = (latencyMs) => async (url) => {
+  assert.ok(String(url).endsWith('/api/recognize'));
+  return {
+    ok: true,
+    json: async () => ({
+      ok: true,
+      candidates: [{ label: 'mug', score: 0.9, scene: 'kitchen' }],
+      ...(latencyMs === undefined ? {} : { latency_ms: latencyMs }),
+    }),
+  };
+};
+
+test('服务端给了 latency_ms → 原样进 recognize_ok.payload.latencyMs', async () => {
+  const h = await withFetch({ fetchImpl: latencyFetch(1840), recognize: realRecognizeWithFallback });
+  await openCameraAndShoot(h);
+  const ok = h.events.filter((e) => e.type === 'recognize_ok');
+  assert.equal(ok.length, 1, '一轮仍只落一条结论事件（没有新开事件类型）');
+  assert.equal(ok[0].payload.latencyMs, 1840, '判据 A 的 p95 只能建立在这个数上');
+  // 反面对照：0 是一个"合法且极好"的耗时读数，绝不能被当成"没拿到耗时"的替身。
+  assert.notEqual(ok[0].payload.latencyMs, 0);
+  h.restoreFetch();
+});
+
+test('服务端没给 latency_ms → 如实缺失，**绝不补 0 也不估算**', async () => {
+  const h = await withFetch({ fetchImpl: latencyFetch(undefined), recognize: realRecognizeWithFallback });
+  await openCameraAndShoot(h);
+  const ok = h.events.filter((e) => e.type === 'recognize_ok');
+  assert.equal(ok.length, 1);
+  assert.equal('latencyMs' in ok[0].payload, false,
+    '没拿到就不写这个键——写 0 会让 p95 看起来完美，把"写入路径漏字段"这个真凶盖住');
+  assert.notEqual(ok[0].payload.latencyMs, 0);
+  h.restoreFetch();
+});
+
+test('第二次才取到 → latencyMs 是**那一次成功**的耗时，不是两次相加', async () => {
+  let call = 0;
+  const twoTryFetch = async (url) => {
+    call += 1;
+    assert.ok(String(url).endsWith('/api/recognize'));
+    return {
+      ok: true,
+      json: async () => (call === 1
+        ? { ok: true, candidates: [], latency_ms: 900 }                                    // 空候选 → 再问一次
+        : { ok: true, candidates: [{ label: 'mug', score: 0.9, scene: 'kitchen' }], latency_ms: 700 }),
+    };
+  };
+  const h = await withFetch({ fetchImpl: twoTryFetch, recognize: realRecognizeWithFallback });
+  await openCameraAndShoot(h);
+  const ok = h.events.filter((e) => e.type === 'recognize_ok');
+  assert.equal(ok.length, 1);
+  assert.equal(ok[0].payload.attempts, 2);
+  assert.equal(ok[0].payload.latencyMs, 700, '取到词的那一次（700），不是两次之和（1600）也不是第一次（900）');
+  h.restoreFetch();
+});
+
+test('帧被端侧拦下 → 一条事件都不落（没有请求就没有耗时，别用 0 冒充它）', async () => {
+  const h = await withFetch({
+    fetchImpl: latencyFetch(1840),
+    recognize: realRecognizeWithFallback,
+    grabResult: { blob: makeBlob(9), stats: DARK },
+  });
+  await pressShutter(h, 1);
+  assert.equal(h.events.filter((e) => e.type === 'recognize_ok').length, 0);
+  const rejected = h.events.filter((e) => e.type === 'frame_rejected');
+  assert.equal(rejected.length, 1);
+  assert.equal('latencyMs' in rejected[0].payload, false, 'frame_rejected 不带耗时');
+  h.restoreFetch();
+});
+
 test('第一次失败、第二次成功：attempts=2 如实记，界面照常显示词', async () => {
   let call = 0;
   const flaky = async (url) => {
