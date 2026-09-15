@@ -54,3 +54,6 @@ Thumbs.db
 npm-debug.log*
 tmp/
 .tmp/
+
+# ── 插件与工具本地状态 ──────────────────────────────
+.mimosa/
