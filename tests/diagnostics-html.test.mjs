@@ -77,6 +77,7 @@ function renderDiagnostics({ events = null, words = null } = {}) {
   return {
     summary: get('summary').innerHTML,
     rounds: get('rounds').innerHTML,
+    reading: get('reading').innerHTML,
     feedback: get('feedback').innerHTML,
     composed: get('composed').innerHTML,
     recurrence: get('recurrence').innerHTML,
@@ -110,6 +111,53 @@ test('页面上的可见文字不许出现 markdown 强调符（页面上不会�
     .replace(/<style[\s\S]*?<\/style>/g, '')
     .replace(/<!--[\s\S]*?-->/g, '');
   assert.doesNotMatch(staticText, /\*\*/, '静态文案里出现了字面 `**`（Task 9 顺手清掉的那一类）');
+});
+
+// ─────────────────── 跟读判定：念对与没通过分开数（Task 9B）───────────────────
+
+test('reading_missed 显示成人话，并把**引擎听到的原话**摊出来（判断是不是听错了只能靠它）', () => {
+  const events = [
+    ev('recognize_ok', { word: 'mug', attempts: 1, candidates: ['mug'] }),
+    ev('reading_missed', { word: 'mug', scene: 'kitchen', transcript: 'I see a cup', reason: 'word_not_found_in_transcript' }),
+  ];
+  const out = renderDiagnostics({ events });
+
+  assert.match(out.reading, /跟读没通过（没听到目标词）/, '要有中文人话标签（缺了会在页面上显示英文原文）');
+  assert.match(out.reading, /I see a cup/, '引擎听到的原话必须显示出来');
+  assert.match(out.reading, /mug/);
+  assert.match(out.summary, /没通过 <b>1<\/b> 条/, '会话卡片里要有"没通过"这个数');
+  assert.match(out.dump, /跟读: 念对=0 没通过=1 判定合计=1/, '可复制摘要里也要有');
+});
+
+test('念对的一条记「跟读完成」，与「跟读没通过」是两行、各数各的', () => {
+  const events = [
+    ev('recognize_ok', { word: 'mug', attempts: 1, candidates: ['mug'] }),
+    ev('reading_missed', { word: 'mug', scene: 'kitchen', transcript: 'I see a cup' }),
+    ev('reading_done', { word: 'mug', scene: 'kitchen', transcript: 'a mug' }, { ts: 1_700_000_001_000 }),
+  ];
+  const out = renderDiagnostics({ events });
+
+  assert.equal(rowCount(out.reading), 3, '一次判定一行（表头 1 + 2 行）');
+  assert.match(out.reading, /跟读完成（念对了）/);
+  assert.match(out.reading, /跟读没通过（没听到目标词）/);
+  assert.match(out.summary, /念对 <b>1<\/b> 条 \/ 没通过 <b>1<\/b> 条/);
+  assert.match(out.summary, /没通过占 50%/, '没通过率是"没通过 ÷ 判定合计"（Task 10 要按这个数下结论）');
+});
+
+test('语音识别不可用**不算**没通过：它在卡片里单列，且不进没通过率', () => {
+  const events = [
+    ev('recognize_ok', { word: 'mug', attempts: 1, candidates: ['mug'] }),
+    ev('speech_unsupported', { word: 'mug', scene: 'kitchen', reason: 'no_speech_recognition' }),
+  ];
+  const out = renderDiagnostics({ events });
+  assert.match(out.summary, /没通过 <b>0<\/b> 条/, '没判过就不能算进没通过');
+  assert.match(out.summary, /语音识别不可用 1 条（<b>不算<\/b>没通过）/, '这句话必须写在页面上，否则读的人会把两者相加');
+  assert.doesNotMatch(out.reading, /跟读没通过/, '跟读判定表里不该出现没通过这一行');
+});
+
+test('没有跟读记录时给一句人话（而不是空白表）', () => {
+  const out = renderDiagnostics({ events: [ev('recognize_ok', { word: 'mug', attempts: 1, candidates: ['mug'] })] });
+  assert.match(out.reading, /还没有跟读记录/);
 });
 
 // ─────────────────────────── 复现：两种模式分列 ───────────────────────────

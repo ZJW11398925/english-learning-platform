@@ -11,12 +11,17 @@
 //   2. **配置问题与识别失败分开记**：`recognize_failed` 的 `reason` 区分"词表里没有"与"请求挂了"；
 //   3. **取不到词时界面不出现任何英文单词**，只给手选词包，且手选的结果明说是手选；
 //   4. 取到词时**必须**落 `recognize_ok`（否则下游算不出识物成功率）。
-import { test } from 'node:test';
+import { test, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
 
 import {
   withFetch, openCameraAndShoot, makeBlob, okFetch, failingFetch, realRecognizeWithFallback,
+  disposeAllHarnesses,
 } from './helpers/mount-harness.mjs';
+
+// 每条用例之后拆掉 mount 挂的定时器（待补反馈的自动重试会挂 10 秒的 setTimeout，
+// 而 node --test 会等事件循环空掉才退出——不清的话每个挂载测试文件都白等 10 秒起）。
+afterEach(disposeAllHarnesses);
 import { btn, byTag, text } from './helpers/dom.mjs';
 import {
   roundIndicesOfSession, roundCountOfSession, reShootCountOfSession, needsReshoot,

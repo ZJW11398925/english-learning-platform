@@ -109,6 +109,13 @@ const MODULE_FILES = {
   // Task 9 接入：跟读判定（token 规则 + 原样保留转写 + 可用性判定）。零 import 的纯逻辑模块，
   // 与 frame-qc / pick-word 同一个处境：它判的是"用户有没有说出目标词"，判错了没人看得出来。
   speak: 'web/units/speak.mjs',
+  // Task 9B 接入：待补反馈队列（从事件流派生 + 重试时序 + 补交的可区分标记）。
+  // 它 import `compose.mjs`，所以两份都必须在表里（少一份临时树就 import 不到）。
+  pending: 'web/units/pending.mjs',
+  // Task 9B 接入：存储层的配额判定与"标记 + 原样重抛"。
+  // 它**零 import**（只用注入的 localStorage/indexedDB 句柄），进得来；
+  // 而它承载的正是"存储写满"那一档——此前全项目没有任何代码发出 `storage_full`。
+  store: 'web/units/store.mjs',
 };
 const TEST_FILES = [
   'tests/scheduler.test.mjs',
@@ -137,6 +144,13 @@ const TEST_FILES = [
   'tests/speak.test.mjs',
   'tests/speak-mount.test.mjs',
   'tests/recurrence-mount.test.mjs',
+  // Task 9B 接入：待补反馈队列（纯逻辑 + 装配）与存储层的配额路径。
+  // `tests/event-log.test.mjs` 同时接进来：`reading_missed` 是事件表的契约变更，
+  // 不接它的话"事件类型漏登记"这类变异体没有任何证据。
+  'tests/pending.test.mjs',
+  'tests/pending-mount.test.mjs',
+  'tests/storage-full.test.mjs',
+  'tests/event-log.test.mjs',
 ];
 // `tests/index-html.test.mjs` **有意不进这张表**：它读 `web/index.html` 这个真实文件，
 // 而临时树只复制模块与测试，进来会因缺文件而假红。它由 `node --test` 全量套件守着。
@@ -200,6 +214,9 @@ const COMPOSE = MODULE_FILES.compose;
 const FBUP = MODULE_FILES['feedback-upstream'];
 const SPEAK = MODULE_FILES.speak;
 const APP = MODULE_FILES.app;
+// Task 9B 的三个新目标
+const PENDING = MODULE_FILES.pending;
+const STORE = MODULE_FILES.store;
 
 const PICK_ORIGINAL = `export function pickWord({ candidates, acceptableSets, exclude = [] }) {
   const accepted = new Set();
@@ -1218,7 +1235,7 @@ const MUTANTS = [
     name: 'P15_composeSubmittedMissing', target: APP, expect: 'detected',
     why: '提交造句不再落盘（Task 6 曾刻意延后到 Task 9 的那一条）：学习者的句子是本轮'
       + '"成人愿为造句付多少成本"这批数据的载体，不落盘等于这次练习没有发生过',
-    find: '    recordComposeSubmitted(text);',
+    find: "    if (recordComposeSubmitted(text) === null) setError(`这句话没能记下来：${STORAGE_FULL_NOTICE}`);",
     replace: '    // 变异体：造句不落盘',
   },
   {
@@ -1274,6 +1291,149 @@ const MUTANTS = [
     find: '      sentence: text,',
     replace: '      sentence: null,',
   },
+
+  // ── Task 9B：待补反馈队列（Q1–Q8）、storage_full（Q9–Q11）、reading_missed（Q12–Q13）──
+  //
+  // 这三件事共同的性质是 Task 7 那条教训：**再好的实现，如果测量它所需的数据没有被记录，
+  // 整条验证链就是空的**。所以这一批变异体问的都是同一句话："这条路径静默失效时，
+  // 有没有哪条用例会红？"
+  {
+    name: 'Q1_pendingNoId', target: APP, expect: 'detected',
+    why: '`feedback_pending` 不再带 `pendingId`：待补条目**永远勾不掉**（补交成功的指针指不到它），'
+      + '于是同一条欠账会被无限重发——而界面看起来一切正常',
+    find: `      const withId = ev.type === 'feedback_pending'
+        ? { ...fields, ...withPendingId({ sessionId, ts: clock(), payload: ev.payload }) }
+        : fields;`,
+    replace: '      const withId = fields;',
+  },
+  {
+    name: 'Q2_retryTimerNeverScheduled', target: APP, expect: 'detected',
+    why: '失败之后不排自动重试：设计 §5.1 的"自动重试 3 次"整条消失，'
+      + '用户那句话只能靠手动补交（而绝大多数人不会去点）',
+    find: `    const delay = Math.max(0, next.at - clock());
+    retryTimer = setTimer(async () => {`,
+    replace: `    const delay = Math.max(0, next.at - clock());
+    if (delay >= 0) return;
+    retryTimer = setTimer(async () => {`,
+  },
+  {
+    name: 'Q3_retryIntervalHalved', target: APP, expect: 'detected',
+    why: '重试间隔被改成设计之外的值（10s 改成 5s）：设定值没有测试钉住的话，'
+      + '它会随某次"顺手调一下"静默漂移，而"三次重试 = 10/30/90 秒"是设计明文',
+    find: '    const delay = Math.max(0, next.at - clock());',
+    replace: '    const delay = Math.max(0, Math.floor((next.at - clock()) / 2));',
+  },
+  {
+    name: 'Q4_retryUnlimited', target: APP, expect: 'detected',
+    why: '自动重试不再有次数上限（排定时刻无视 `RETRY_DELAYS_MS` 的长度）：'
+      + '一次服务端故障会让客户端**永远**重发下去，"仍失败"这个档位再也不成立',
+    find: `      const at = scheduledRetryAt(item);
+      if (at === null) continue;                     // 这条的自动重试已用完`,
+    replace: `      const at = Number.isFinite(item.lastAttemptAt) ? item.lastAttemptAt + 10_000 : item.failedAt + 10_000;
+      if (at === null) continue;                     // 这条的自动重试已用完`,
+  },
+  {
+    name: 'Q5_retryLogsComposeSubmitted', target: APP, expect: 'detected',
+    why: '补交时**也**落一条 `compose_submitted`：产出成本被记两次，'
+      + '"成人愿为造句付多少成本"这个分母系统性偏大（补交越多偏得越厉害）',
+    find: `  async function retryFeedback(item) {
+    const fresh = pendingList().find((it) => it.pendingId === item.pendingId) ?? item;
+    if (fresh.resolved) return;`,
+    replace: `  async function retryFeedback(item) {
+    const fresh = pendingList().find((it) => it.pendingId === item.pendingId) ?? item;
+    if (fresh.resolved) return;
+    recordComposeSubmitted(fresh.sentence);`,
+  },
+  {
+    name: 'Q6_pendingCountNotDeduped', target: PENDING, expect: 'detected',
+    why: '归档不再按 `pendingId` 归并（每个待补事件各自成条）：一条欠账重试失败 3 次会被数成 4 条，'
+      + '界面告诉用户"你有 4 句话没拿到反馈"——对用户说假话，而且恰好是最不该出错的那个数',
+    find: `    const id = pendingIdOf(e);
+    const prev = byId.get(id);`,
+    replace: `    const id = pendingIdOf(e);
+    const prev = undefined;`,
+  },
+  {
+    name: 'Q7_retryScheduledEvenWhenStoreFull', target: APP, expect: 'detected',
+    why: '存储写满时照样排自动重试：每一次重试都必然写不进去，于是"写不进去"这件事'
+      + '被反复重试掩盖成"网络问题"，而用户看到的是永远补不上的反馈',
+    find: `    if (retryTimer !== null) return;
+    if (storageFull()) return;`,
+    replace: '    if (retryTimer !== null) return;',
+  },
+  {
+    name: 'Q8_failedRetryResolvesItself', target: PENDING, expect: 'detected',
+    why: '补交**又失败**时也带 `retriedPendingId`：一条失败的补交把自己的欠账勾掉，'
+      + '那条句子从"还没补上"里消失、界面不再催，用户永远拿不到判定'
+      + '（首版真写错过这一处，用例当场抓住了它）',
+    find: `    const back = e?.payload?.retriedPendingId;
+    if (typeof back === 'string' && back !== '' && !isPendingEvent(e)) resolvedIds.add(back);`,
+    replace: `    const back = e?.payload?.retriedPendingId;
+    if (typeof back === 'string' && back !== '') resolvedIds.add(back);`,
+  },
+  {
+    name: 'Q9_storeErrorNameOnly', target: STORE, expect: 'detected',
+    why: '配额判定只认 `name === \'QuotaExceededError\'`：Safari 与老 Firefox 给的是别的'
+      + '形状（数字码 22 / 1014、`NS_ERROR_DOM_QUOTA_REACHED`），于是一整批浏览器上'
+      + '`storage_full` 这个档位永远不可达，而"存储写满"会退化成一次崩溃',
+    find: `  const name = typeof err.name === 'string' ? err.name : '';
+  if (name === 'QuotaExceededError' || name === 'NS_ERROR_DOM_QUOTA_REACHED') return true;
+  const code = typeof err.code === 'number' ? err.code : NaN;
+  return code === 22 || code === 1014;`,
+    replace: "  return err.name === 'QuotaExceededError';",
+  },
+  {
+    name: 'Q10_storeQuotaSilentlySwallowed', target: STORE, expect: 'detected',
+    why: '配额异常被**静默吞掉**（只置标记、不重抛）：写失败被伪装成写成功，'
+      + '正是 Global Constraint 3 禁止的静默降级——调用方再也无法知道"这条没记下来"',
+    find: `      if (isStoreFullError(err)) markStoreFull();
+      throw err;`,
+    replace: '      if (isStoreFullError(err)) markStoreFull();',
+  },
+  {
+    name: 'Q11_markStoreFullNotIdempotent', target: STORE, expect: 'detected',
+    why: '`markStoreFull` 不幂等：每次配额失败都再试着写一次元数据——'
+      + '在已经满了的存储上反复写，把"写满"变成一处自激循环（brief §2.2 的自反悖论）',
+    find: '    if (fullMarked) return false;\n    fullMarked = true;',
+    replace: '    fullMarked = true;',
+  },
+  {
+    name: 'Q12_readingMissedAlsoOnSkip', target: APP, expect: 'detected',
+    why: '跳过跟读也记成 `reading_missed`：用户主动跳过跟读被算成"念错"，'
+      + '跟读失败率从此虚高，而真凶（引擎听错）被这个噪声淹没',
+    find: `  function onWordReady() {
+    if (!machine.send('wordReady')) return;`,
+    replace: `  function onWordReady() {
+    record(store, 'reading_missed', {
+      sessionId, roundIndex: lastRoundIndex, wordId: null,
+      word: shownWord?.word ?? null, scene: shownWord?.scene ?? null,
+      transcript: null, reason: 'skipped',
+    }, clock);
+    if (!machine.send('wordReady')) return;`,
+  },
+  {
+    name: 'Q13_readingMissedBeforeMutualExclusion', target: APP, expect: 'detected',
+    why: '`reading_missed` 写在了"念对了"那条分支**之前**：一次判定落两条'
+      + '（`reading_done` + `reading_missed` 同时存在），跟读通过率与失败率都成了假数',
+    find: `    const verdict = checkSpeech(shownWord?.word ?? '', transcript);
+    if (verdict.said) {`,
+    replace: `    const verdict = checkSpeech(shownWord?.word ?? '', transcript);
+    record(store, 'reading_missed', {
+      sessionId, roundIndex: lastRoundIndex, wordId: null,
+      word: shownWord?.word ?? null, scene: shownWord?.scene ?? null,
+      transcript: verdict.transcript, reason: 'always',
+    }, clock);
+    if (verdict.said) {`,
+  },
+  // ⚠️ 这一批里**没有**"调用方冗余去重"那条等价变异体（原编号 Q14，已删除）。
+  // 它本来要证明的是：`app.mjs` 的 `openPending()` 里再加一层 `Set` 去重是**空的**
+  // （归并已经在 `pending.mjs` 的 `pendingFeedbackArchive` 里做过）。事实成立
+  // ——把它加回去，全仓测试确实全绿——但**探针证明不了它**：等价主张要过差分核对，
+  // 而差分视图按**模块路径**注册，`app.mjs` 没有视图（它是装配层，一个 `view()` 函数
+  // 得把整条挂载流程复刻一遍，成本远大于这一条的价值）。
+  // 于是处置是：**不登记**那条变异体，改成在 `pending-mount.test.mjs` 里直接钉住
+  // "入口给不出空列表"这个可观察行为（实测：把入口层的结果清空，8 条用例变红）。
+  // 留着这一段是为了让下一个人不必重新发现一遍"app.mjs 不能登记等价变异体"。
 ];
 
 // ─────────────────────────────────────────────────────────── 工具
@@ -1381,7 +1541,14 @@ function syntaxOk(source, rel) {
     const stripped = source
       .replace(/^export\s*\{[^}]*\}\s*from\s*['"][^'"]*['"];\s*$/gm, '')
       .replace(/^export /gm, '')
-      .replace(/^import .*?;$/gm, '');
+      // 单行 import（`import x from '…';`）
+      .replace(/^import .*?;$/gm, '')
+      // **多行 import**（`import {\n  a,\n  b,\n} from '…';`）。
+      // Task 9B 之前 `app.mjs` 的 import 全是单行的，这条缺陷一直没暴露；
+      // 它一旦漏掉，整个 P 系列都会以"变异体语法错误"收场（看起来像探针坏了，
+      // 而根因是这行正则）—— 与 Task 9 §5.4 那条 `export { … } from` 的坑同源。
+      // 剥掉之后不再检查这些行（它们本来也不参与变异），局限写在文件头。
+      .replace(/^import [\s\S]*?from\s*['"][^'"]*['"];\s*$/gm, '');
     // eslint-disable-next-line no-new-func
     new Function(stripped);
     return null;
@@ -1468,19 +1635,65 @@ const DIFF_VIEWS = {
       avail: wins.map((w) => mod.isSpeechAvailable(w)),
     });
   },
+  // Task 9B：`pending` 的差分视图。**目前由 Q14（调用方冗余去重）这一条等价主张使用**。
+  // 视图取的是这个模块真正承诺的东西：从事件流派生出的队列（每条欠账的 id / 原句 /
+  // 重试次数 / 是否已补交 / 排定时刻），输入域覆盖同 id 多次重试、已补交的指针、
+  // 旧版无 id 的事件、乱序、坏数据这些恰好踩在归并规则边界上的形状。
+  [PENDING]: (mod) => {
+    const ev = (ts, payload, type = 'feedback_pending', sessionId = 's1') => (
+      { ts, type, wordId: null, roundIndex: 1, sessionId, payload }
+    );
+    const PA = 'p_s1_1000';
+    const cases = [
+      [],
+      [ev(1_000, { sentence: 'a', pendingId: PA })],
+      [ev(1_000, { sentence: 'a', pendingId: PA }), ev(1_010, { sentence: 'a', pendingId: PA, retried: true, attempt: 1 })],
+      [ev(1_000, { sentence: 'a', pendingId: PA }), ev(1_010, { sentence: 'a', pendingId: PA, retried: true, attempt: 1 }),
+        ev(1_040, { sentence: 'a', pendingId: PA, retried: true, attempt: 2 }),
+        ev(1_130, { sentence: 'a', pendingId: PA, retried: true, attempt: 3 })],
+      [ev(1_000, { sentence: 'a', pendingId: PA }), ev(1_100, { sentence: 'a', verdict: 'correct', retried: true, retriedPendingId: PA }, 'feedback_ok')],
+      // 旧版事件（payload 里没有 id）→ 派生 id 必须与真实现一致
+      [ev(500, { sentence: 'legacy' })],
+      // 乱序 + 两条不同欠账
+      [ev(2_000, { sentence: 'b', pendingId: 'p_s1_2000' }), ev(1_000, { sentence: 'a', pendingId: PA })],
+      // 坏数据：不给数组 / 元素是 null
+      null, undefined, 'x', 42, [null, undefined, {}],
+    ];
+    return JSON.stringify(cases.map((c) => mod.pendingFeedbackArchive(c).map((it) => [
+      it.pendingId, it.sentence, it.autoAttempts, it.resolved, it.retried, it.failedAt, it.lastAttemptAt,
+    ])));
+  },
 };
 
 /**
  * 差分核对：变异体与真实现是否在给定输入域上给出完全相同的输出。
  * 目标模块没有定义视图时**返回不一致**（保守方向：等价主张证明不过，就按漏网处理），而不是抛错中断整轮。
+ *
+ * `PROBE_DIFF_DEBUG=1` 时把两侧的差异打出来——**等价主张失败时最需要的是"哪里不一样"**，
+ * 而只有 `agree=false` 一个布尔值的话，读的人分不清是"视图真的抓到了差异"还是
+ * "视图自己坏了/抛错了"（Task 9B 实测踩过：`view()` 抛错被静默吞成 agree=false，
+ * 看起来像一条 OVERCLAIM，实际是差分视图的实现问题）。
  */
 async function differentialAgreement(targetKey, pristinePath, mutantPath) {
   const view = DIFF_VIEWS[targetKey];
   if (!view) return { agree: false, real: '（无）', mutant: `未为 ${targetKey} 定义差分视图` };
   const load = async (p) => import(`${pathToFileURL(p).href}?v=${Date.now()}${Math.random()}`);
   const [real, mutant] = [await load(pristinePath), await load(mutantPath)];
-  const [a, b] = [view(real), view(mutant)];
-  return { agree: a === b, real: a, mutant: b };
+  const call = (mod, label) => {
+    try {
+      return { value: view(mod) };
+    } catch (err) {
+      return { value: `（差分视图在 ${label} 上抛错：${String(err?.message ?? err)}）`, threw: true };
+    }
+  };
+  const a = call(real, '真实现');
+  const b = call(mutant, '变异体');
+  if (a.value !== b.value && process.env.PROBE_DIFF_DEBUG === '1') {
+    console.log(`\n[差分调试] ${targetKey} 两侧输出不一致（视图抛错：real=${a.threw === true} mutant=${b.threw === true}）`);
+    console.log(`  真实现：${String(a.value).slice(0, 400)}`);
+    console.log(`  变异体：${String(b.value).slice(0, 400)}`);
+  }
+  return { agree: a.value === b.value, real: a.value, mutant: b.value };
 }
 
 // ─────────────────────────────────────────────────────────── 主流程

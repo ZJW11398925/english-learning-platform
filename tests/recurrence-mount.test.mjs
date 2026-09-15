@@ -11,13 +11,18 @@
 //   1. **回环不许重置排期**（feedback → rewrite → composing → feedback 再提交一次）；
 //   2. **两种复现模式不许合并**（识物命中 `recurrence_scene` / 手选 `recurrence_manual`）；
 //   3. **不许谎报换了场景**（场景未知或与上次相同时，`sceneChanged` 必须是 false）。
-import { test } from 'node:test';
+import { test, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
 
 import {
   harness, openCameraAndShoot, reachComposing, submitCompose, settleFeedback,
   manualRecognize, okRecognize,
+  disposeAllHarnesses,
 } from './helpers/mount-harness.mjs';
+
+// 每条用例之后拆掉 mount 挂的定时器（待补反馈的自动重试会挂 10 秒的 setTimeout，
+// 而 node --test 会等事件循环空掉才退出——不清的话每个挂载测试文件都白等 10 秒起）。
+afterEach(disposeAllHarnesses);
 import { btn, byTag, text } from './helpers/dom.mjs';
 import { INTERVALS_DAYS } from '../web/units/scheduler.mjs';
 

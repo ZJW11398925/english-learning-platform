@@ -33,6 +33,26 @@ test('EVENT_TYPES 覆盖设计文档 §5.1 的全部降级标签', () => {
   }
 });
 
+test('EVENT_TYPES 含 reading_missed，且与 reading_done 是两条并存的登记项', () => {
+  // Task 9B / `DEC-OPI-…73` 显式授权的契约变更：没有它，"用户念了却被判没说"的失败率
+  // 在事件流里完全看不见（`reading_done` 只在通过时落）。
+  assert.ok(EVENT_TYPES.includes('reading_missed'), '缺少 reading_missed');
+  assert.ok(EVENT_TYPES.includes('reading_done'), '念对了那一条照旧要在');
+  assert.equal(new Set(EVENT_TYPES).size, EVENT_TYPES.length, '事件表里不许有重名（重名会让口径悄悄合并）');
+});
+
+test('reading_missed 能被 recordEvent 正常落盘（它不只是表里的一个字符串）', () => {
+  const memory = [];
+  const store = { appendEvent: (e) => memory.push(e), readEvents: () => memory };
+  const e = recordEvent(store, 'reading_missed', {
+    sessionId: 's-1', wordId: null, roundIndex: 2, word: 'mug', transcript: 'I see a cup',
+  }, () => 99);
+  assert.equal(e.type, 'reading_missed');
+  assert.equal(e.roundIndex, 2);
+  assert.equal(e.payload.transcript, 'I see a cup', '原样转写必须进事件（它是复核引擎的唯一证据）');
+  assert.equal(memory.length, 1);
+});
+
 test('recordEvent 写入后可从 store 读回，且时间戳被填上', () => {
   const memory = [];
   const store = { appendEvent: (e) => memory.push(e), readEvents: () => memory };

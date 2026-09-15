@@ -1,3 +1,9 @@
+// 事件 schema 与落盘。契约：类型必须是 `EVENT_TYPES` 里登记过的一个（未登记即**响亮抛错**，
+// 不静默放行——放行会让事件表在若干轮之后变成一张谁也不知道有多少种的表）。
+//
+// 存储写满（配额异常）的处置见 `recordEvent` 的 JSDoc：**唯一的吞错点**，理由写在那里。
+import { isStoreFullError } from './store.mjs';
+
 export const EVENT_TYPES = [
   'session_start',
   'frame_rejected',
@@ -6,6 +12,20 @@ export const EVENT_TYPES = [
   'recognize_failed',
   'word_shown',
   'reading_done',
+  // 跟读**判定未通过**（用户念了，引擎也听清了，但那句话里没有目标词）。
+  // 与 `reading_done` **互斥**：一次跟读判定只落一条（判过了就是 done，没判过就是 missed）。
+  //
+  // 为什么必须有它（Task 9B，`DEC-OPI-…73` 显式授权的契约变更）：`reading_done` 只在通过时落，
+  // 于是"用户念了却被判没说"的失败率在事件流里**完全看不见**——而这正是判据层面
+  // 最需要的一个数（引擎听错、词表配错、口音问题都藏在它里面）。这是"能测量"层面的缺口，
+  // 与 Task 7 那条教训同源。
+  //
+  // 两个**不算** missed 的相邻档位（别混记）：
+  //   · 跳过跟读 → `skipped_reading`（那是用户的选择，不是判定失败；它也随
+  //     `compose_submitted.payload.skippedReading` 落盘）；
+  //   · 转写不可用 / 引擎报错 / 超时 → `speech_unsupported` 或**什么都不落**
+  //     （系统根本没判过，不能记成"用户念错了"）。
+  'reading_missed',
   'skipped_reading',
   'speech_unsupported',
   'compose_submitted',
@@ -57,11 +77,32 @@ export function validateEvent(e) {
  * 两个不同的数：同一帧发两次请求仍只算一轮。判据 B（`retry_rate`）的公式写在
  * `units/rounds.mjs` 的文件头，**别在别处另立一套**。
  *
- * @param {{ appendEvent: (e: object) => void }} store 注入的存储层（只用 appendEvent）
+ * ── 存储写满时的行为（Task 9B 的契约变更，逐条列出）────────────────────────────
+ *
+ * `store.appendEvent` 抛出的**配额异常**（`isStoreFullError` 认得的那几种形状）在这里
+ * 被翻译成"**一条都没有记下来**"：
+ *   · 返回值是 `null`（事件没落盘），**不再是抛错**；
+ *   · `store.markStoreFull()` 会被调一次（幂等），界面据此停止派发新任务并提示导出；
+ *   · **不重试**：存储已经满了，重试只是让同一个异常再发生一次。
+ *
+ * 为什么在这里吞掉而不是让它冒泡（这是本模块**唯一**一处吞错，理由要站得住）：
+ *   1. 落 `storage_full` 标签**本身也要写存储**——这是一处自反悖论（brief §2.2）。
+ *      若配额异常继续冒泡，`storage_full` 这条标签就永远落不下去，而调用点还会各自
+ *      用不同的方式处理它（现状就是如此：有的 catch 成一句界面文案，有的没有 catch）。
+ *   2. 它**不是编程错误**，也不该让用户看到崩溃：它是设计 §5.1 明确枚举的一个档位。
+ *      把它降级成"没记下来 + 界面提示 + 停止派发"才是诚实的处置。
+ *   3. **其它错误照旧抛**（`validateEvent` 不通过、非配额的写失败）——那些是编程错误
+ *      或未知故障，静默吞掉就会变成"记了其实没记"。
+ *
+ * 调用方**必须**检查返回值（`null` = 写不进去），并且在拿到 `null` 时：
+ * 不重试、不继续派发新任务、把这件事告诉用户。`web/app.mjs` 就是这么做的。
+ *
+ * @param {{ appendEvent: (e: object) => void, markStoreFull?: () => boolean }} store 注入的存储层
  * @param {string} type EVENT_TYPES 中登记的事件类型
  * @param {{ sessionId: string, wordId?: string|null, roundIndex?: number|null, [key: string]: unknown }} fields 见上
  * @param {() => number} [now] 时间戳注入点，默认 Date.now
- * @returns {{ ts: number, type: string, wordId: string|null, roundIndex: number|null, sessionId: string, payload: object }}
+ * @returns {{ ts: number, type: string, wordId: string|null, roundIndex: number|null, sessionId: string, payload: object } | null}
+ *   `null` 表示**这条事件没有被记下来**（存储写满）
  */
 export function recordEvent(
   store, type, { sessionId, wordId = null, roundIndex = null, ...payload }, now = Date.now,
@@ -69,6 +110,13 @@ export function recordEvent(
   const e = { ts: now(), type, wordId, roundIndex, sessionId, payload };
   const v = validateEvent(e);
   if (!v.ok) throw new Error(`非法事件: ${v.errors.join('; ')}`);
-  store.appendEvent(e);
+  try {
+    store.appendEvent(e);
+  } catch (err) {
+    if (!isStoreFullError(err)) throw err;
+    // 尽力为之后留一句话（幂等、失败不重试），然后如实返回"没记下来"。
+    store.markStoreFull?.();
+    return null;
+  }
   return e;
 }

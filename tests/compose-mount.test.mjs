@@ -10,10 +10,17 @@
 // 注入方式：`mount({ compose: { submitSentence } })`。假提交器让本文件不碰网络，
 // 于是"界面与事件对不对"与"网络路径对不对"两件事各自可测（后者在 compose.test.mjs
 // 与 feedback-endpoint.test.mjs 里）。
-import { test } from 'node:test';
+import { test, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
 
-import { reachComposing as reachComposingShared } from './helpers/mount-harness.mjs';
+import {
+  reachComposing as reachComposingShared,
+  disposeAllHarnesses,
+} from './helpers/mount-harness.mjs';
+
+// 每条用例之后拆掉 mount 挂的定时器（待补反馈的自动重试会挂 10 秒的 setTimeout，
+// 而 node --test 会等事件循环空掉才退出——不清的话每个挂载测试文件都白等 10 秒起）。
+afterEach(disposeAllHarnesses);
 import { btn, byTag, text } from './helpers/dom.mjs';
 import { FEEDBACK_FAIL_REASONS, feedbackEventFor } from '../web/units/compose.mjs';
 

@@ -13,10 +13,18 @@
 // 转写是**注入**进来的（`speechWin`）：浏览器里 `mount` 默认取 `globalThis`，
 // 而 Node 里没有 `SpeechRecognition` —— 于是不注入就正好是"转写不可用"那条降级路径，
 // 注入假引擎就是"可用"那条路径。两条路都真跑一遍，而不是在夹具里模拟判定。
-import { test } from 'node:test';
+import { test, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
 
-import { reachReading, fakeRecognition } from './helpers/mount-harness.mjs';
+import {
+  reachReading,
+  fakeRecognition,
+  disposeAllHarnesses,
+} from './helpers/mount-harness.mjs';
+
+// 每条用例之后拆掉 mount 挂的定时器（待补反馈的自动重试会挂 10 秒的 setTimeout，
+// 而 node --test 会等事件循环空掉才退出——不清的话每个挂载测试文件都白等 10 秒起）。
+afterEach(disposeAllHarnesses);
 import { btn, text } from './helpers/dom.mjs';
 
 /** 转写可用的夹具：`{ speechWin, speech }`（`speech` 用来驱动假引擎）。 */
@@ -72,6 +80,95 @@ test('念错（说成别的词）→ 留在跟读、如实说"这次没听到"�
   assert.match(shown, /这次没听到/, '要如实告诉用户这次没听到（而不是沉默或假装成功）');
   assert.match(shown, /mug/, '要说出没听到的是哪个词');
   assert.ok(btn(h.root, '跳过跟读'), '重试是同一格里的选择，跳过跟读这条出口必须留着');
+});
+
+// ── Task 9B：判定**没通过**要有事件（`DEC-OPI-…73` 授权的契约变更）──────────────
+//
+// 没有它的话，"用户念了却被判没说"的失败率在事件流里完全看不见（`reading_done` 只在
+// 通过时落）——引擎听错、词表配错、口音问题全都会藏在这个盲区里。
+
+test('念错 → 落一条 reading_missed，带目标词与**原样转写**（复核引擎有没有听错只能靠它）', async () => {
+  const { speech, over } = withSpeech();
+  const h = await reachReading(over);
+
+  const { clicked, rec } = startSpeaking(h, speech);
+  rec.say('I see a cup');
+  await clicked;
+
+  const missed = h.events.filter((e) => e.type === 'reading_missed');
+  assert.equal(missed.length, 1, '判定没通过必须落**一条** reading_missed');
+  assert.equal(missed[0].payload.word, 'mug', '要带目标词（不然不知道用户该念的是哪个词）');
+  assert.equal(missed[0].payload.transcript, 'I see a cup', '转写逐字带上（用户到底说了什么）');
+  assert.equal(missed[0].payload.scene, 'kitchen');
+  assert.equal(missed[0].roundIndex, 1, '跟读属于取词那一轮（它不是一次新的快门）');
+  assert.equal(h.events.filter((e) => e.type === 'reading_done').length, 0,
+    '与 reading_done **互斥**：一次跟读判定只落一条');
+});
+
+test('一次跟读判定只落一条：念对了就不会落 reading_missed（两者互斥）', async () => {
+  const { speech, over } = withSpeech();
+  const h = await reachReading(over);
+
+  const { clicked, rec } = startSpeaking(h, speech);
+  rec.say('a mug');
+  await clicked;
+
+  assert.equal(h.events.filter((e) => e.type === 'reading_missed').length, 0,
+    '念对了就不是"没通过"，不许两条都落');
+  assert.equal(h.events.filter((e) => e.type === 'reading_done').length, 1);
+});
+
+test('念错两次 → 两条 reading_missed（每一次判定都算，失败率才数得清）', async () => {
+  const { speech, over } = withSpeech();
+  const h = await reachReading(over);
+
+  const first = startSpeaking(h, speech);
+  first.rec.say('nope one');
+  await first.clicked;
+  const second = startSpeaking(h, speech);
+  second.rec.say('nope two');
+  await second.clicked;
+
+  const missed = h.events.filter((e) => e.type === 'reading_missed');
+  assert.equal(missed.length, 2, '每次判定算一条（只留最后一条的话，失败率的分母就错了）');
+  assert.deepEqual(missed.map((e) => e.payload.transcript), ['nope one', 'nope two']);
+});
+
+test('转写**不可用**不算 missed：系统没判过，不许记成"用户念错了"', async () => {
+  // 不注入 speechWin = Node/不支持的浏览器走降级路径（手动打勾 + speech_unsupported）。
+  const h = await reachReading();
+  assert.equal(h.events.filter((e) => e.type === 'speech_unsupported').length, 1);
+  assert.equal(h.events.filter((e) => e.type === 'reading_missed').length, 0,
+    '不可用时没判过 → 不能记 missed（否则"不支持率"会污染"判定失败率"）');
+  // 手动打勾照样进造句，也不落 missed
+  await btn(h.root, '我读过了').click();
+  assert.equal(h.machine.state, 'composing');
+  assert.equal(h.events.filter((e) => e.type === 'reading_missed').length, 0);
+});
+
+test('引擎报错 / 超时不算 missed（那两条路没有产出任何判定）', async () => {
+  const { speech, over } = withSpeech();
+  const h = await reachReading(over);
+
+  const { rec, clicked } = startSpeaking(h, speech);
+  rec.fail('no-speech');
+  await clicked;
+
+  assert.equal(h.events.filter((e) => e.type === 'reading_missed').length, 0,
+    '引擎报错是"这次没能听清"，不是"用户没说出目标词"——两个失败率的真凶不同，不能混记');
+  assert.match(text(h.root), /没能听清/);
+});
+
+test('跳过跟读不算 missed（那是用户的选择，另一档 skipped_reading）', async () => {
+  const { speech, over } = withSpeech();
+  const h = await reachReading(over);
+  await btn(h.root, '跳过跟读').click();
+
+  assert.equal(h.machine.state, 'composing');
+  assert.equal(h.events.filter((e) => e.type === 'reading_missed').length, 0,
+    '跳过跟读没有产生任何判定，不该被记成"念错"');
+  assert.equal(h.events.filter((e) => e.type === 'skipped_reading').length, 0,
+    '跳过跟读本来就不另开事件（Task 9 的裁决：它随 compose_submitted.payload.skippedReading 落盘）');
 });
 
 test('念错之后可以重试：第二次念对了照常前进（重试不新增状态机状态）', async () => {

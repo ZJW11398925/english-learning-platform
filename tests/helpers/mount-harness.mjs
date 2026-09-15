@@ -16,6 +16,29 @@ import assert from 'node:assert/strict';
 import { recognizeWithFallback as realRecognizeWithFallback } from '../../web/units/recognize.mjs';
 import { makeEl, btn, byTag, text } from './dom.mjs';
 
+/**
+ * 这一轮测试里创建过的所有 `mount()` 实例。
+ *
+ * **为什么需要它（Task 9B 实测）**：`mount()` 一进来就"接管上次留下的欠账"
+ * （设计 §5.1 的自动重试），于是**即使某条用例根本不关心待补反馈**，也可能挂着一个
+ * 10 秒的 `setTimeout`。而 `node --test` 会等事件循环空掉才退出 → 每个挂了定时器的
+ * **测试文件**都要多等 10 秒，仓里那时有三个 mount 测试文件，全量测试因此从
+ * 2 秒变成 260 秒（这个数字本身就是"有东西漏了"的证据，不是正常波动）。
+ *
+ * 用法：测试文件在顶部 `afterEach(disposeAllHarnesses)`（见各 mount 测试文件）。
+ * 这里用注册表而不是让每条用例自己收尾，是因为"忘了写收尾"是完全静默的
+ * ——漏一个人都看不出来，而注册表不需要每条用例都记得。
+ */
+const liveHarnesses = [];
+
+/** 拆掉这一轮里所有 mount 实例挂的定时器（`afterEach` 里调）。 */
+export function disposeAllHarnesses() {
+  while (liveHarnesses.length > 0) {
+    const h = liveHarnesses.pop();
+    try { h?.dispose?.(); } catch { /* 收尾不该把测试带崩 */ }
+  }
+}
+
 export const OK_STATS = { brightness: 128, laplacianVar: 200 };
 
 /**
@@ -141,6 +164,14 @@ export function fakeRecognition() {
  *     要测判定那条路就传 `{ SpeechRecognition: fakeRecognition().FakeRecognition }`。
  *   - `speechTimeoutMs`：单次转写的墙钟上限（默认是生产常量；测试用小值驱动"引擎不回调"那条路）
  *   - `words`：预置的词记录（模拟"上一次会话学完、现在到期了"）
+ *   - `priorEvents`：预置的历史事件（模拟"上一次会话留下的记录"）。它同时是
+ *     `store.readEvents()` 的返回值——待补反馈队列**从事件流派生**，所以"重开页面后
+ *     待补条目仍在"这条用例只能靠它构造现场（Task 9B）。
+ *   - `failAppendAfter` / `appendError`：让第 N 条之后的 `appendEvent` 抛错（模拟存储写满）。
+ *     默认 `appendError` 是一个**配额异常**（`QuotaExceededError`），要测别的写失败形状就传它。
+ *     这两个参数存在的理由与 `failNextTransaction` 同：**不许真的去写满存储**。
+ *   - `setTimeoutImpl` / `clearTimeoutImpl`：定时器注入点（待补重试的 10s/30s/90s 靠它驱动，
+ *     否则测试要么睡 130 秒、要么把设定值改小成另一个值——两者都会让这条链失去证据价值）
  *   - `clock` / `onCompose` / `cameraOptions`：透传给 mount()
  * @returns {Promise<object>} `{ root, calls, stream, store, mounted, events, sessionId, machine }`
  */
@@ -157,6 +188,11 @@ export async function harness({
   speechWin = null,
   speechTimeoutMs = undefined,
   words = null,
+  priorEvents = [],
+  failAppendAfter = null,
+  appendError = null,
+  setTimeoutImpl = null,
+  clearTimeoutImpl = null,
 } = {}) {
   const root = makeEl('div');
   const calls = { openCamera: [], grabFrame: [], recognize: [] };
@@ -191,10 +227,49 @@ export async function harness({
    * `readWords` 返回新对象（真实现是 JSON 往返，拿到的一定是新副本，不是内部引用）。
    */
   const wordMap = { ...(words ?? {}) };
+  const eventLog = [...priorEvents];
+  const quotaError = () => Object.assign(
+    new Error('模拟：存储写满（QuotaExceededError 形状）'),
+    { name: 'QuotaExceededError' },
+  );
+  /**
+   * 假 store 的"存储写满"判定（与真 `units/store.mjs` 同一个形状）。
+   *
+   * 为什么夹具必须有它：`recordEvent` 在配额异常上会调 `store.markStoreFull?.()` 并返回
+   * `null`；而界面靠 `store.isFull()` 决定"停止派发新任务"。夹具缺了这两个方法，
+   * 那条链在测试里就是**不可达**的——于是"存储满 → 停派发"永远只有想象，没有证据。
+   * 真实现是 `localStorage` 写失败才置起它；夹具直接由 `appendError`/`failAppendAfter`
+   * 决定（两者都表示"写不进去"），并且**幂等**、**不抛错**（照抄真实语义）。
+   */
+  let fullMarked = false;
   const store = {
-    appended: [],
+    appended: eventLog,
     words: wordMap,
-    appendEvent(e) { store.appended.push(e); },
+    appendEvent(e) {
+      if (failAppendAfter !== null && eventLog.length >= failAppendAfter) {
+        fullMarked = true;
+        throw appendError ?? quotaError();
+      }
+      if (appendError !== null) {
+        fullMarked = true;
+        throw appendError;
+      }
+      eventLog.push(e);
+    },
+    isFull: () => fullMarked,
+    markStoreFull: () => {
+      if (fullMarked) return false;
+      fullMarked = true;
+      return true;
+    },
+    /**
+     * 读回全部事件（**含 `priorEvents`**）。
+     *
+     * 真实现是 `localStorage` 的 JSON 往返，拿到的是**新副本**；夹具必须同样给副本，
+     * 否则"队列是事件流的视图"这条不变式会被夹具的共享引用掩盖掉（改一处两边都变，
+     * 而真实现里不会）。Task 9B 之前夹具没有这个方法——那时没有任何代码读回事件。
+     */
+    readEvents: () => eventLog.map((e) => ({ ...e, payload: { ...e.payload } })),
     readWords: () => ({ ...wordMap }),
     putWord(w) {
       wordMap[w.id] = { ...w, createdAt: w.createdAt ?? wordMap[w.id]?.createdAt ?? Date.now() };
@@ -209,7 +284,7 @@ export async function harness({
     return base(args);
   };
 
-  const mounted = await mount(root, {
+  const h = await mount(root, {
     doc: { createElement: makeEl },
     camera,
     store,
@@ -222,11 +297,20 @@ export async function harness({
     ...(sceneWords === null ? {} : { manualSceneWords: sceneWords }),
     ...(speechWin === null ? {} : { speechWin }),
     ...(speechTimeoutMs === undefined ? {} : { speechTimeoutMs }),
+    ...(setTimeoutImpl === null ? {} : { setTimeoutImpl }),
+    ...(clearTimeoutImpl === null ? {} : { clearTimeoutImpl }),
   });
-  return {
-    root, calls, stream, store, mounted, events: store.appended,
-    sessionId: mounted.sessionId, machine: mounted.machine,
+  const result = {
+    root, calls, stream, store, mounted: h, events: store.appended,
+    sessionId: h.sessionId, machine: h.machine,
+    /**
+     * 拆掉这份应用挂的定时器（`disposeAllHarnesses` 会替所有用例调它）。
+     * 只清定时器，不动事件流——断言读的是 store，不是定时器。
+     */
+    dispose: () => h.dispose?.(),
   };
+  liveHarnesses.push(result);
+  return result;
 }
 
 /**

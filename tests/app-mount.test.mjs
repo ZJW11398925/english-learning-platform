@@ -18,13 +18,18 @@
 // 走**真识物链路**的用例写成 `withFetch({ fetchImpl: okFetch, recognize: realRecognizeWithFallback })`：
 // `mount()` 有意不传 `fetchImpl`，"网络出口"就是全局 `fetch`，所以测试接管的是**真实那条路径**。
 // 用完必须调 `h.restoreFetch()`（用例中途抛错时，下一次 `withFetch()` 调用会兜底还原）。
-import { test } from 'node:test';
+import { test, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
 import { mount } from '../web/app.mjs';
 import {
   harness, openCameraAndShoot, withFetch, makeBlob, OK_STATS, okFetch, realRecognizeWithFallback,
   settleFeedback,
+  disposeAllHarnesses,
 } from './helpers/mount-harness.mjs';
+
+// 每条用例之后拆掉 mount 挂的定时器（待补反馈的自动重试会挂 10 秒的 setTimeout，
+// 而 node --test 会等事件循环空掉才退出——不清的话每个挂载测试文件都白等 10 秒起）。
+afterEach(disposeAllHarnesses);
 import { btn, byTag, text, errorText, makeEl } from './helpers/dom.mjs';
 
 // ───────────────────────────────────── 用例 ─────────────────────────────────────
