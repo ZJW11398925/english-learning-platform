@@ -43,6 +43,14 @@ import { createRoundCounter } from './units/rounds.mjs';
 import { nextState, dueWords } from './units/scheduler.mjs';
 import { checkSpeech, isSpeechAvailable } from './units/speak.mjs';
 import { submitSentence as realSubmitSentence, feedbackEventFor } from './units/compose.mjs';
+import {
+  PENDING_ENTRY_LABEL,
+  manualRetryCandidate,
+  pendingFeedbackQueue,
+  retryEventFor,
+  scheduledRetryAt,
+  withPendingId,
+} from './units/pending.mjs';
 
 export { createMachine, TRANSITIONS, STATES, REJECT_REASONS } from './units/state-machine.mjs';
 
@@ -100,6 +108,17 @@ function newSessionId() {
   if (typeof c?.randomUUID === 'function') return c.randomUUID();
   return `s-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
 }
+
+/** 存储写满时要落在界面上的一句话——**这一档的主出口是提示，不是标签**（brief §2.2）。 */
+const STORAGE_FULL_NOTICE = '这台手机的存储写满了，新的记录写不进去。'
+  + '请先打开「查看诊断页」把记录导出/抄下来，再清理浏览器存储；'
+  + '在腾出空间之前，新的练习任务先停一停（已经记下来的历史不会被覆盖）。';
+
+/** 写不进去时给动作按钮的一句短提示（比上面的通知短，用在按钮所在的屏上）。 */
+const STORAGE_FULL_SHORT = '存储写满，先别开新任务：请到诊断页把记录导出后清理空间。';
+
+/** 待补界面上"这条已经补上了"的标记（占位显示用的名字，测试与清单认它）。 */
+const PENDING_RESOLVED_LABEL = '已补交';
 
 /**
  * 可接受词集（`pickWord` 的输入）：**本轮场景允许学哪些词**。
@@ -180,7 +199,15 @@ export async function mount(root, deps = {}) {
     onCompose = null,
     speechWin = globalThis,
     speechTimeoutMs = SPEECH_LISTEN_TIMEOUT_MS,
+    setTimeoutImpl = null,
+    clearTimeoutImpl = null,
   } = deps;
+
+  // 定时器注入点（与 `clock` 同一个理由：**测试要能驱动时间**）。
+  // 待补重试的三档间隔是 10s / 30s / 90s，用真 `setTimeout` 的测试要么睡 130 秒、
+  // 要么把设定值改小成另一个数——后者会让"设定值就是 10/30/90"这条断言失去意义。
+  const setTimer = setTimeoutImpl ?? ((fn, ms) => globalThis.setTimeout(fn, ms));
+  const clearTimer = clearTimeoutImpl ?? ((t) => globalThis.clearTimeout(t));
 
   // 懒加载浏览器专属依赖：注入了什么就不 import 什么（Node 测试里全都注入，于是不碰这些模块）。
   const camera = givenCamera ?? await import('./units/camera.mjs');
@@ -200,6 +227,86 @@ export async function mount(root, deps = {}) {
     store = createStore({ localStorage: globalThis.localStorage, indexedDB: globalThis.indexedDB });
   }
   const sessionId = givenSessionId ?? newSessionId();
+
+  // ── Task 9B：待补反馈队列与存储写满的现场 ────────────────────────────────────
+  //
+  // **队列本身没有任何状态**：它是 `store.readEvents()` 每次现算出来的视图
+  // （`units/pending.mjs` 的文件头写了"权威是事件流"这条裁决）。
+  // 这里的三个变量全是**界面与调度**的现场，不是真相：
+  let viewingPending = false;      // 正在看"待补反馈"那一屏
+  let retryPendingId = null;       // 这一次提交是不是在补某一条待补条目（补交时的 pendingId）
+  let retrying = null;             // `{ pendingId, busy }`：手动补交进行中的界面状态
+  let retryTimer = null;           // 自动重试的定时器句柄（同一时刻只挂一个）
+
+  /**
+   * 拆掉这一份应用挂的定时器（**给测试用**：`node --test` 会等事件循环空掉才退出，
+   * 一个挂着的自动重试定时器会让整轮测试白等 10 秒）。
+   *
+   * 为什么不让浏览器也靠它收尾：页面卸载时定时器本来就会随页面一起消失；
+   * 这里只需要一个**确定性的出口**，让"这份 mount 实例挂了什么"可以被显式清掉。
+   */
+  function dispose() {
+    if (retryTimer !== null) clearTimer(retryTimer);
+    retryTimer = null;
+  }
+
+  /**
+   * 看当前这一刻的待补队列（**每次现算**：事件流是权威，页面上不缓存它的副本）。
+   *
+   * ⚠️ 这里有个**很容易踩的形状陷阱**（首版真踩了，见 `tests/pending-mount.test.mjs`）：
+   * `units/pending.mjs` 里所有导出的入参都是**原始事件数组**（`store.readEvents()` 的结果），
+   * 不是本函数返回的派生队列。把派生队列再喂给 `manualRetryCandidate` 只会得到 `null`
+   * ——"当前没有待补的反馈了"，而界面上明明列着一条。
+   * 需要"从队列里挑一条"时用 `openPending()`，需要"按事件算"时用 `readEvents()`。
+   */
+  const pendingList = () => {
+    if (typeof store.readEvents !== 'function') return [];
+    try {
+      return pendingFeedbackQueue(store.readEvents());
+    } catch {
+      // 事件读回来是坏数据（JSON 坏了等）不该白屏：读不到就当没有待补条目。
+      // ⚠️ 代价：那种情况下用户看不到自己的待补句子，诊断页会如实报"读不到记录"。
+      return [];
+    }
+  };
+
+  /** 原始事件流（`units/pending.mjs` 那几个函数的入参形状）。读不到就给空数组。 */
+  const allEvents = () => {
+    if (typeof store.readEvents !== 'function') return [];
+    try {
+      return store.readEvents();
+    } catch {
+      return [];
+    }
+  };
+
+  /**
+   * 还没补上的待补条目（界面上的入口数它，自动重试轮转也数它）。
+   *
+   * **不需要在这里去重**：`units/pending.mjs` 的 `pendingFeedbackArchive` 按 `pendingId`
+   * 归并，一条欠账不管重试失败几次都只产出一个条目——那里是"一条 = 一句"的唯一起源，
+   * 且由 `tests/pending.test.mjs` 钉住。这里再写一层 `Set` 就是"两处机制产出同一结果"：
+   * 变异体 `Q6` 证明了删掉那一层之后全仓测试照样全绿，也就是说**它没有任何证据**。
+   * 与其留一行没人验证的冗余，不如把这条不变式写在这儿。
+   */
+  const openPending = () => pendingList().filter((it) => !it.resolved);
+
+  /** 存储写满了没有（界面的"停止派发新任务"就是它）。 */
+  const storageFull = () => store.isFull?.() === true;
+
+  /** 写不进去时把话说清楚（并**不**吞掉：调用方该怎么处置还怎么处置）。 */
+  function noteWriteFailure(what) {
+    if (storageFull()) setError(`${what}：${STORAGE_FULL_NOTICE}`);
+    return null;
+  }
+
+  /** 一句话说清"什么时候再试"。 */
+  function retryTimingText(item) {
+    const at = scheduledRetryAt(item);
+    if (at === null) return '自动重试已用完，可以点「手动补交」再试一次。';
+    const waitSec = Math.max(0, Math.ceil((at - clock()) / 1000));
+    return waitSec <= 0 ? '马上会自动再试一次。' : `约 ${waitSec} 秒后会自动再试一次（也可以现在手动补交）。`;
+  }
 
   // ── 视图骨架 ────────────────────────────────────────────────────────────────
   const statusEl = doc.createElement('p');
@@ -275,8 +382,13 @@ export async function mount(root, deps = {}) {
   /** 是否该展示手选词包：两轮都落空、且用户还没挑过词。 */
   const manualPickNeeded = () => awaitingManualPick && shownWord === null;
 
-  /** 手选词包（`units/recognize.mjs` 里的预声明场景词，**不是**模型候选的兜底）。 */
-  const manualWords = () => sceneWords;
+  /**
+   * 手选词包（`units/recognize.mjs` 里的预声明场景词，**不是**模型候选的兜底）。
+   *
+   * 存储写满时给空包：手选出来的词要立刻写词记录与复现事件，写不进去就等于让用户
+   * 白做一轮（§5.1 的"停止派发新任务"）。**这一屏仍有「再拍一张」**，所以不是死路。
+   */
+  const manualWords = () => (storageFull() ? [] : sceneWords);
 
   /** 落空的说明：把手选的必要性讲清楚，并且**不假装**认出来了什么。 */
   function pickFailureHint() {
@@ -347,9 +459,10 @@ export async function mount(root, deps = {}) {
    * 而那一刻这个词已经学完了。挂在 done 上等于"必须走到最后一步才作数"，样本会系统性偏向
    * 愿意走完的人。
    *
-   * ⚠️ 存储写失败（配额满等）在这里只做到"给界面一句话 + 原样重抛"。项目至今**没有任何代码
-   * 发出 `storage_full` 标签**（Task 1 报告留档的缺口），本任务不擅自沿用别的档位去冒充它，
-   * 详见 task-9-report 的待裁决项。
+   * Task 9B 把"存储写满"这一档补成了可达路径：配额异常由 `store.mjs` 收敛成
+   * **置起 `isFull()` + 原样重抛**，所以这里能分辨出它并给出设计 §5.1 要求的那句话
+   * （停止派发新任务 + 提示导出），而不是一句笼统的"存储写入失败"。
+   * 非配额错误照旧原样重抛（未知故障不许被静默吞掉）。
    */
   function registerLearnedWord() {
     const word = shownWord?.word ?? null;
@@ -359,6 +472,10 @@ export async function mount(root, deps = {}) {
     try {
       enqueueWord(word, shownWord.scene ?? null, clock());
     } catch (err) {
+      if (storageFull()) {
+        setError(`这个词没能记进复现队列。${STORAGE_FULL_NOTICE}`);
+        return;
+      }
       setError(`这个词没能记进复现队列（存储写入失败，属于程序/存储问题）：${err?.message ?? err}`);
       throw err;
     }
@@ -476,6 +593,28 @@ export async function mount(root, deps = {}) {
       machine.send('readDone');
       return;
     }
+    // 判定**没通过**（Task 9B / `DEC-OPI-…73` 授权的契约变更）。落一条 `reading_missed`：
+    // "用户念了却被判没说"的失败率此前在事件流里完全看不见（`reading_done` 只在通过时落），
+    // 而它正是引擎听错、词表配错、口音问题唯一的共同出口。
+    //
+    // 三个边界（每一条都有用例钉住）：
+    //   · 与 `reading_done` **互斥**：上面那条分支已 return，一次判定只落一条；
+    //   · **跳过跟读不算 missed**（那是 `skipped_reading` 另一档，用户的选择，不是判定失败）：
+    //     这个函数只在用户真的点了「念出这个词」并拿到转写之后才会走到这里；
+    //   · **转写不可用不算 missed**：那种情况根本进不到本函数（`speechOk` 为假时走的是
+    //     手动打勾那条路，连引擎都不构造）——系统没判过，就不能记成"用户念错了"。
+    //   · 引擎报错 / 超时也**不算**：那两条在上面 `catch` 里 return 了，它们没产出任何判定。
+    // payload 带**目标词**与**原样转写**：转写是"用户到底说了什么"的唯一证据，
+    // 复核"引擎是不是听错了"只能靠它。
+    record(store, 'reading_missed', {
+      sessionId,
+      roundIndex: lastRoundIndex,
+      wordId: null,
+      word: shownWord?.word ?? null,
+      scene: shownWord?.scene ?? null,
+      transcript: verdict.transcript,
+      reason: 'word_not_found_in_transcript',
+    }, clock);
     speechAttempt = { busy: false, said: false, error: null, transcript: verdict.transcript };
     render(machine.state);
   }
@@ -539,10 +678,61 @@ export async function mount(root, deps = {}) {
       return b;
     };
 
+    // ── 待补反馈那一屏（Task 9B §5.1）────────────────────────────────────────────
+    //
+    // **它先于状态机那一屏**：待补界面是"任一屏都能打开的一个抽屉"，不是某个状态的分支。
+    // （首版把它嵌在 `case 'ready'` 里，于是从反馈屏点入口时什么都不会发生——
+    //  入口按钮每屏都挂着，界面却只在首页认它。`tests/pending-mount.test.mjs` 抓到了这一处。）
+    if (viewingPending) {
+      view.push(title(PENDING_ENTRY_LABEL));
+      view.push(hint('这些句子当时没拿到判定。原句一直留在这儿，一条都不会丢；'
+        + '下面可以手动再交一次（自动重试也会照常进行）。'));
+      const items = pendingList();
+      if (items.length === 0) {
+        view.push(hint('当前没有待补的句子。'));
+      } else {
+        // 同一条欠账的重试记录只显示一次（失败了几次在下面那句里说，不重复铺句子）。
+        const seenIds = new Set();
+        const shown = items.filter((it) => {
+          if (seenIds.has(it.pendingId)) return false;
+          seenIds.add(it.pendingId);
+          return true;
+        });
+        const list = doc.createElement('div');
+        list.className = 'pending-list';
+        for (const it of shown) {
+          const card = doc.createElement('div');
+          card.className = 'pending-item';
+          const line = doc.createElement('p');
+          // 原句**逐字**显示（不 trim、不截断）：它是用户写下的东西，也是这一切的意义所在。
+          line.textContent = String(it.sentence ?? '（没有记到句子）');
+          card.append(line);
+          const meta = doc.createElement('p');
+          meta.className = 'muted';
+          const tries = it.autoAttempts > 0 ? `已自动重试 ${it.autoAttempts} 次；` : '';
+          const state = it.resolved
+            ? `${PENDING_RESOLVED_LABEL}（判定已补上）`
+            : `还没补上——${tries}${retryTimingText(it)}`;
+          meta.textContent = `目标词：${it.word ?? '（没记到）'} · ${state}`;
+          card.append(meta);
+          list.append(card);
+        }
+        view.push(list);
+      }
+      action('手动补交', onManualRetry, storageFull() || openPending().length === 0);
+      action(`返回（${machine?.state ?? ''}）`, () => { viewingPending = false; render(machine.state); });
+      if (storageFull()) view.push(hint(STORAGE_FULL_NOTICE));
+      view.push(row);
+      return view;
+    }
+
     switch (state) {
       case 'ready': {
         view.push(title('拍一件你身边的东西'));
         view.push(hint('对准物体按「拍照」；画面太暗或太糊会当场退回重拍，不消耗识物调用。'));
+        // 存储写满（§5.1 那一档）：**停止派发新任务**并把出路说清楚（导出 + 清理空间）。
+        // 这是这一档的**主出口**——`storage_full` 标签是尽力而为（见 store.mjs 的自反悖论说明）。
+        if (storageFull()) view.push(hint(STORAGE_FULL_NOTICE));
         const reason = machine?.snapshot().lastRejectReason ?? null;
         if (reason !== null) view.push(hint(REJECT_HINT[reason] ?? '刚才那张没能用，重拍一张。'));
         // 到期复现（§3.3.2 / §3.4）：有到期词就催一次，并说明"换个地方"——复现走的是**同一条**
@@ -557,7 +747,7 @@ export async function mount(root, deps = {}) {
             + `请换一个地方重新拍一张（例如 ${RECURRENCE_SCENE_EXAMPLES}）。`
             + (others > 0 ? `另有 ${others} 个词也到期了，先取这一个就行。` : '')));
         }
-        action('拍照', onCapture);
+        action('拍照', onCapture, storageFull());
         break;
       }
       case 'capturing': {
@@ -717,6 +907,21 @@ export async function mount(root, deps = {}) {
     }
 
     view.push(row);
+    // 「待补反馈」入口（§5.1 明文要求的那一屏）：与下面那个诊断页链接一样**每屏都挂着**。
+    // 为什么不能只挂在首页：自动重试失败可能发生在任意一屏（用户正在造句、正在看反馈），
+    // 只在首页给入口的话，用户当场没有任何地方能知道"刚才那次补交又没成"。
+    // **只在真有待补/有归档时出现**：一个永远挂着"待补反馈（0 条）"的按钮只会让人以为出了事。
+    const openCount = openPending().length;
+    const archivedTotal = pendingList().length;
+    if (!viewingPending && (openCount > 0 || archivedTotal > 0)) {
+      const pendingBtn = doc.createElement('button');
+      pendingBtn.textContent = `${PENDING_ENTRY_LABEL}（${openCount} 条）`;
+      pendingBtn.addEventListener('click', () => { viewingPending = true; render(machine.state); });
+      const pendingRow = doc.createElement('p');
+      pendingRow.className = 'row';
+      pendingRow.append(pendingBtn);
+      view.push(pendingRow);
+    }
     // 诊断页入口（真机走查用）：把记录翻译成人话，省掉"开开发者工具读 JSON"那一步。
     // 每屏都挂着，因为走查时需要在任意时刻查看记录（例如第 25 步数快门次数）。
     const diag = doc.createElement('p');
@@ -778,6 +983,13 @@ export async function mount(root, deps = {}) {
     // 双击/连点：第二次点击时状态还是 ready（第一次的 await 还没回来），按钮仍在页面上。
     // 不挡就会开出两路 camera stream，其中一路永远不会被 stop（灯亮着、耗电）。
     if (opening) return;
+    // 存储写满 → 停止派发新任务（§5.1）。放在这里而不是只把按钮置灰：
+    // 按钮的 `disabled` 只挡鼠标，键盘/脚本触发的点击照样进得来。
+    if (storageFull()) {
+      setError(STORAGE_FULL_SHORT);
+      render(machine.state);
+      return;
+    }
     opening = true;
     const video = doc.createElement('video');
     video.playsInline = true;   // iOS：不加会被拉去全屏播放器
@@ -819,6 +1031,12 @@ export async function mount(root, deps = {}) {
 
   async function onShutter() {
     setError('');
+    // 存储写满 → 停止派发新任务（§5.1）：这一按不该再产生任何新的判定与调用。
+    if (storageFull()) {
+      setError(STORAGE_FULL_SHORT);
+      render(machine.state);
+      return;
+    }
     // 上一轮的结果清掉：手选词包只在"这一轮真的两轮都落空"时才该出现。
     lastPick = null;
     shownWord = null;
@@ -946,7 +1164,10 @@ export async function mount(root, deps = {}) {
     // 落盘（§3.4）：**提交成功那一刻**（已过空句拦截、已推进状态）落 `compose_submitted`。
     // 它是"成人愿为造句付多少成本"这批数据的载体——Task 6 曾刻意延后到本任务，免得与
     // Task 8 的反馈事件重复计数。
-    recordComposeSubmitted(text);
+    //
+    // 返回值在这里的用途只有一个：**写不进去时把出路说清楚**（存储写满 → 提示导出），
+    // 而不是让用户以为"提交过了"其实什么都没记下（§5.1 / Global Constraint 3）。
+    if (recordComposeSubmitted(text) === null) setError(`这句话没能记下来：${STORAGE_FULL_NOTICE}`);
     submitForFeedback(text);
   }
 
@@ -968,7 +1189,7 @@ export async function mount(root, deps = {}) {
    */
   function recordComposeSubmitted(text) {
     const s = machine.snapshot();
-    record(store, 'compose_submitted', {
+    return record(store, 'compose_submitted', {
       sessionId,
       roundIndex: lastRoundIndex,   // 造句属于取词那一轮（它不是一次新的快门）
       wordId: null,
@@ -980,6 +1201,168 @@ export async function mount(root, deps = {}) {
       dwellMs: composingEnteredAt === null ? null : clock() - composingEnteredAt,
       skippedReading: s.skippedReading,
     }, clock);
+  }
+
+  /**
+   * 记一条判定事件（`submitForFeedback` 与补交共用；**判定本体与字段顺序只有这一处**）。
+   *
+   * 三条不变量：
+   *   1. `...ev.payload` 放最前、`sessionId`/`roundIndex` 写在后面 → 服务端身份字段永远权威
+   *      （Task 8 复审 Important 1）；
+   *   2. 补交时带上 `retriedPendingId` 指针，让队列知道这条欠账被勾掉了
+   *      （`units/pending.mjs` 的 `retryEventFor` 已经把它放进 payload，这里只透传）；
+   *   3. **落盘失败（存储满）不抛**，交给调用方按"写不进去"处置（停止派发 + 提示导出）。
+   *
+   * @returns {object|null} 落下去的事件；`null` = 写不进去（配额满）
+   */
+  function recordVerdict(ev) {
+    try {
+      return record(store, ev.type, {
+        ...ev.payload,
+        sessionId,
+        roundIndex: lastRoundIndex,
+        wordId: null,
+      }, clock);
+    } catch (err) {
+      if (!storageFull()) throw err;
+      return null;
+    }
+  }
+
+  /**
+   * 补交一次：**复用同一个提交器与同一条判定记录路径**（不另写一条网络/落盘通路）。
+   *
+   * 两条口径：
+   *   · `retryPendingId` 让"这条判定是补交来的"在事件流里可区分（§5.1 与 Task 10 的分组依据）；
+   *   · **不落 `compose_submitted`**：补交不是一次新的产出，产出成本只在用户提交那一刻记一次。
+   *
+   * @param {{ pendingId: string, sentence: unknown, word: unknown, scene: unknown, autoAttempts: number }} item
+   * @param {number} attempt 这是第几次补交（1 起）
+   */
+  async function runPendingRetry(item, attempt) {
+    retryPendingId = item.pendingId;
+    let result;
+    try {
+      result = await runSubmitSentence({
+        sentence: item.sentence,
+        word: item.word ?? '',
+        scene: item.scene ?? '未知',
+      });
+    } finally {
+      retryPendingId = null;
+    }
+    const ev = retryEventFor(item, result, attempt, clock());
+    // 落盘的两种坏结局都不该把补交本身弄崩：
+    //   · 存储写满 → 判定没落下来，界面会如实说明并停止派发；
+    //   · 事件类型不合法（编程错误）→ 照旧响亮抛错，但先让调用方知道这次补交白做了。
+    if (ev.type === 'feedback_pending') {
+      let written;
+      try {
+        written = recordVerdict(ev);
+      } catch (err) {
+        setError(`补交结果没能记下来（这是程序缺陷）：${err?.message ?? err}`);
+        render(machine.state);
+        return result;
+      }
+      // 写不进去 → 这条欠账不会因为这次补交而减少，也不该继续排重试
+      // （再试一次还是写不进去，而"写不进去"有自己的档位）。
+      if (written === null) {
+        setError(`补交结果没能记下来：${STORAGE_FULL_NOTICE}`);
+      } else {
+        setError('这次补交还是没拿到反馈（记录里仍是"待补"，可以稍后再试）。');
+      }
+    } else {
+      try {
+        recordVerdict(ev);
+      } catch (err) {
+        setError(`补交结果没能记下来（这是程序缺陷）：${err?.message ?? err}`);
+      }
+    }
+    if (viewingPending) render(machine.state);
+    return result;
+  }
+
+  /**
+   * 排下一次自动重试（**同一时刻只挂一个定时器**）。
+   *
+   * 与 `units/pending.mjs` 的 `nextPendingRetry`（只回答"现在到点了没有"）分工不同：
+   * 这里排的是**将来**那一刻，所以取"所有还没补上的条目里最早的那个排定时刻"，
+   * 按它挂一个定时器。
+   *
+   * 三条停止条件，每一条都有理由：
+   *   · 存储写满 → 停（再试也只是让同一个写失败再发生一次，"写不进去"有自己的档位）；
+   *   · 一条都没排上（全补上了 / 自动次数都用完了）→ 停，剩下的交给手动补交；
+   *   · 已经挂着一个 → 不重复挂（同一时刻只挂一个，否则并发补交会互相打架）。
+   */
+  function scheduleAutoRetry() {
+    if (retryTimer !== null) return;
+    if (storageFull()) return;
+    let next = null;
+    for (const item of openPending()) {
+      const at = scheduledRetryAt(item);
+      if (at === null) continue;                     // 这条的自动重试已用完
+      if (next === null || at < next.at) next = { at, item };
+    }
+    if (next === null) return;
+    const delay = Math.max(0, next.at - clock());
+    retryTimer = setTimer(async () => {
+      retryTimer = null;
+      await retryFeedback(next.item);
+      // 这一次失败会在事件流里多出一条同 id 的 pending，于是"排定时刻"自然推到下一档；
+      // 成功则这条不再进轮转。两种情形都由同一句重排收口。
+      scheduleAutoRetry();
+    }, delay);
+  }
+
+  /**
+   * 补交一条（自动与手动共用同一条路）。
+   *
+   * 为什么自动重试**不占用一个界面状态**：用户可能正在写别的句子。补交结果是往事件流里
+   * 补一笔，界面只在"用户正看着待补那一屏"时才重绘（`viewingPending`）。
+   */
+  async function retryFeedback(item) {
+    const fresh = pendingList().find((it) => it.pendingId === item.pendingId) ?? item;
+    if (fresh.resolved) return;
+    retrying = { pendingId: fresh.pendingId, busy: true };
+    if (viewingPending) render(machine.state);
+    try {
+      await runPendingRetry(fresh, fresh.autoAttempts + 1);
+    } catch (err) {
+      // 提交器自己不抛错（契约），抛出来就是编程错误：显示 + 原样重抛（与控制台里的栈对上）。
+      setError(`补交时出错（这是程序缺陷，不是那条句子的问题）：${err?.message ?? err}`);
+      if (viewingPending) render(machine.state);
+      throw err;
+    } finally {
+      retrying = null;
+    }
+  }
+
+  /** 用户点了「手动补交」：补**最早那条还没补上的**（§5.1 的"用户可手动重试"）。 */
+  async function onManualRetry() {
+    if (storageFull()) {
+      setError(STORAGE_FULL_SHORT);
+      render(machine.state);
+      return;
+    }
+    const item = manualRetryCandidate(allEvents());
+    if (item === null) {
+      setError('当前没有待补的反馈了。');
+      render(machine.state);
+      return;
+    }
+    setError('');
+    await retryFeedback(item);
+    render(machine.state);
+  }
+
+  /**
+   * 打开页面时接管上次留下的欠账（**"重开页面后待补条目仍在"的落点**）。
+   *
+   * 队列不是内存里的东西，所以这里不需要"恢复"任何数据——只需要把定时器重新挂起来。
+   * 测试用一整套注入的定时器驱动它（见 `tests/pending-mount.test.mjs`）。
+   */
+  function resumePendingRetries() {
+    scheduleAutoRetry();
   }
 
   /**
@@ -1018,12 +1401,31 @@ export async function mount(root, deps = {}) {
       // 模型多给的键连 `result.feedback` 都不出、更进不了 payload，所以那三个名字永远不会撞上。
       // 之所以照样改（一行）：把这条不变式从"远处那个函数一直记得别加错键"挪到**这里写死**——
       // `feedbackEventFor` 将来要加一个键时，风险面就只剩它自己。
-      record(store, ev.type, {
+      //
+      // Task 9B 追加：**待补条目要有 id**（`withPendingId`），补交成功时靠它把这条勾掉。
+      // id 由事件本身派生（**sessionId + ts**），于是重开页面后派生出的 id 与当时那条一致。
+      //
+      // ⚠️ 顺序有讲究：**先把完整的字段拼齐（含 sessionId / roundIndex / wordId），再算 id**。
+      // 首版写成 `withPendingId({ payload: ev.payload })`——那个对象里没有 sessionId 与 ts，
+      // 于是 id 退化成 `p_nosession_0`，**同一会话里所有待补条目撞成同一个 id**：
+      // 补交一条就会把别的条目一起勾掉，而队列看起来"工作正常"。
+      const fields = {
         ...ev.payload,
         sessionId,
         roundIndex: lastRoundIndex,
         wordId: null,
-      }, clock);
+      };
+      const withId = ev.type === 'feedback_pending'
+        ? { ...fields, ...withPendingId({ sessionId, ts: clock(), payload: ev.payload }) }
+        : fields;
+      try {
+        record(store, ev.type, withId, clock);
+      } catch (err) {
+        // 存储写满不该把"我已经写下的这句话"变成一次崩溃：如实说 + 停止派发新任务。
+        // 非配额错误照旧重抛（那是未知故障，吞掉就变成"记了其实没记"）。
+        if (!storageFull()) throw err;
+        setError(`这次的判定没能记下来：${STORAGE_FULL_NOTICE}`);
+      }
     } catch (err) {
       // `submitSentence` 的契约是"不抛错"，抛出来就是编程错误：**原样重抛**（与控制台里的栈对上），
       // 但界面必须给一句话，不让用户面对"点了没反应"。
@@ -1039,7 +1441,29 @@ export async function mount(root, deps = {}) {
     // ——存储写失败时（`registerLearnedWord` 会原样重抛）上面那份反馈已经渲染出来了，
     // 不会因为一次写入失败把刚拿到的反馈弄丢。
     registerLearnedWord();
+    // 待补反馈（§5.1）：这次没拿到判定就排自动重试（10s / 30s / 90s）。
+    // **排在最后一行**与入队同一个理由：重试调度失败不该影响"用户已经看到结论"这件事。
+    scheduleAutoRetry();
   }
 
-  return { machine, sessionId, store, grab };
+  resumePendingRetries();
+
+  return {
+    machine, sessionId, store, grab,
+    /**
+     * 拆掉这一份应用挂的定时器（**给测试用**：`node --test` 会等事件循环空掉才退出，
+     * 一个挂着的自动重试定时器会让整轮测试白等 10 秒）。
+     * 浏览器里不需要它：页面卸载时定时器本来就会随页面一起消失。
+     */
+    dispose,
+    /**
+     * 重新评估"要不要排自动重试"（`scheduleAutoRetry` 的出口）。
+     *
+     * 生产路径上它由三处触发：mount 时接管上次欠账、每次提交拿到结论之后、每次重试跑完之后。
+     * 暴露出来是为了让测试能**确定性地**问一句"此刻该不该排重试"——
+     * 否则"存储满 → 不排重试"这条判断就只能靠推时间间接观察（那种测法分不清
+     * "被守卫挡住"与"本来就没排上"）。
+     */
+    resumePendingRetries,
+  };
 }

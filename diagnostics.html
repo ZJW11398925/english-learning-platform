@@ -42,8 +42,15 @@
   <p class="muted">一次快门 = 一行。看「次序号」是否 1、2、3… 连续。</p>
   <div id="rounds"></div>
 
-  <h2>造句与反馈（判定结果：一次判定一行）</h2>
+  <h2>跟读判定（一次判定一行）</h2>
   <p class="muted">
+    念对了记「跟读完成」，念了但没听出目标词记「跟读没通过」——两者<b>一次判定只出现一条</b>。
+    「跟读没通过」那一行右边有<b>引擎听到的原话</b>：它是不是听错了，看这一列就能判断。
+    跳过跟读、以及浏览器不支持语音识别的情况都<b>不算</b>没通过（系统根本没判过）。
+  </p>
+  <div id="reading"></div>
+
+  <h2>造句与反馈（判定结果：一次判定一行）</h2>  <p class="muted">
     同一句话在本页会出现两次：一次在这里（记「判定结果」），一次在下面「造句落盘」里（记「产出成本」）。
     那是同一句的两个用途，<b>不是写了两次</b>——数句子总数时只数「造句落盘」那张表。
   </p>
@@ -87,7 +94,10 @@ const TYPE_LABEL = {
   recognize_ok: '识物成功',
   recognize_failed: '识物失败（转手选）',
   word_shown: '显示了词',
-  reading_done: '跟读完成',
+  reading_done: '跟读完成（念对了）',
+  // Task 9B 新增：念了但没被判出目标词。**必须有人话标签**，否则这一条会在页面上
+  // 显示成英文原文——而那正是走查的人看不懂、于是当成"没事"的那一类。
+  reading_missed: '跟读没通过（没听到目标词）',
   skipped_reading: '跳过跟读',
   speech_unsupported: '浏览器不支持语音识别',
   compose_submitted: '提交了造句',
@@ -186,6 +196,7 @@ function render() {
   const words = readWords();
   const summaryEl = document.getElementById('summary');
   const roundsEl = document.getElementById('rounds');
+  const readingEl = document.getElementById('reading');
   const feedEl = document.getElementById('feedback');
   const composedEl = document.getElementById('composed');
   const recEl = document.getElementById('recurrence');
@@ -199,6 +210,7 @@ function render() {
   if (events.length === 0) {
     summaryEl.innerHTML = `<div class="card warn">还没有任何记录${missing ? '' : ''}。<br>先在应用页里拍一张照、走一轮，再回到这一页点「重新读取」。</div>`;
     roundsEl.innerHTML = '';
+    readingEl.innerHTML = '';
     feedEl.innerHTML = '';
     composedEl.innerHTML = '';
     recEl.innerHTML = '';
@@ -224,6 +236,12 @@ function render() {
     const recScene = list.filter((e) => e.type === 'recurrence_scene');
     const recManual = list.filter((e) => e.type === 'recurrence_manual');
     const composed = list.filter((e) => e.type === 'compose_submitted');
+    // 跟读判定：**通过与没通过分开数，但都在这里**（Task 9B）。
+    // "没通过"这一档此前根本不存在，于是"用户念了却被判没说"完全看不见。
+    const readDone = list.filter((e) => e.type === 'reading_done');
+    const readMissed = list.filter((e) => e.type === 'reading_missed');
+    const speechOff = list.filter((e) => e.type === 'speech_unsupported');
+    const readJudged = readDone.length + readMissed.length;
 
     // 判据 B 口径：轮数 = 不同 roundIndex 的个数（三类结论事件取并集）；重拍次数 = 轮数 - 1
     const roundCount = rs.length;
@@ -245,6 +263,9 @@ function render() {
         <div>拿到反馈 ${feedbackOk.length} 条 / 没拿到 ${feedbackPending.length} 条 / 模型说"拿不准" ${uncertain.length} 条</div>
         <div>提交造句 <b>${composed.length}</b> 次（产出成本；同一句的判定结果在上面那行里，不是两件事）</div>
         <div>复现：识物命中 <b>${recScene.length}</b> 条 / 自己手选 <b>${recManual.length}</b> 条（分列，不合并）</div>
+        <div>跟读判定 ${readJudged} 次：念对 <b>${readDone.length}</b> 条 / 没通过 <b>${readMissed.length}</b> 条
+             ${readJudged > 0 ? `（没通过占 ${(readMissed.length / readJudged * 100).toFixed(0)}%）` : ''}
+             ｜ 语音识别不可用 ${speechOff.length} 条（<b>不算</b>没通过）</div>
       </div>`);
 
     lines.push(`会话 ${String(sid).slice(0, 8)}：轮数=${roundCount} 重拍=${reShoots} 序号连续=${seqOk ? '是' : '否(缺' + gaps.join(',') + ')'}`);
@@ -252,6 +273,7 @@ function render() {
     lines.push(`  反馈: ok=${feedbackOk.length} pending=${feedbackPending.length} uncertain=${uncertain.length}`);
     lines.push(`  造句落盘: ${composed.length} 条（产出成本；与反馈事件是同一句的两笔账，不相加）`);
     lines.push(`  复现: 识物命中=${recScene.length} 手选=${recManual.length}`);
+    lines.push(`  跟读: 念对=${readDone.length} 没通过=${readMissed.length} 判定合计=${readJudged} 语音不可用=${speechOff.length}`);
   }
 
   summaryEl.innerHTML = cards.join('');
@@ -273,6 +295,30 @@ function render() {
   roundsEl.innerHTML = allRoundRows.length === 0
     ? '<p class="muted">还没有快门记录。去应用页拍一张照。</p>'
     : `<table><thead><tr><th>次序号</th><th>结果</th><th>（原始类型）</th><th>时间</th></tr></thead><tbody>${allRoundRows.join('')}</tbody></table>`;
+
+  // 跟读判定（Task 9B）：一次判定一行。"没通过"那一行把**引擎听到的原话**摊出来——
+  // 判断"是不是引擎听错了"只能靠这一列（这是新增这个事件类型的全部意义）。
+  const readRows = [];
+  for (const [, list] of sessions) {
+    for (const e of list) {
+      if (e.type !== 'reading_done' && e.type !== 'reading_missed') continue;
+      const p = e.payload ?? {};
+      const pass = e.type === 'reading_done';
+      const transcript = p.transcript === null || p.transcript === undefined || p.transcript === ''
+        ? '<span class="muted">（空：引擎什么都没听清）</span>'
+        : esc(p.transcript);
+      readRows.push(`<tr>
+        <td class="${pass ? 'ok' : 'warn'}">${esc(TYPE_LABEL[e.type] ?? e.type)}</td>
+        <td>${esc(p.word ?? '—')}</td>
+        <td>${transcript}</td>
+        <td class="muted">${new Date(e.ts ?? 0).toLocaleTimeString()}</td>
+      </tr>`);
+      lines.push(`  跟读[${e.type}] 目标词=${p.word ?? '-'} 听到的原话="${p.transcript ?? ''}"`);
+    }
+  }
+  readingEl.innerHTML = readRows.length === 0
+    ? '<p class="muted">还没有跟读记录。去应用页念一遍目标词。</p>'
+    : `<table><thead><tr><th>判定</th><th>目标词</th><th>引擎听到的原话</th><th>时间</th></tr></thead><tbody>${readRows.join('')}</tbody></table>`;
 
   // 造句与反馈
   const fRows = [];
