@@ -132,7 +132,13 @@ const isTimeoutAbort = (err, signal) => signal?.aborted === true
  *   `fetchImpl` 是注入点；**缺省在调用时**取全局 `fetch`（不是模块加载时绑定的那份），
  *   于是"谁是网络出口"始终只有一个决定点，浏览器与测试看到的都是同一个全局。
  *   `timeoutMs` 是这一腿的上限（默认 `RECOGNIZE_REQUEST_TIMEOUT_MS`），测试用小值即可。
- * @returns {Promise<{ candidates: Array<{label: string, score: number, scene: string}> }>}
+ * @returns {Promise<{ candidates: Array<{label: string, score: number, scene: string}>, latencyMs: number|null }>}
+ *   `latencyMs` 是**服务端自报的**耗时（响应信封里的 `latency_ms`，`server/index.mjs` 的 200 分支）。
+ *   服务端没给、或给的不是有限数时是 **`null`**——**绝不补 0**：
+ *   0 是一个合法且极好的耗时读数，用它代替"不知道"会让 `latency_p95` 看起来完美，
+ *   而真凶（写入路径漏字段）被这个漂亮的数字盖住（判据 A 的 p95 不能建立在编造的数据上）。
+ *   本模块**不自己计时**：端到端耗时包含浏览器那一层，与服务端自报的不是同一个数，
+ *   两者混进同一个字段会让"这一轮为什么慢"读不出来。
  * @throws {Error} `code === 'request_failed'`：HTTP 非 2xx，或 fetch 自身抛（断网 / 超时 / 被中断）。
  *   上限到点（含"响应头到了、body 还在流"时被中止）一律走这一档，消息里说清是超时。
  * @throws {Error} `code === 'response_invalid'`：响应不是合法 JSON（且**不是**被我们的上限中止的），
@@ -200,8 +206,20 @@ export async function recognize(blob, { fetchImpl = null, timeoutMs = RECOGNIZE_
     throw err;
   }
 
-  return { candidates: data.candidates };
+  return { candidates: data.candidates, latencyMs: serverLatencyOr(data) };
 }
+
+/**
+ * 取服务端自报的耗时，**或**在它不可用时给出 `null`。
+ *
+ * 为什么要单独一个函数：`?? 0` 那种写法（把"没拿到"写成 0）是一个**看起来无害**的改动，
+ * 后果却是让 `latency_p95` 永远完美、把"服务端没回这个数"这个真凶盖住。
+ * 把判断收在一处，它才有资格被一条测试与一个变异体钉住（`task-10-report.md` §3.1）。
+ *
+ * 判据是 `Number.isFinite`：`null` / `undefined` / `NaN` / `Infinity` / `'12'` 一律 `null`
+ * ——非有限数不是耗时读数，把它当读数会让 p95 算出 `NaN` 或字符串比较。
+ */
+const serverLatencyOr = (data) => (Number.isFinite(data?.latency_ms) ? data.latency_ms : null);
 
 /**
  * 一次取词的全过程：取一帧 → 端侧质检 → 最多问**两次**模型 → 仍落空则退到手选。
@@ -221,8 +239,13 @@ export async function recognize(blob, { fetchImpl = null, timeoutMs = RECOGNIZE_
  * @returns {Promise<{
  *   mode: 'ok'|'manual'|'frame_rejected', word: string|null,
  *   candidates: Array<object>, attempts: number, reason?: string, detail?: string,
+ *   latencyMs?: number|null,
  * }>}
  *   `reason` / `detail` 只在落空时出现（`frame_rejected` 的 `reason` 是质检枚举，不是本模块的失败枚举）
+ *   `latencyMs` 只在 `mode: 'ok'` 时出现，且**取的是取到词的那一次尝试**（不是两次相加，
+ *   也不是第一次失败的耗时）——判据 A 的 `latency_p95` 问的是"用户等这一轮等了多久"，
+ *   而这一轮终止于第一次成功。服务端没给就是 `null`（见 `recognize` 的 `@returns`）。
+ *   `frame_rejected` 不发请求，故**不带**这个字段（没有请求就没有耗时，别用一个 0 冒充它）。
  * @throws {RangeError} `judgeFrame` 的契约违约（编程错误，**原样往上冒**，绝不 catch 成一次"这张照片不行"）
  * @throws {Error} `grab()` 自身的错误（例如 `VIDEO_NOT_READY`：用户按快门太早，属用户情形）
  */
@@ -242,16 +265,22 @@ export async function recognizeWithFallback({
   for (let i = 0; i < 2; i += 1) {
     attempts += 1;
     try {
-      const { candidates } = await recognize(blob, { fetchImpl, timeoutMs });
+      const { candidates, latencyMs } = await recognize(blob, { fetchImpl, timeoutMs });
       lastCandidates = candidates;
       const picked = pickWord({ candidates, acceptableSets, exclude });
-      if (picked !== null) return { mode: 'ok', word: picked.word, candidates, attempts };
+      if (picked !== null) {
+        // 带的是**这一次成功尝试**的耗时（见 `@returns`）：attempts=2 时不把两次相加，
+        // 否则 p95 会把"重试救回来的那一轮"算成双倍慢。
+        return { mode: 'ok', word: picked.word, candidates, attempts, latencyMs };
+      }
       lastFailure = classifyMiss(candidates, { acceptableSets, exclude });
     } catch (err) {
       lastFailure = { reason: reasonOf(err), detail: detailOf(err) };
     }
   }
   // 两轮都落空：如实降级，**不假造词**。带出最后一次的候选供排查。
+  // 这里**不带** `latencyMs`：这一轮没有"取到词的耗时"可言（两次都失败），
+  // 交出一个数会让下游以为它是判据 A 的样本。
   return {
     mode: 'manual', word: null, candidates: lastCandidates, attempts, ...lastFailure,
   };
