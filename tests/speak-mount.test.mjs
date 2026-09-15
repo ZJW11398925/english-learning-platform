@@ -21,6 +21,7 @@ import {
   fakeRecognition,
   disposeAllHarnesses,
 } from './helpers/mount-harness.mjs';
+import { walk } from './helpers/dom.mjs';
 
 // 每条用例之后拆掉 mount 挂的定时器（待补反馈的自动重试会挂 10 秒的 setTimeout，
 // 而 node --test 会等事件循环空掉才退出——不清的话每个挂载测试文件都白等 10 秒起）。
@@ -329,4 +330,77 @@ test('进跟读这一格只落一条 speech_unsupported（按"进入这一格"�
   assert.equal(h.events.filter((e) => e.type === 'speech_unsupported').length, 1);
   assert.deepEqual(types, ['recognize_ok', 'speech_unsupported'],
     `这一格的事件应恰好是取词 + 降级标签两条，实测 ${types.join('/')}`);
+});
+
+// ─────────────────────── 引擎报错/超时的可观测性（DEC-OPI-…15）───────────────────────────
+//
+// 真机实测（2026-09-15）：引擎存在（弹了麦克风权限）、启动即败——按钮「正在听…」闪一下
+// 恢复原样，失败原因只落在 muted 灰字里（视觉上等于没反应），事件流里**零记录**。
+// 于是"跟读判定为什么是 0"在诊断页与导出里无从归因。裁决口径：
+//   · 每会话**首条**引擎失败落 `speech_unsupported`（事件契约头注释本就预设这条路，
+//     reason 区分 engine_error:<引擎码> 与 timeout——与"浏览器无构造器"的
+//     no_speech_recognition 分列）；
+//   · 界面上的失败提示不许再用 muted 灰字；
+//   · 判定语义一字不动：引擎失败不算"念错"（不落 reading_missed），跳过照样是设计内出口。
+
+/** 深遍历找文案匹配 re 的元素（假 DOM 没有 querySelector）。 */
+function elWithText(root, re) {
+  return walk(root).find((e) => re.test(String(e.textContent ?? '')));
+}
+
+test('引擎报错（语音服务不可达）→ 落一条 speech_unsupported（reason 带原样错误码），失败提示醒目', async () => {
+  const { speech, over } = withSpeech();
+  const h = await reachReading(over);
+  const { clicked, rec } = startSpeaking(h, speech);
+  rec.fail('network');
+  await clicked;
+
+  assert.equal(h.machine.state, 'reading', '引擎报错不是判定失败，留在跟读这一格');
+  assert.equal(h.events.filter((e) => e.type === 'reading_missed').length, 0,
+    '没产出判定就不许记成"念错"（reading_missed 的口径不变）');
+  const unsup = h.events.filter((e) => e.type === 'speech_unsupported');
+  assert.equal(unsup.length, 1, '引擎报错必须落一条语音不可用——事件流要能解释"跟读判定为什么是 0"');
+  assert.match(unsup[0].payload.reason, /^engine_error:/, 'reason 要与"浏览器无构造器"（no_speech_recognition）分列');
+  assert.match(unsup[0].payload.reason, /network$/, '引擎给的原样错误码要保留（现场归因靠它区分没网/没权限/没服务）');
+  assert.equal(unsup[0].payload.word, 'mug', '事件要说清是哪个词的跟读不可用');
+  assert.equal(unsup[0].roundIndex, 1, '与两类跟读事件同口径：带取词那一轮的轮次号');
+
+  const failLine = elWithText(h.root, /语音识别失败/);
+  assert.ok(failLine, '要把失败原样告诉用户');
+  assert.notEqual(failLine.className, 'muted',
+    '引擎报错不许用 muted 灰字（真机上灰字等于看不见——实机缺陷的直接成因）');
+  assert.match(text(h.root), /network/, '错误码同样要摊在界面上（不只落在事件里）');
+  assert.ok(btn(h.root, SPEAK_LABEL), '重试按钮必须还在');
+  assert.ok(btn(h.root, '跳过跟读'), '跳过这条设计内出口必须还在');
+});
+
+test('同会话引擎再次报错不重复落（每会话首条，重试失败不刷"语音不可用"的计数）', async () => {
+  const { speech, over } = withSpeech();
+  const h = await reachReading(over);
+  const first = startSpeaking(h, speech);
+  first.rec.fail('network');
+  await first.clicked;
+  const second = startSpeaking(h, speech);
+  second.rec.fail('service-not-allowed');
+  await second.clicked;
+
+  assert.equal(h.events.filter((e) => e.type === 'speech_unsupported').length, 1,
+    '重试失败不重复记——"多少会话语音不可用"这个数不许被重试灌水');
+  assert.equal(h.events.filter((e) => e.type === 'reading_missed').length, 0);
+});
+
+test('转写超时同样落一条（reason=timeout），且与引擎报错共享"每会话首条"预算', async () => {
+  const { speech, over } = withSpeech({ speechTimeoutMs: 30 });
+  const h = await reachReading(over);
+  const { clicked, rec } = startSpeaking(h, speech);
+  rec.fail('network'); // 先来一次引擎报错
+  await clicked;
+  const again = startSpeaking(h, speech);
+  // 什么都不回调，等上限到点（超时）
+  await new Promise((r) => setTimeout(r, 120));
+  await again.clicked;
+
+  const unsup = h.events.filter((e) => e.type === 'speech_unsupported');
+  assert.equal(unsup.length, 1, '超时与引擎报错共享每会话一条的预算');
+  assert.match(unsup[0].payload.reason, /^engine_error:/, '首条是引擎报错，reason 记引擎报错');
 });

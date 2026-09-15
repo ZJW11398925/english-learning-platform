@@ -23,8 +23,10 @@ export const EVENT_TYPES = [
   // 两个**不算** missed 的相邻档位（别混记）：
   //   · 跳过跟读 → `skipped_reading`（那是用户的选择，不是判定失败；它也随
   //     `compose_submitted.payload.skippedReading` 落盘）；
-  //   · 转写不可用 / 引擎报错 / 超时 → `speech_unsupported` 或**什么都不落**
-  //     （系统根本没判过，不能记成"用户念错了"）。
+  //   · 转写不可用 / 引擎报错 / 超时 → `speech_unsupported`，payload.reason 分列：
+  //     `no_speech_recognition`（浏览器无构造器）/ `engine_error:<引擎码>`（引擎启动即败）
+  //     / `timeout`——后两类每会话只落首条（DEC-OPI-…15：真机实测暴露"引擎秒败零记录"
+  //     让"跟读判定为什么是 0"无从归因；系统没判过，仍不许记成"用户念错了"）。
   'reading_missed',
   'skipped_reading',
   'speech_unsupported',
