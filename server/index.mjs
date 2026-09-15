@@ -507,9 +507,15 @@ function makeHandler({ env, fetchImpl, upstreamTimeoutMs, log }) {
  */
 export function createApp({
   env = process.env, fetchImpl = fetch, upstreamTimeoutMs = null, logImpl = null,
+  // 服务器工厂注入点：HTTPS 本机测试（server/https-local.mjs）传 `https.createServer`，
+  // 于是**超时与路由只写一处**，http 与 https 两条路行为同源，不会各改各的。
+  createServerImpl = createServer, serverOptions = undefined,
 } = {}) {
   const log = logImpl ?? ((line) => process.stderr.write(`${line}\n`));
-  const server = createServer(makeHandler({ env, fetchImpl, upstreamTimeoutMs, log }));
+  const handler = makeHandler({ env, fetchImpl, upstreamTimeoutMs, log });
+  const server = serverOptions === undefined
+    ? createServerImpl(handler)
+    : createServerImpl(serverOptions, handler);
   // 服务端自己的请求处理上限（见常量说明）：半开客户端不许一直占着 socket 与内存。
   // 放在工厂里而不是直接执行那一支：测试起的是同一个 createApp()，于是这道闸也被测到。
   server.headersTimeout = SERVER_HEADERS_TIMEOUT_MS;
