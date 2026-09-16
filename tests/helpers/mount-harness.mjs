@@ -14,6 +14,8 @@
 import { mount } from '../../web/app.mjs';
 import assert from 'node:assert/strict';
 import { recognizeWithFallback as realRecognizeWithFallback } from '../../web/units/recognize.mjs';
+import { createKeyring } from '../../web/units/keyring.mjs';
+import { fakeLocalStorage } from './fakes.mjs';
 import { makeEl, btn, byTag, text } from './dom.mjs';
 
 /**
@@ -76,15 +78,17 @@ export const manualRecognize = (over = {}) => async () => ({
  */
 const knob = (v) => (typeof v === 'function' ? v() : v);
 
-/** 识物路径：字段名与路径是客户端/服务端的契约，夹具顺手钉一下。 */
-const RECOGNIZE_PATH = '/api/recognize';
+/**
+ * 识物路径：直连之后识物请求打到模型服务的 chat/completions（Task 12A 转向）。
+ * 字段名/路径是客户端与模型服务之间的契约，夹具顺手钉一下。
+ */
+const RECOGNIZE_PATH = '/v1/chat/completions';
 
 /**
  * 把识物请求的目标补成绝对地址（顺便断言打的就是那条路径）。
  *
- * 为什么需要它：**浏览器里 `fetch('/api/recognize')` 合法，Node 里会被 fetch 直接拒**
- * （`Failed to parse URL from /api/recognize`）。夹具在 Node 里跑，所以要把相对路径补成绝对地址
- * ——这是"Node 与浏览器行为不同"的地方，补在夹具里而不是改被测代码。
+ * 为什么需要它：**浏览器里 fetch 相对路径合法，Node 里会被 fetch 直接拒**。夹具在 Node 里跑，
+ * 所以要把相对路径补成绝对地址——这是"Node 与浏览器行为不同"的地方，补在夹具里而不是改被测代码。
  */
 export const resolveUrl = (url) => {
   const p = String(url);
@@ -92,17 +96,20 @@ export const resolveUrl = (url) => {
   return p.startsWith('http') ? p : `http://localhost${p}`;
 };
 
+/**
+ * 直连时代识物链路的假上游：OpenAI 信封（choices[0].message.content 里是严格 JSON）。
+ * 夹具里是"识别出 mug"——链路走真模块时由它回话。
+ */
 export const okFetch = async (url) => {
   resolveUrl(url);
   return {
     ok: true,
     json: async () => ({
-      ok: true,
-      candidates: [{ label: 'mug', score: 0.9, scene: 'kitchen' }],
-      // 服务端 200 响应**永远带** `latency_ms`（`server/index.mjs` 的 200 分支实测如此，
-      // `tests/recognize-endpoint.test.mjs` 断言它是整数毫秒）。夹具照真形状给，
-      // 否则"耗时进事件流"这条链路在挂载测试里永远只走"服务端没给"那一半。
-      latency_ms: 1840,
+      choices: [{
+        message: {
+          content: JSON.stringify({ candidates: [{ label: 'mug', score: 0.9, scene: 'kitchen' }] }),
+        },
+      }],
     }),
   };
 };
@@ -110,7 +117,7 @@ export const okFetch = async (url) => {
 /** 造一个"HTTP 失败"的假响应（不去碰网络）。 */
 export const failingFetch = (status = 502) => async (url) => {
   resolveUrl(url);
-  return { ok: false, status, json: async () => ({ ok: false, error: 'upstream_failed' }) };
+  return { ok: false, status, json: async () => ({}), text: async () => '' };
 };
 
 /** 真实的 `recognizeWithFallback`：想要"整条真链路（含 grab / judgeFrame / pickWord）"时用它。 */
@@ -156,12 +163,28 @@ export function fakeRecognition() {
 }
 
 /**
+ * 夹具缺省注入的 Key 环：假存储里**已保存**一把合成 Key（`sk-test-…`，仓库里只允许合成钥匙）。
+ * 识物链路直连后没有 Key 就走不了（装配层会在按快门前拦下），所以默认配置好，
+ * 让骨架与识物接线的用例照常驱动；要测"无 Key"的用例显式传一个空存储的 keyring。
+ */
+export const HARNESS_SYNTHETIC_KEY = 'sk-test-harness-000000000000';
+
+export function defaultKeyring() {
+  const storage = fakeLocalStorage();
+  storage.setItem('elp.apiKey', HARNESS_SYNTHETIC_KEY);
+  return createKeyring({ storage });
+}
+
+/**
  * 挂一份应用。
  *
  * @param {object} [options]
  *   - `grabResult` / `grabError` / `openError`：相机注入（值或函数）
  *   - `recognize`：识物器（`recognizeWithFallback` 的形状）；缺省为"识别成功"的假识物器。
  *     要跑**真**识物链路就传 `realRecognizeWithFallback`，并用 `withFetch()` 接管全局 fetch。
+ *   - `keyring`：Key 环注入点（12A 起装配层从它读访问者的 API Key）。缺省为
+ *     "已配置合成 Key"的那一个（见 `defaultKeyring`）；传 `createKeyring({ storage: fakeLocalStorage() })`
+ *     即可测"未配置"的路径。
  *   - `sceneWords`：手选词包（只在与假识物器搭配时用得到）
  *   - `compose`：造句链路的注入点（`{ submitSentence }`，形状同 `units/compose.mjs`）。
  *     缺省不注入 = 走真模块；`tests/compose-mount.test.mjs` 用它把网络那一层换掉，
@@ -190,6 +213,7 @@ export async function harness({
   onCompose = null,
   cameraOptions = undefined,
   recognize = null,
+  keyring = null,
   sceneWords = null,
   compose = null,
   speechWin = null,
@@ -299,6 +323,7 @@ export async function harness({
     clock,
     onCompose,
     cameraOptions,
+    keyring: keyring ?? defaultKeyring(),
     recognizeWithFallback,
     ...(compose === null ? {} : { compose }),
     ...(sceneWords === null ? {} : { manualSceneWords: sceneWords }),

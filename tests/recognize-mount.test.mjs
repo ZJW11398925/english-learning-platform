@@ -43,19 +43,23 @@ async function pressShutter(h, times) {
   }
 }
 
-/** 上游给的是"可接受集里没有的词"（典型的内容配置问题）。 */
+/** 上游给的是"可接受集里没有的词"（典型的内容配置问题）。直连版：OpenAI 信封。 */
 const offSetFetch = async (url) => {
-  assert.ok(String(url).endsWith('/api/recognize'));
+  assert.ok(String(url).endsWith('/v1/chat/completions'), '直连后识物请求打到模型服务的 chat/completions');
   return {
     ok: true,
-    json: async () => ({ ok: true, candidates: [{ label: 'container', score: 0.95, scene: 'kitchen' }] }),
+    json: async () => ({
+      choices: [{
+        message: { content: JSON.stringify({ candidates: [{ label: 'container', score: 0.95, scene: 'kitchen' }] }) },
+      }],
+    }),
   };
 };
 
 /** 上游说"什么都没认出来"。 */
 const emptyFetch = async () => ({
   ok: true,
-  json: async () => ({ ok: true, candidates: [] }),
+  json: async () => ({ choices: [{ message: { content: JSON.stringify({ candidates: [] }) } }] }),
 });
 
 test('识别成功：界面显示取到的词、落 recognize_ok，并说明是第几次尝试取到的', async () => {
@@ -74,69 +78,26 @@ test('识别成功：界面显示取到的词、落 recognize_ok，并说明是�
   h.restoreFetch();
 });
 
-// ───────────────────── Task 10 收口：耗时进事件流（判据 A 的 latency_p95 的唯一数据来源）─────
-// 契约变更（`DEC-OPI-…87` 授权）：`recognize_ok.payload.latencyMs` = **服务端自报**的耗时。
-// 为什么必须落在这一条既有事件上、而不是新开一条：一轮只落一条结论事件的纪律
-// （下面 if/else 的三选一）不能破——多一条事件会让"识物成功率"与"取到词的轮数"混成一个数。
+// ───────────────────── Task 10 收口（12A 口径更新）：耗时进事件流（判据 A 的输入）─────
+// `recognize_ok.payload.latencyMs` 继续落在**这一条**既有事件上（一轮只落一条结论事件的纪律
+// 不变）。12A 起它的口径是**客户端 performance.now() 实测**"发请求到解出候选"——直连后不再有
+// 服务端自报的 `latency_ms`（口径变化的全文见 units/recognize.mjs 文件头）。
+// "取到词那一次的耗时（不两次相加）"这条口径由 tests/recognize.test.mjs 的注入时钟用例
+// 确定性地钉住；挂载这一层只有真时钟，只能钉"有数且是有限数"。
 
-const latencyFetch = (latencyMs) => async (url) => {
-  assert.ok(String(url).endsWith('/api/recognize'));
-  return {
-    ok: true,
-    json: async () => ({
-      ok: true,
-      candidates: [{ label: 'mug', score: 0.9, scene: 'kitchen' }],
-      ...(latencyMs === undefined ? {} : { latency_ms: latencyMs }),
-    }),
-  };
-};
-
-test('服务端给了 latency_ms → 原样进 recognize_ok.payload.latencyMs', async () => {
-  const h = await withFetch({ fetchImpl: latencyFetch(1840), recognize: realRecognizeWithFallback });
+test('recognize_ok 带 payload.latencyMs（12A 起是客户端实测口径）且是有限数', async () => {
+  const h = await withFetch({ fetchImpl: okFetch, recognize: realRecognizeWithFallback });
   await openCameraAndShoot(h);
   const ok = h.events.filter((e) => e.type === 'recognize_ok');
   assert.equal(ok.length, 1, '一轮仍只落一条结论事件（没有新开事件类型）');
-  assert.equal(ok[0].payload.latencyMs, 1840, '判据 A 的 p95 只能建立在这个数上');
-  // 反面对照：0 是一个"合法且极好"的耗时读数，绝不能被当成"没拿到耗时"的替身。
-  assert.notEqual(ok[0].payload.latencyMs, 0);
-  h.restoreFetch();
-});
-
-test('服务端没给 latency_ms → 如实缺失，**绝不补 0 也不估算**', async () => {
-  const h = await withFetch({ fetchImpl: latencyFetch(undefined), recognize: realRecognizeWithFallback });
-  await openCameraAndShoot(h);
-  const ok = h.events.filter((e) => e.type === 'recognize_ok');
-  assert.equal(ok.length, 1);
-  assert.equal('latencyMs' in ok[0].payload, false,
-    '没拿到就不写这个键——写 0 会让 p95 看起来完美，把"写入路径漏字段"这个真凶盖住');
-  assert.notEqual(ok[0].payload.latencyMs, 0);
-  h.restoreFetch();
-});
-
-test('第二次才取到 → latencyMs 是**那一次成功**的耗时，不是两次相加', async () => {
-  let call = 0;
-  const twoTryFetch = async (url) => {
-    call += 1;
-    assert.ok(String(url).endsWith('/api/recognize'));
-    return {
-      ok: true,
-      json: async () => (call === 1
-        ? { ok: true, candidates: [], latency_ms: 900 }                                    // 空候选 → 再问一次
-        : { ok: true, candidates: [{ label: 'mug', score: 0.9, scene: 'kitchen' }], latency_ms: 700 }),
-    };
-  };
-  const h = await withFetch({ fetchImpl: twoTryFetch, recognize: realRecognizeWithFallback });
-  await openCameraAndShoot(h);
-  const ok = h.events.filter((e) => e.type === 'recognize_ok');
-  assert.equal(ok.length, 1);
-  assert.equal(ok[0].payload.attempts, 2);
-  assert.equal(ok[0].payload.latencyMs, 700, '取到词的那一次（700），不是两次之和（1600）也不是第一次（900）');
+  assert.equal(typeof ok[0].payload.latencyMs, 'number', '直连后耗时是客户端实测值，不再来自服务端信封');
+  assert.ok(Number.isFinite(ok[0].payload.latencyMs), '实测值必然是有限数（缺数就不写键，绝不写 0 冒充）');
   h.restoreFetch();
 });
 
 test('帧被端侧拦下 → 一条事件都不落（没有请求就没有耗时，别用 0 冒充它）', async () => {
   const h = await withFetch({
-    fetchImpl: latencyFetch(1840),
+    fetchImpl: okFetch,
     recognize: realRecognizeWithFallback,
     grabResult: { blob: makeBlob(9), stats: DARK },
   });

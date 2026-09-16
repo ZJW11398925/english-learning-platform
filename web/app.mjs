@@ -43,6 +43,10 @@ import { createRoundCounter } from './units/rounds.mjs';
 import { nextState, dueWords } from './units/scheduler.mjs';
 import { checkSpeech, isSpeechAvailable } from './units/speak.mjs';
 import { submitSentence as realSubmitSentence, feedbackEventFor } from './units/compose.mjs';
+// Task 12A（项目转向 DEC-…23/26）：模型调用改浏览器直连，Key 由访问者在「设置」里填。
+// keyring 是纯逻辑模块（存储注入），静态 import 在 Node 里安全；本层是 Key 的**读取方**，
+// 存取/校验的职责都在 units/keyring.mjs。
+import { createKeyring } from './units/keyring.mjs';
 import {
   PENDING_ENTRY_LABEL,
   manualRetryCandidate,
@@ -201,6 +205,7 @@ export async function mount(root, deps = {}) {
     speechTimeoutMs = SPEECH_LISTEN_TIMEOUT_MS,
     setTimeoutImpl = null,
     clearTimeoutImpl = null,
+    keyring: givenKeyring = null,
   } = deps;
 
   // 定时器注入点（与 `clock` 同一个理由：**测试要能驱动时间**）。
@@ -227,6 +232,21 @@ export async function mount(root, deps = {}) {
     store = createStore({ localStorage: globalThis.localStorage, indexedDB: globalThis.indexedDB });
   }
   const sessionId = givenSessionId ?? newSessionId();
+
+  // ── Task 12A：访问者的 API Key（浏览器直连形态的"配置现场"）────────────────────
+  //
+  // Key 的存取/校验/清除都在 units/keyring.mjs；本层只在**发请求的那一刻**读它、在
+  // 设置界面里显示"配置过没有"。读写都可能碰真存储，包一层：存储异常时按"未配置"处理
+  // （装配层不因一次存储异常白屏），错误细节由 keyring 自己在保存路径上给。
+  const keyring = givenKeyring ?? createKeyring();
+  const apiKeyNow = () => {
+    try {
+      return keyring.loadKey();
+    } catch {
+      return null;
+    }
+  };
+  const hasKey = () => apiKeyNow() !== null;
 
   // ── Task 9B：待补反馈队列与存储写满的现场 ────────────────────────────────────
   //
@@ -392,9 +412,15 @@ export async function mount(root, deps = {}) {
 
   /** 落空的说明：把手选的必要性讲清楚，并且**不假装**认出来了什么。 */
   function pickFailureHint() {
-    const why = lastPick?.reason === 'request_failed' || lastPick?.reason === 'response_invalid'
-      ? '识物服务这次没能返回结果'
-      : '识物没能从这张照片里认出一个可用的词';
+    // 12A：auth_failed（Key 无效/未配置）与 rate_limited（限频）是访问者自己能修/能等的一档，
+    // 文案必须把"去哪儿修/该等多久"指出来；其余档照旧。
+    const why = lastPick?.reason === 'auth_failed'
+      ? '还没有配置可用的 API Key（或 Key 已失效）：识物是浏览器直连模型服务，需要你自己的 Key。请点「设置（API Key）」检查或重新粘贴'
+      : lastPick?.reason === 'rate_limited'
+        ? '模型服务说请求太频繁（限流）：稍等一两分钟再试'
+        : (lastPick?.reason === 'request_failed' || lastPick?.reason === 'response_invalid')
+          ? '识物服务这次没能返回结果'
+          : '识物没能从这张照片里认出一个可用的词';
     // 文案里**不写 markdown 的强调符**：`hint()` 走 `textContent`，`**` 会一字不差地显示给
     // 学习者（progress 必办 0）——这一屏正是真机清单第 19 项要看的那一屏。
     return `${why}（${lastPick?.attempts ?? 0} 次尝试）。下面这些词请你自己挑一个——`
@@ -1083,8 +1109,9 @@ export async function mount(root, deps = {}) {
       // 都来自这个返回值，不存在"界面说太暗、记录说太糊"的可能。
       // 这里**不传 fetchImpl**：让 `recognize()` 用它自己的缺省（全局 `fetch`），
       // 于是"谁是网络出口"只有一个决定点，注入式测试也能接管它。
+      // 12A：直连模型服务的 Key 在发请求那一刻从 keyring 读——设置里存好/清掉，下一拍就生效。
       picked = await runRecognize({
-        grab, frameQC, acceptableSets: ACCEPTABLE_SETS, exclude: [],
+        grab, frameQC, acceptableSets: ACCEPTABLE_SETS, exclude: [], apiKey: apiKeyNow(),
       });
     } catch (err) {
       // `grab()` 的错：只把"用户按快门太早"（VIDEO_NOT_READY）当成可预期的用户情形。
@@ -1142,12 +1169,14 @@ export async function mount(root, deps = {}) {
         word: picked.word,
         attempts: picked.attempts,
         candidates: (picked.candidates ?? []).map((c) => c.label),
-        // 服务端自报的耗时（判据 A 的 `latency_p95` 的**唯一**数据来源，`DEC-OPI-…87` 授权）。
-        // 它与判据 B 的 `attempts` 是两个数：`attempts` = 这一轮问过模型几次；
+        // 取到词那一次的耗时（判据 A 的 `latency_p95` 的**唯一**数据来源）。
+        // **口径在 12A 变化**（units/recognize.mjs 文件头有全文）：旧口径是服务端自报的
+        // 处理耗时；直连后是**客户端 performance.now() 实测**"发请求到解出候选"的耗时
+        // （含网络往返）。它与判据 B 的 `attempts` 仍是两个数：`attempts` = 这一轮问过模型几次；
         // 本字段 = 取到词的那一次等了多久（attempts=2 时也不把两次相加）。
         //
-        // **只在服务端真的给了有限数时才写这个键**：缺字段时写 0 会让 p95 看起来完美，
-        // 而真凶（服务端没回这个数）被一个漂亮数字盖住——"缺一个数"远好过"一个假数"。
+        // **只在实测值真的是有限数时才写这个键**：缺字段时写 0 会让 p95 看起来完美，
+        // 而真凶（时钟异常）被一个漂亮数字盖住——"缺一个数"远好过"一个假数"。
         // 判据统计那侧（`scripts/export.mjs`）只在事件里**真的没有**这个字段时报缺口，
         // 所以两边对"缺"的表达必须一致：**这里省略键，那边 `null` + `gaps`**。
         ...(Number.isFinite(picked.latencyMs) ? { latencyMs: picked.latencyMs } : {}),
