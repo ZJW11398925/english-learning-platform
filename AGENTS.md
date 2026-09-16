@@ -11,7 +11,9 @@
   2. **录音 = TTS 示范替代**（speechSynthesis 本地免费；SpeechRecognition 依赖退役，`aborted` 类平台限制不再影响主流程）
   3. **拍照 = 相册导入**（识物链路不变，输入源加相册选图）
   - 部署期契约断言（DEPLOYMENT/RUNTIME）已首次登记在 `DEC-…26` 载体上——runbook：漂移时 readiness 可查
-- 执行层现状：**远程仓库已建**：`https://github.com/ZJW11398925/english-learning-platform`（公开，gh 已登录）。**Task 12A、12B 均已完成并通过验收**：12A（`git:41f3b1a`，`VAL/VR-…2/6` PASS）= 识物/造句浏览器直连 + Key 管理（localStorage `elp.apiKey`）+ 设置入口与无 Key 引导；12B（`git:84933e9`，`VAL/VR-…10/15` PASS，裁决 `DEC-…16`）= 相册导入（与拍照同一条质检→识物链路）+ TTS 示范替代跟读判定（SpeechRecognition 退役，判定事件类型保留不再产生，自评/跳过零事件）。待办：12C（server/ 退役 + gh-pages 部署脚本 + README + playWord 墙钟收口）→ 开 Pages → `design_readiness` 对 RELEASE 诊断。
+- 执行层现状：**公测站点已上线**：`https://zjw11398925.github.io/english-learning-platform/`（GitHub Pages，gh-pages 分支根，实测 200）；仓库 `https://github.com/ZJW11398925/english-learning-platform`（公开，gh 已登录）。**Task 12A/12B/12C 全部完成并验收**（`VR-…6/15/20` 三连 PASS，裁决 `DEC-…d5d39b50.8/16/21`）：①浏览器直连 + Key 管理（localStorage `elp.apiKey`）；②相册导入 + TTS 示范替代跟读（SpeechRecognition 退役）；③server/ 整体退役 + `scripts/deploy-pages.mjs` 部署脚本 + README。测试基线 494/494，探针 155/155。
+- **readiness 首诊受阻已登记**（`DEC-…d5d39b50.24`）：`design_readiness` 对 RELEASE 返回 `READINESS_BASIS_INCOMPLETE`——工作区无在册 GATE_REQUIREMENT，16 工具面无显式闸门铸造入口。**下会话第一优先**：查 plan_build 是否为闸门铸造路径，补建后重跑 readiness；若不可达则作为 DMCP 使用反馈正式提出。
+- **公测前清单**（`DEC-…d5d39b50.21` 钉住）：①直连实弹探针跑一轮（probe-recognize-live / probe-feedback-live，自带 Key）并标定 12000/15000ms 超时真机值；②无 Key 线上引导路径人工走查；③改 web/ 后手动 `node scripts/deploy-pages.mjs`（无 CI）；④本机 `.env` 建议手删（已无代码引用）。
 - Task 1–10 + Task 9B：代码资产仍在（551/551 绿，`6758e44`）；分支 `feat/first-value-slice`，master 停在计划提交
 - **Task 11 契约级验收 = 挂起**（`docs/真机验证清单.md` 57 步清单与两份实验方案保留在册，重构后若重启验证可复用）
 - **预验收冒烟轮已完成**（`docs/预验收冒烟报告-2026-09-15.md`，决策 `DEC-OPI-5c134c67-9bdd-46d2-b9bc-7d51bfde8585.10`）：电脑侧步骤（1/2A/27/28）+ 导出链路干跑（54–57 命令格式）全部通过。**本机模拟器不可行**（固件 VT-x 关闭，硬门槛；软件模式 5 组参数全部崩溃）；**真机路线 = USB 真机 + `adb reverse tcp:8787 tcp:8787`**（localhost 即安全上下文，getUserMedia 免证书），android 插件按 serial 驱动可半自动跑清单 4–53 步。JDK 17 + Android SDK 已装在 `D:\android-sdk`，换 VT-x 可用机器即可起模拟器。
