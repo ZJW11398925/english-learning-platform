@@ -5,8 +5,8 @@
 // 取到了哪个词"。Key 由访问者提供（页面「设置」里保存到本机存储，键 `elp.apiKey`）、
 // 经参数进来；本模块**永不碰本机存储**（存取在 `./keyring.mjs`，装配层读好再传入）。
 //
-// ── 从 server/recognize-upstream.mjs 移植的口径（parity 由 tests/deepseek.test.mjs 钉住）──
-// 服务端代理退役后，原来在 `server/recognize-upstream.mjs` 里的**模型契约**整体搬到客户端：
+// ── 自旧服务端代理（已退役）逐字移植的口径（parity 由 tests/deepseek.test.mjs 钉住）──
+// 服务端代理退役后，原服务端代理里的**模型契约**整体搬到客户端：
 //   · 提示词 `RECOGNIZE_PROMPT`（逐字移植）；
 //   · 候选校验 `normalizeCandidate`（label 非空、score/scene 缺→null 不编 0）与
 //     `MAX_CANDIDATES` 三条截断（设计 §4.1）——**客户端现在是最后一道校验口**，
@@ -109,7 +109,7 @@ export const MANUAL_PICK_SCENE_WORDS = Object.freeze([
   'chair', 'lamp', 'bag', 'shoe', 'umbrella',
 ]);
 
-// ─────────────────── 从 server/recognize-upstream.mjs 移植的模型契约 ───────────────────
+// ─────────────────── 自旧服务端代理（已退役）逐字移植的模型契约 ───────────────────
 
 /** data URL 上限 32 MiB（官方限制）。超过就没有必要发出去——早点响亮失败，省一次往返。 */
 const MAX_DATA_URL_BYTES = 32 * 1024 * 1024;
@@ -117,7 +117,7 @@ const MAX_DATA_URL_BYTES = 32 * 1024 * 1024;
 export const MAX_CANDIDATES = 3;
 
 /**
- * 提示词：要求严格 JSON、按置信度排序、给场景标签。**逐字移植自 server/recognize-upstream.mjs**
+ * 提示词：要求严格 JSON、按置信度排序、给场景标签。**逐字移植自旧服务端代理**
  * （parity 闸：tests/deepseek.test.mjs 断言两份逐字相等，server 退役前不许漂移）。
  *
  * `label` 用**具体名词**（`mug` 而不是 `container`）是有意的：`pickWord` 只认预声明的可接受集，
