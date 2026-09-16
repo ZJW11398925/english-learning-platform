@@ -16,6 +16,8 @@
  *   R16 于 Task 12A 退役——直连改造重写了那一行，证据责任移交 D9，见变异体表内注释）
  * + Task 12A 的 14 个（浏览器直连 + Key 管理：keyring D1–D3、deepseek D4–D5、
  *   识物直连 D6–D10 与 D14、造句直连 D11–D13）
+ * + Task 12C 的 2 个（示范音墙钟：speak 单元 T9–T10——onend/onerror 都不来时
+ *   先 synth.cancel() 再收口，"正在播放…"绝不久挂）
  * + Task 12B 的 14 个（相册导入 + TTS 示范：album 单元 A1–A4、app 相册装配 A5–A6、
  *   speak(TTS) 单元 T1–T6、app TTS 装配 T7–T8；
  *   **退役**：K1–K7 与 P11–P14、Q13——它们的 SpeechRecognition 判定靶子已随 12B 删除，
@@ -1596,6 +1598,26 @@ const MUTANTS = [
       demoBusy = true;
       render(machine.state);
     }`,
+  },
+  // ── Task 12C：示范音的墙钟上限（12B 移交的遗留风险）：T9–T10 ──
+  // onend/onerror 谁都不来（引擎半死、voice 加载卡死、后台标签被限流）时 Promise 永久
+  // pending——界面永远停在「正在播放…」。循 recognize.mjs 请求上限的同一课装墙钟：
+  // 到点先 synth.cancel() 再拒绝收口。这两条分别打"钟没装"与"装了钟但不 abort"两种坏法。
+  {
+    name: 'T9_playWordTimeoutNeverArmed', target: SPEAK, expect: 'detected',
+    why: '墙钟根本不装：引擎半死时 Promise 永久 pending，「正在播放…」永远挂住——'
+      + '这恰是 12B 移交的那条遗留风险原样复活',
+    find: '    timer = doSetTimeout(() => {',
+    replace: '    timer = null; if (false) doSetTimeout(() => {',
+  },
+  {
+    name: 'T10_playWordTimeoutSkipsCancel', target: SPEAK, expect: 'detected',
+    why: '到点只拒绝、不让引擎闭嘴：收口虽然发生了，但半死的引擎可能还在出声/占着'
+      + '队列，下一句示范音会被它卡住——abort 必须先于收口（时序红线）',
+    find: `      try {
+        synth.cancel?.();
+      } catch { /* 引擎连 cancel 都不给时也要收口：收口不依赖引擎配合 */ }`,
+    replace: '      // 变异体：到点不再让引擎 cancel',
   },
 ];
 
