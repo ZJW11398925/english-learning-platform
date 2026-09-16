@@ -11,7 +11,7 @@
   2. **录音 = TTS 示范替代**（speechSynthesis 本地免费；SpeechRecognition 依赖退役，`aborted` 类平台限制不再影响主流程）
   3. **拍照 = 相册导入**（识物链路不变，输入源加相册选图）
   - 部署期契约断言（DEPLOYMENT/RUNTIME）已首次登记在 `DEC-…26` 载体上——runbook：漂移时 readiness 可查
-- 执行层现状：**远程仓库已建**：`https://github.com/ZJW11398925/english-learning-platform`（公开，master + feat/first-value-slice 双分支，gh 已登录）。**Task 12A 已完成并通过验收**（`git:41f3b1a`，`VAL-…d5d39b50.2`/`VR-…6` PASS，裁决 `DEC-…d5d39b50.8`）：识物/造句链路浏览器直连 api.deepseek.com，Key 存 localStorage（`elp.apiKey`），设置入口 + 无 Key 引导页，server/ 已停止被客户端调用（12C 才删）。待办：12B（相册导入 + TTS 示范）→ 12C（server 退役 + Pages 上线 + README）→ `design_readiness` 对 RELEASE 诊断 → 开 Pages。
+- 执行层现状：**远程仓库已建**：`https://github.com/ZJW11398925/english-learning-platform`（公开，gh 已登录）。**Task 12A、12B 均已完成并通过验收**：12A（`git:41f3b1a`，`VAL/VR-…2/6` PASS）= 识物/造句浏览器直连 + Key 管理（localStorage `elp.apiKey`）+ 设置入口与无 Key 引导；12B（`git:84933e9`，`VAL/VR-…10/15` PASS，裁决 `DEC-…16`）= 相册导入（与拍照同一条质检→识物链路）+ TTS 示范替代跟读判定（SpeechRecognition 退役，判定事件类型保留不再产生，自评/跳过零事件）。待办：12C（server/ 退役 + gh-pages 部署脚本 + README + playWord 墙钟收口）→ 开 Pages → `design_readiness` 对 RELEASE 诊断。
 - Task 1–10 + Task 9B：代码资产仍在（551/551 绿，`6758e44`）；分支 `feat/first-value-slice`，master 停在计划提交
 - **Task 11 契约级验收 = 挂起**（`docs/真机验证清单.md` 57 步清单与两份实验方案保留在册，重构后若重启验证可复用）
 - **预验收冒烟轮已完成**（`docs/预验收冒烟报告-2026-09-15.md`，决策 `DEC-OPI-5c134c67-9bdd-46d2-b9bc-7d51bfde8585.10`）：电脑侧步骤（1/2A/27/28）+ 导出链路干跑（54–57 命令格式）全部通过。**本机模拟器不可行**（固件 VT-x 关闭，硬门槛；软件模式 5 组参数全部崩溃）；**真机路线 = USB 真机 + `adb reverse tcp:8787 tcp:8787`**（localhost 即安全上下文，getUserMedia 免证书），android 插件按 serial 驱动可半自动跑清单 4–53 步。JDK 17 + Android SDK 已装在 `D:\android-sdk`，换 VT-x 可用机器即可起模拟器。
