@@ -74,11 +74,14 @@ const ERROR_TYPE_LABEL = {
 
 /** 落空的档位 → 给用户看的一句话：说清"这次为什么没拿到反馈"，但不把技术细节摊给他。 */
 const PENDING_HINT = {
-  timeout: '等服务端回话等太久了',
+  timeout: '等模型回话等太久了',
   request_failed: '这次请求没能发出去（可能是网络断了）',
-  http_error: '反馈服务这次没能返回结果',
-  response_invalid: '反馈服务这次返回的内容不能用',
+  http_error: '模型服务这次没能返回结果',
+  response_invalid: '模型服务这次返回的内容不能用',
   empty_sentence: '这句话是空的',
+  // 12A（直连 + 访问者自带 Key）：这两档用户自己能修/能等，文案必须把方向指对。
+  auth_failed: 'API Key 无效或还没有配置：到「设置（API Key）」检查或重新粘贴',
+  rate_limited: '模型服务说请求太频繁：稍等一会儿再交一次',
 };
 
 /**
@@ -120,6 +123,20 @@ const STORAGE_FULL_NOTICE = '这台手机的存储写满了，新的记录写不
 
 /** 写不进去时给动作按钮的一句短提示（比上面的通知短，用在按钮所在的屏上）。 */
 const STORAGE_FULL_SHORT = '存储写满，先别开新任务：请到诊断页把记录导出后清理空间。';
+
+/**
+ * 12A：还没有配置 API Key 时，ready 屏的引导文案（设计原则：给出路，不给死路）。
+ * 四个必须回答的问题：为什么需要、怎么拿、存在哪、安不安全（只存本机）。
+ * 文案里不写 markdown 强调符（`hint()` 走 textContent，`**` 会一字不差地显示出来）。
+ */
+const NO_KEY_GUIDANCE = '还没有配置 API Key：识物和造句都要调用 DeepSeek 的模型服务（按用量计费），'
+  + '所以需要你自己的 Key——注册 platform.deepseek.com 后在 API Keys 页面创建一串以 sk- 开头的密钥，'
+  + '点下面的「设置（API Key）」粘贴保存。Key 只保存在这台手机的浏览器里（本机存储），'
+  + '不会上传给任何人；清掉浏览器数据会连同 Key 一起删掉。';
+
+/** 设置抽屉里"未配置"时重复用的短句（与 ready 屏的引导同源，只短一点）。 */
+const SETTINGS_HINT = '在 platform.deepseek.com 创建 API Key（以 sk- 开头），粘贴到下面保存。'
+  + '它只存在这台手机的浏览器里，只随你的识物/造句请求发给模型服务。';
 
 /** 待补界面上"这条已经补上了"的标记（占位显示用的名字，测试与清单认它）。 */
 const PENDING_RESOLVED_LABEL = '已补交';
@@ -254,6 +271,7 @@ export async function mount(root, deps = {}) {
   // （`units/pending.mjs` 的文件头写了"权威是事件流"这条裁决）。
   // 这里的三个变量全是**界面与调度**的现场，不是真相：
   let viewingPending = false;      // 正在看"待补反馈"那一屏
+  let viewingSettings = false;     // 正在看"设置（API Key）"那一屏（12A：Key 的填/清/看状态）
   let retryPendingId = null;       // 这一次提交是不是在补某一条待补条目（补交时的 pendingId）
   let retrying = null;             // `{ pendingId, busy }`：手动补交进行中的界面状态
   let retryTimer = null;           // 自动重试的定时器句柄（同一时刻只挂一个）
@@ -718,6 +736,29 @@ export async function mount(root, deps = {}) {
     bodyEl.replaceChildren(...viewFor(state));
   }
 
+  /**
+   * 保存设置里填的 Key（12A）。校验与落盘全在 keyring（本层只路由它的结论）：
+   * 失败 → 错误区显示它给的、**给用户看**的那句话；成功 → 回到原屏（statusEl 上看得到）。
+   */
+  function onSaveSettings(inputEl) {
+    const r = keyring.saveKey(inputEl?.value);
+    if (!r.ok) {
+      setError(r.error);
+      render(machine.state);
+      return;
+    }
+    setError('');
+    viewingSettings = false;
+    render(machine.state);
+  }
+
+  /** 清除已存的 Key（幂等）：留在设置屏，让"未配置"的状态当场可见。 */
+  function onClearKey() {
+    keyring.clearKey();
+    setError('');
+    render(machine.state);
+  }
+
   function viewFor(state) {
     const view = [];
     const row = doc.createElement('div');
@@ -732,6 +773,28 @@ export async function mount(root, deps = {}) {
       row.append(b);
       return b;
     };
+
+    // ── 设置（API Key）那一屏（12A）──────────────────────────────────────────────
+    //
+    // 与待补反馈同一个抽屉模式：任一屏都能打开（ready/word 屏必须可达是底线，入口按钮
+    // 每屏都挂着）。**不回显明文**：已配置只说"已配置"，输入框永远从空白开始。
+    if (viewingSettings) {
+      view.push(title('设置 · API Key'));
+      view.push(hint(hasKey()
+        ? '已配置：Key 已保存在这台手机的浏览器里（出于安全，这里不显示它的内容）。'
+        : '未配置：还没有保存任何 Key。'));
+      view.push(hint(SETTINGS_HINT));
+      const keyInput = doc.createElement('input');
+      keyInput.type = 'password';
+      keyInput.placeholder = '粘贴以 sk- 开头的 API Key';
+      keyInput.value = '';                      // 永远从空白开始：配置状态靠上面那句话，不靠回显
+      view.push(keyInput);
+      action('保存', () => onSaveSettings(keyInput));
+      action('清除 Key', onClearKey);
+      action(`返回（${machine?.state ?? ''}）`, () => { viewingSettings = false; render(machine.state); });
+      view.push(row);
+      return view;
+    }
 
     // ── 待补反馈那一屏（Task 9B §5.1）────────────────────────────────────────────
     //
@@ -785,6 +848,9 @@ export async function mount(root, deps = {}) {
       case 'ready': {
         view.push(title('拍一件你身边的东西'));
         view.push(hint('对准物体按「拍照」；画面太暗或太糊会当场退回重拍，不消耗识物调用。'));
+        // 12A：无 Key 给**引导**而不是死路——为什么需要、怎么拿、存哪、只存本机，
+        // 以及出路（下面的「设置（API Key）」按钮）。拍照按钮照旧在：点它会被拦下并再指一次路。
+        if (!hasKey()) view.push(hint(NO_KEY_GUIDANCE));
         // 存储写满（§5.1 那一档）：**停止派发新任务**并把出路说清楚（导出 + 清理空间）。
         // 这是这一档的**主出口**——`storage_full` 标签是尽力而为（见 store.mjs 的自反悖论说明）。
         if (storageFull()) view.push(hint(STORAGE_FULL_NOTICE));
@@ -990,6 +1056,15 @@ export async function mount(root, deps = {}) {
     diagLink.textContent = '查看诊断页（把学习记录翻译成人话）';
     diag.append(diagLink);
     view.push(diag);
+    // 12A：设置（API Key）入口——ready/word 屏必须可达，索性与诊断页同款每屏都挂着
+    //（Key 可能在任何一屏用完/失效，用户不该为了换 Key 而丢掉当前进度）。
+    const settingsBtn = doc.createElement('button');
+    settingsBtn.textContent = '设置（API Key）';
+    settingsBtn.addEventListener('click', () => { viewingSettings = true; render(machine.state); });
+    const settingsRow = doc.createElement('p');
+    settingsRow.className = 'row';
+    settingsRow.append(settingsBtn);
+    view.push(settingsRow);
     return view;
   }
 
@@ -1026,6 +1101,14 @@ export async function mount(root, deps = {}) {
 
   async function onCapture() {
     setError('');
+    // 12A：没有 Key 就不打开相机、不进 capturing——直连识物必须有自己的 Key，
+    // 而 ready 屏上方已有完整引导；这里把出路再指一次（错误区是全色文本，弱光下也看得见）。
+    // 不落事件、不动状态机：什么都没发生，就没有什么可记（"缺 Key"不是一次识物失败）。
+    if (!hasKey()) {
+      setError('先配置 API Key 再开始：点下面的「设置（API Key）」粘贴保存（platform.deepseek.com 可以创建）。');
+      render(machine.state);
+      return;
+    }
     // 上一轮的取词结果作废（否则"重拍一张"之后界面还挂着旧的手选词包）。
     // 这里只清 `lastPick` / `shownWord`——**手选态 `awaitingManualPick` 不在这一处清**，
     // 它在 `onShutter` 开头清（见那里的 `awaitingManualPick = false`）。这样写是够的：
@@ -1314,11 +1397,12 @@ export async function mount(root, deps = {}) {
     retryPendingId = item.pendingId;
     let result;
     try {
+      // 12A：补交同样带上此刻的 Key——用户若在设置里修好了 Key，欠账的自动/手动补交就能救回来。
       result = await runSubmitSentence({
         sentence: item.sentence,
         word: item.word ?? '',
         scene: item.scene ?? '未知',
-      });
+      }, { apiKey: apiKeyNow() });
     } finally {
       retryPendingId = null;
     }
@@ -1458,7 +1542,11 @@ export async function mount(root, deps = {}) {
     }
     let result;
     try {
-      result = await runSubmitSentence({ sentence: text, word: shownWord?.word ?? '', scene: shownWord?.scene ?? '未知' });
+      // 12A：直连模型服务的 Key 在提交那一刻从 keyring 读（设置里存好/清掉，下一次提交就生效）。
+      result = await runSubmitSentence(
+        { sentence: text, word: shownWord?.word ?? '', scene: shownWord?.scene ?? '未知' },
+        { apiKey: apiKeyNow() },
+      );
       // 落事件：一条，且必定带原句（A4：句子就是语料，Task 9 的持久化与验证三都从这里读）。
       const ev = feedbackEventFor(result);
       // **顺序就是契约**（Task 8 复审 Important 1 的同形状）：`...ev.payload` 放在最前面，

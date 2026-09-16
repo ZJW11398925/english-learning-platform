@@ -1,8 +1,10 @@
 // tests/compose.test.mjs
 //
-// 造句反馈链路的单元测试（Task 8）。两个被测单元都在这里，因为它们是**一条**链路的两半：
-//   · `web/units/compose.mjs` —— 客户端那一腿（发请求 → 交给 `validateFeedback` → 分档）；
-//   · `server/feedback-upstream.mjs` —— 服务端给上游的模型契约（请求体形状 + 上游信封校验）。
+// 造句反馈链路的单元测试（Task 8；Task 12A 起传输层改为**浏览器直连** DeepSeek）。
+// 两个被测单元在这里，因为它们是**一条**链路的两半：
+//   · `web/units/compose.mjs` —— 客户端那一腿（直连发请求 → 交给 `validateFeedback` → 分档）；
+//   · `server/feedback-upstream.mjs` —— 服务端给上游的模型契约（Task 12C 才退役；12A 起它的
+//     提示词/信封校验已**移植**到客户端，本文件里的 parity 用例钉住两份逐字一致）。
 //
 // 这层要钉住的几件事，每一条都对应一种"改坏了还不报错"：
 //   ① **`ok` 的意思是"校验通过、可用"，不是"HTTP 200"**：200 带着一份不可用的响应体是
@@ -12,35 +14,46 @@
 //   ③ **原句永不丢**：成功与失败两条路上，返回值里都带着 `sentence`（原句一字不改）——
 //      这是"待反馈队列"与"句子语料"两条要求的共同前提。
 //   ④ **超时归超时，不归"响应非法"**：上限到点可能发生在 `fetch()` 那一句，也可能发生在
-//      `res.json()` 那一句（**响应头到了、body 还在流**）。后者若落进 `response_invalid`，
-//      它的处置方向（"改服务端或模型契约"）会把排查的人带偏——Task 7 已吃过一次这个亏。
+//      `res.json()` 那一句（**响应头到了、body 还在流**）。
 //   ⑤ **`uncertain` 是合法的判定**，走 `ok` 且带 `uncertain: true`；它与 `error_type` 是
-//      两个维度（`uncertain + grammar` 是契约合法的组合），所以任何按 `error_type` 的计数
-//      都必须**先按 verdict 分组**（见文件末尾那条用例）。
+//      两个维度。
+//   ⑥ **直连后的失败分档**（12A）：401 → `auth_failed`（Key 是访问者自己的，引导回设置页）、
+//      429 → `rate_limited`（处置是稍等）、没配 Key → 不发请求当场 `auth_failed`。
 //
-// 全部用例用注入的假 fetch，**不打真模型**（设计文档 §5.2）。真实调用由
-// `scripts/probe-feedback-live.mjs` 的实弹探针负责，结果记在 task-8-report.md。
+// 全部用例用注入的假 fetch 与合成钥匙（sk-test-…），**不打真模型**（设计文档 §5.2）。
 //
 // ⚠️ **本文件不 import `server/index.mjs`**（有意）：本文件被 `scripts/mutation-probe.mjs`
-// 复制进临时工作树跑，而 `server/index.mjs` 的路由表里写死了 `../web/` 的绝对路径、
-// 还牵进 `env`/`recognize-upstream`——在临时树里那会指向另一份 web/，基线会假红
-// （假红会让整轮探针结论作废，是本探针最忌讳的假信号）。所以"服务端整体请求上限"那条
+// 复制进临时工作树跑，而 `server/index.mjs` 的路由表里写死了 `../web/` 的绝对路径——
+// 在临时树里那会指向另一份 web/，基线会假红。所以"服务端整体请求上限"那条
 // 跨模块用例放在 `tests/feedback-endpoint.test.mjs` 里（那一份本来就不进探针）。
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
-import { submitSentence, FEEDBACK_FAIL_REASONS, FEEDBACK_TIMEOUT_MS, FEEDBACK_REQUEST_TIMEOUT_MS, feedbackEventFor } from '../web/units/compose.mjs';
 import {
-  feedbackUpstream, FEEDBACK_PROMPT, UPSTREAM_TIMEOUT_MS as FEEDBACK_UPSTREAM_TIMEOUT_MS,
-  UPSTREAM_FAILED, UPSTREAM_INVALID,
+  submitSentence, FEEDBACK_FAIL_REASONS, FEEDBACK_TIMEOUT_MS, FEEDBACK_REQUEST_TIMEOUT_MS,
+  feedbackEventFor, FEEDBACK_PROMPT,
   FEEDBACK_RULE_VERDICTS, FEEDBACK_RULE_ERROR_TYPES, FEEDBACK_RULE_CORRECT,
   FEEDBACK_RULE_FLAWED, FEEDBACK_RULE_UNCERTAIN,
+} from '../web/units/compose.mjs';
+import { chatUrl } from '../web/units/deepseek.mjs';
+import {
+  feedbackUpstream, FEEDBACK_PROMPT as SERVER_FEEDBACK_PROMPT, UPSTREAM_TIMEOUT_MS as FEEDBACK_UPSTREAM_TIMEOUT_MS,
+  UPSTREAM_FAILED, UPSTREAM_INVALID,
+  FEEDBACK_RULE_VERDICTS as SERVER_FEEDBACK_RULE_VERDICTS,
+  FEEDBACK_RULE_ERROR_TYPES as SERVER_FEEDBACK_RULE_ERROR_TYPES,
+  FEEDBACK_RULE_CORRECT as SERVER_FEEDBACK_RULE_CORRECT,
+  FEEDBACK_RULE_FLAWED as SERVER_FEEDBACK_RULE_FLAWED,
+  FEEDBACK_RULE_UNCERTAIN as SERVER_FEEDBACK_RULE_UNCERTAIN,
 } from '../server/feedback-upstream.mjs';
 import { recordEvent } from '../web/units/event-log.mjs';
 import { validateFeedback } from '../web/units/feedback.mjs';
 
 /** brief 里那份"合法的模型响应"，逐字保留（下面多条用例都以它为基准改一个字段）。 */
 const goodBody = { verdict: 'flawed', error_type: 'word_choice', rewrite: 'I use a mug.', note: '词选得更准' };
+
+/** 合成钥匙：形状合法、值是假的（仓库里只允许这种）。 */
+const SYNTHETIC_KEY = 'sk-test-compose-000000000000';
+const KEY = { apiKey: SYNTHETIC_KEY };
 
 /** 只回一个 JSON 响应的假 fetch；`seen` 收下每次调用的实参供断言。 */
 function fakeFetch(reply) {
@@ -53,8 +66,18 @@ function fakeFetch(reply) {
   return impl;
 }
 
+/** 服务端时代（原 server/index.mjs 信封）的 200 响应形状——**只**供 server 半区的用例用。 */
 const okReply = (body, extra = {}) => ({
   ok: true, status: 200, json: async () => body, text: async () => '', ...extra,
+});
+
+/**
+ * 直连时代的 200 响应：把四字段对象包进上游信封（choices[0].message.content 里是严格 JSON）。
+ * 客户端半区的用例都用它。
+ */
+const okEnvelope = (body, extra = {}) => ({
+  ok: true, status: 200, text: async () => '', ...extra,
+  json: async () => ({ choices: [{ message: { content: JSON.stringify(body) } }] }),
 });
 
 // ─────────────────────────────── brief Step 1 的五条（逐字保留）───────────────────────────────
@@ -62,7 +85,7 @@ const okReply = (body, extra = {}) => ({
 test('合法响应返回 status=ok 与校验后的值', async () => {
   const r = await submitSentence(
     { sentence: 'I use a cup.', word: 'mug', scene: 'kitchen' },
-    { fetchImpl: async () => ({ ok: true, json: async () => goodBody }) },
+    { fetchImpl: async () => okEnvelope(goodBody), ...KEY },
   );
   assert.equal(r.status, 'ok');
   assert.equal(r.feedback.verdict, 'flawed');
@@ -71,7 +94,7 @@ test('合法响应返回 status=ok 与校验后的值', async () => {
 test('响应缺字段时进 pending，绝不猜测填充', async () => {
   const r = await submitSentence(
     { sentence: 'x', word: 'mug', scene: 'kitchen' },
-    { fetchImpl: async () => ({ ok: true, json: async () => ({ verdict: 'correct' }) }) },
+    { fetchImpl: async () => okEnvelope({ verdict: 'correct' }), ...KEY },
   );
   assert.equal(r.status, 'pending');
   assert.ok(r.error.includes('rewrite'));
@@ -80,7 +103,7 @@ test('响应缺字段时进 pending，绝不猜测填充', async () => {
 test('HTTP 失败时进 pending 并保留原句', async () => {
   const r = await submitSentence(
     { sentence: 'I use a cup.', word: 'mug', scene: 'kitchen' },
-    { fetchImpl: async () => ({ ok: false, status: 500, json: async () => ({}) }) },
+    { fetchImpl: async () => ({ ok: false, status: 500, json: async () => ({}), text: async () => '' }), ...KEY },
   );
   assert.equal(r.status, 'pending');
   assert.equal(r.sentence, 'I use a cup.');
@@ -89,7 +112,10 @@ test('HTTP 失败时进 pending 并保留原句', async () => {
 test('uncertain 是 ok 状态但要带 uncertain 标记（便于单独统计）', async () => {
   const r = await submitSentence(
     { sentence: 'x', word: 'mug', scene: 'kitchen' },
-    { fetchImpl: async () => ({ ok: true, json: async () => ({ verdict: 'uncertain', error_type: 'none', rewrite: null, note: '拿不准' }) }) },
+    {
+      fetchImpl: async () => okEnvelope({ verdict: 'uncertain', error_type: 'none', rewrite: null, note: '拿不准' }),
+      ...KEY,
+    },
   );
   assert.equal(r.status, 'ok');
   assert.equal(r.uncertain, true);
@@ -99,7 +125,7 @@ test('空句子在发请求之前就被拒（不消耗调用）', async () => {
   let called = false;
   const r = await submitSentence(
     { sentence: '   ', word: 'mug', scene: 'kitchen' },
-    { fetchImpl: async () => { called = true; return { ok: true, json: async () => goodBody }; } },
+    { fetchImpl: async () => { called = true; return okEnvelope(goodBody); }, ...KEY },
   );
   assert.equal(r.status, 'pending');
   assert.equal(r.error, 'empty_sentence');
@@ -111,16 +137,17 @@ test('空句子在发请求之前就被拒（不消耗调用）', async () => {
 test('空句只在**一个字都没有**时才算空：纯空白也算空，而带内容的句子一字不改地发出去', async () => {
   // 空白只用来判断"是不是空的"，**不 trim 它**：交付给模型的必须是用户写下的原文
   // （前后的空格是他打的字，不是我们的格式偏好）。
-  const f = fakeFetch(okReply(goodBody));
+  const f = fakeFetch(okEnvelope(goodBody));
   const sent = '  I use a cup.  ';
-  const r = await submitSentence({ sentence: sent, word: 'mug', scene: 'kitchen' }, { fetchImpl: f });
+  const r = await submitSentence({ sentence: sent, word: 'mug', scene: 'kitchen' }, { fetchImpl: f, ...KEY });
   assert.equal(r.status, 'ok');
   assert.equal(f.seen.length, 1, '有内容的句子必须真的发出去');
-  assert.equal(JSON.parse(f.seen[0].init.body).sentence, sent, '原句一字不改地交给服务端');
+  const sentBody = JSON.parse(f.seen[0].init.body);
+  assert.ok(sentBody.messages[1].content.includes(sent), '原句一字不改地放进用户消息（不 trim）');
 
   for (const blank of ['', '   ', '\n\t ']) {
-    const f2 = fakeFetch(okReply(goodBody));
-    const r2 = await submitSentence({ sentence: blank, word: 'mug', scene: 'kitchen' }, { fetchImpl: f2 });
+    const f2 = fakeFetch(okEnvelope(goodBody));
+    const r2 = await submitSentence({ sentence: blank, word: 'mug', scene: 'kitchen' }, { fetchImpl: f2, ...KEY });
     assert.equal(r2.status, 'pending');
     assert.equal(r2.error, FEEDBACK_FAIL_REASONS.EMPTY_SENTENCE);
     assert.equal(f2.seen.length, 0, `${JSON.stringify(blank)} 不该发起请求（每一次调用都要花钱）`);
@@ -129,25 +156,38 @@ test('空句只在**一个字都没有**时才算空：纯空白也算空，而�
 
 test('sentence 不是字符串（读不到输入框等）同样在发请求之前被拒', async () => {
   for (const bad of [undefined, null, 42, {}, ['I use a cup.']]) {
-    const f = fakeFetch(okReply(goodBody));
-    const r = await submitSentence({ sentence: bad, word: 'mug', scene: 'kitchen' }, { fetchImpl: f });
+    const f = fakeFetch(okEnvelope(goodBody));
+    const r = await submitSentence({ sentence: bad, word: 'mug', scene: 'kitchen' }, { fetchImpl: f, ...KEY });
     assert.equal(r.status, 'pending');
     assert.equal(r.error, FEEDBACK_FAIL_REASONS.EMPTY_SENTENCE);
     assert.equal(f.seen.length, 0, `${JSON.stringify(bad) ?? String(bad)} 不该发起请求`);
   }
 });
 
-// ─────────────────────────────── 请求体形状：服务端契约的唯一决定点 ───────────────────────────────
+// ─────────────────────────────── 请求体形状：直连契约的唯一决定点 ───────────────────────────────
 
-test('请求形状：POST /api/feedback、JSON、字段只带 sentence/word/scene', async () => {
-  const f = fakeFetch(okReply(goodBody));
-  await submitSentence({ sentence: 'I use a cup.', word: 'mug', scene: 'kitchen' }, { fetchImpl: f });
-  assert.equal(f.seen.length, 1, '一次造句 = 一次上游调用（不做隐式重试）');
+test('直连契约：POST /v1/chat/completions、Bearer Key、system+user 两条消息、JSON 模式、低温度', async () => {
+  const f = fakeFetch(okEnvelope(goodBody));
+  await submitSentence({ sentence: 'I use a cup.', word: 'mug', scene: 'kitchen' }, { fetchImpl: f, ...KEY });
+  assert.equal(f.seen.length, 1, '一次造句 = 一次模型调用（不做隐式重试）');
   const { url, init } = f.seen[0];
-  assert.equal(url, '/api/feedback', '路径写死在链路里，调用方改不了它要打哪儿');
+  assert.equal(url, 'https://api.deepseek.com/v1/chat/completions', '转向契约写死的直连地址');
   assert.equal(init.method, 'POST');
   assert.equal(init.headers['content-type'], 'application/json');
-  assert.deepEqual(JSON.parse(init.body), { sentence: 'I use a cup.', word: 'mug', scene: 'kitchen' });
+  assert.equal(init.headers.authorization, `Bearer ${SYNTHETIC_KEY}`,
+    '直连后 Key 由访问者提供、随请求头直达模型服务');
+  assert.ok(init.signal, '客户端这一腿必须有上限（signal）');
+  const body = JSON.parse(init.body);
+  assert.equal(body.model, 'deepseek-flash');
+  assert.deepEqual(body.response_format, { type: 'json_object' }, 'JSON 模式兜底"必须是 JSON"（语义仍由客户端校验器把关）');
+  assert.ok(body.temperature <= 0.3, '这一档要的是判定，不是发挥');
+  const roles = body.messages.map((m) => m.role);
+  assert.deepEqual(roles, ['system', 'user'], '提示词在 system、词/场景/原句在 user（移植的组装口径）');
+  assert.equal(body.messages[0].content, FEEDBACK_PROMPT, 'system 消息就是移植的那份强约束提示词');
+  const userText = body.messages[1].content;
+  for (const s of ['I use a cup.', 'mug', 'kitchen']) {
+    assert.ok(userText.includes(s), `用户消息里必须带上 ${s}（否则模型无从判定）`);
+  }
 });
 
 // ───────────────────────────── ok 的定义：校验通过，不是 HTTP 200 ─────────────────────────────
@@ -162,7 +202,7 @@ test('HTTP 200 但响应体不合契约 → pending（200 不等于可用），�
   ]) {
     const r = await submitSentence(
       { sentence: 'I use a cup.', word: 'mug', scene: 'kitchen' },
-      { fetchImpl: fakeFetch(okReply(bad)) },
+      { fetchImpl: fakeFetch(okEnvelope(bad)), ...KEY },
     );
     assert.equal(r.status, 'pending', `${JSON.stringify(bad)} 不是一份可用反馈，不许报 ok`);
     assert.equal(r.reason, FEEDBACK_FAIL_REASONS.RESPONSE_INVALID);
@@ -172,34 +212,48 @@ test('HTTP 200 但响应体不合契约 → pending（200 不等于可用），�
   }
 });
 
-test('校验用的就是 Task 4 的 validateFeedback，且 value 是**同一个对象**（原样入库）', async () => {
+test('校验用的就是 Task 4 的 validateFeedback，且 value 原样往下走（不重建、不规整）', async () => {
   const body = { ...goodBody, extra_key: '上游多给的键' };
   const r = await submitSentence(
     { sentence: 'I use a cup.', word: 'mug', scene: 'kitchen' },
-    { fetchImpl: fakeFetch(okReply(body)) },
+    { fetchImpl: fakeFetch(okEnvelope(body)), ...KEY },
   );
   assert.equal(r.status, 'ok');
-  assert.equal(r.feedback, body, '必须是入参本身（不重建、不规整、不深拷贝）——Task 4 的冻结契约');
+  // 12A 口径说明：直连后 content 走 `JSON.parse` 才成为对象，所以"同一引用"只能指到
+  // 解析产物上（旧架构的 mock 不经序列化，才能拿测试里的字面引用做同一性断言）。
+  // 走线之后仍成立的契约是：**逐字段原样**——不多键、不少键、不 trim、不改值。
+  assert.deepEqual(r.feedback, body, '必须是解析产物的原样（不重建、不规整、不深拷贝）——Task 4 的冻结契约');
   assert.equal(r.feedback.extra_key, '上游多给的键', '多余键原样带下去');
   assert.equal(validateFeedback(r.feedback).ok, true, '被我们判成 ok 的东西，必须真的过得了校验器');
+  assert.equal(validateFeedback(r.feedback).value, r.feedback, '校验器放行的就是本模块交出去的那个对象');
 });
 
-test('响应的 choices 信封（服务端形状）也是判据：ok:true 之外的东西一律 pending', async () => {
-  // 服务端在信封不合法时回 502 upstream_invalid，客户端按"服务端说的失败形状"落档；
-  // 万一它没这么回（回了个 200 但 ok !== true），客户端不能把这种响应当成成功。
-  const r = await submitSentence(
-    { sentence: 'I use a cup.', word: 'mug', scene: 'kitchen' },
-    { fetchImpl: fakeFetch(okReply({ ok: false, error: 'upstream_invalid' })) },
-  );
-  assert.equal(r.status, 'pending');
-  assert.equal(r.reason, FEEDBACK_FAIL_REASONS.RESPONSE_INVALID);
-  assert.equal(r.sentence, 'I use a cup.');
+test('上游信封不合法（直连后由客户端自己判）：缺 content / content 不是 JSON / 解出来不是对象 → pending', async () => {
+  // 原 server/feedback-upstream.mjs 的信封校验口径整体移植到客户端：
+  // choices[0].message.content 必须是非空白字符串，解出来必须是对象（数组/原始值不算）。
+  const cases = [
+    { name: '缺少 choices', reply: { ok: true, status: 200, json: async () => ({ choices: [] }) } },
+    { name: 'content 是空串', reply: { ok: true, status: 200, json: async () => ({ choices: [{ message: { content: '   ' } }] }) } },
+    { name: 'content 不是 JSON（模型吐散文）', reply: { ok: true, status: 200, json: async () => ({ choices: [{ message: { content: '当然可以！这句话很好。' } }] }) } },
+    { name: 'content 解出来是数组', reply: { ok: true, status: 200, json: async () => ({ choices: [{ message: { content: '[1,2,3]' } }] }) } },
+    { name: 'content 解出来是字符串', reply: { ok: true, status: 200, json: async () => ({ choices: [{ message: { content: '"correct"' } }] }) } },
+  ];
+  for (const c of cases) {
+    const r = await submitSentence(
+      { sentence: 'I use a cup.', word: 'mug', scene: 'kitchen' },
+      { fetchImpl: fakeFetch(c.reply), ...KEY },
+    );
+    assert.equal(r.status, 'pending', `${c.name} 不是一份可用反馈`);
+    assert.equal(r.reason, FEEDBACK_FAIL_REASONS.RESPONSE_INVALID, `${c.name} 归"响应非法"（要改的是模型契约）`);
+    assert.equal(r.sentence, 'I use a cup.');
+  }
 });
 
 test('响应体不是合法 JSON（网关吐 HTML）→ pending，绝不当成"没有反馈"', async () => {
   const r = await submitSentence(
     { sentence: 'I use a cup.', word: 'mug', scene: 'kitchen' },
     {
+      ...KEY,
       fetchImpl: fakeFetch({
         ok: true, status: 200, text: async () => '<html>502 Bad Gateway</html>',
         json: async () => { throw new SyntaxError('Unexpected token < in JSON at position 0'); },
@@ -208,17 +262,17 @@ test('响应体不是合法 JSON（网关吐 HTML）→ pending，绝不当成"�
   );
   assert.equal(r.status, 'pending');
   assert.equal(r.reason, FEEDBACK_FAIL_REASONS.RESPONSE_INVALID);
-  assert.match(r.detail, /JSON/, '诊断里要说清"不是合法 JSON"（这一档要改的是服务端/模型契约）');
+  assert.match(r.detail, /JSON/, '诊断里要说清"不是合法 JSON"（这一档要改的是模型契约）');
   assert.equal(r.sentence, 'I use a cup.');
 });
 
-// ───────────────────────── 失败分档：每一档指向不同的处置方向 ─────────────────────────
+// ───────────────────── 失败分档：每一档指向不同的处置方向（12A 扩展）─────────────────────
 
-test('HTTP 非 2xx → 独立一档 http_error（不是"响应非法"：要改的是链路或服务）', async () => {
-  for (const status of [400, 401, 429, 500, 502, 503]) {
+test('HTTP 非 2xx（401/429 除外）→ 独立一档 http_error（不是"响应非法"：要改的是链路或服务）', async () => {
+  for (const status of [400, 402, 403, 500, 502, 503]) {
     const r = await submitSentence(
       { sentence: 'I use a cup.', word: 'mug', scene: 'kitchen' },
-      { fetchImpl: fakeFetch({ ok: false, status, json: async () => ({ error: 'x' }) }) },
+      { ...KEY, fetchImpl: fakeFetch({ ok: false, status, json: async () => ({ error: 'x' }) }) },
     );
     assert.equal(r.status, 'pending');
     assert.equal(r.reason, FEEDBACK_FAIL_REASONS.HTTP_ERROR);
@@ -227,15 +281,61 @@ test('HTTP 非 2xx → 独立一档 http_error（不是"响应非法"：要改�
   }
 });
 
+test('401（Key 无效/无权限）单独归 auth_failed——Key 是访问者自己的，文案要指回设置页', async () => {
+  const r = await submitSentence(
+    { sentence: 'I use a cup.', word: 'mug', scene: 'kitchen' },
+    { ...KEY, fetchImpl: fakeFetch({ ok: false, status: 401, json: async () => ({}), text: async () => '' }) },
+  );
+  assert.equal(r.status, 'pending');
+  assert.equal(r.reason, FEEDBACK_FAIL_REASONS.AUTH_FAILED, '401 是"去设置里修 Key"的一档，不是泛泛的服务错误');
+  assert.equal(r.reason, 'auth_failed');
+  assert.notEqual(r.reason, FEEDBACK_FAIL_REASONS.HTTP_ERROR);
+  assert.match(r.error, /401/, '诊断里仍要说清是哪个状态码');
+  assert.match(r.detail ?? '', /设置|Key/, '降级说明要指回设置入口');
+  assert.equal(r.sentence, 'I use a cup.', '原句照旧保留');
+});
+
+test('429（请求太频繁）单独归 rate_limited——处置是稍等再试，与"契约不对"和"断网"都不同', async () => {
+  const r = await submitSentence(
+    { sentence: 'I use a cup.', word: 'mug', scene: 'kitchen' },
+    { ...KEY, fetchImpl: fakeFetch({ ok: false, status: 429, json: async () => ({}), text: async () => '' }) },
+  );
+  assert.equal(r.status, 'pending');
+  assert.equal(r.reason, FEEDBACK_FAIL_REASONS.RATE_LIMITED, '429 是"等一等"的一档');
+  assert.equal(r.reason, 'rate_limited');
+  assert.notEqual(r.reason, FEEDBACK_FAIL_REASONS.HTTP_ERROR);
+  assert.match(r.error, /429/, '诊断里仍要说清是哪个状态码');
+  assert.equal(r.sentence, 'I use a cup.');
+});
+
+test('没配 Key：在发请求**之前**就落 auth_failed，一个请求都不发、原句保留', async () => {
+  let calls = 0;
+  const r = await submitSentence(
+    { sentence: 'I use a cup.', word: 'mug', scene: 'kitchen' },
+    { fetchImpl: async () => { calls += 1; return okEnvelope(goodBody); } },
+  );
+  assert.equal(r.status, 'pending');
+  assert.equal(r.reason, FEEDBACK_FAIL_REASONS.AUTH_FAILED);
+  assert.equal(r.error, 'missing_api_key', '诊断说清"缺的是 Key"（排查时一眼定位）');
+  assert.match(r.detail ?? '', /设置|Key/);
+  assert.equal(calls, 0, '没有 Key 的请求必然 401，白花一次往返——当场拦下');
+  assert.equal(r.sentence, 'I use a cup.', '原句照旧保留（补交队列靠它）');
+  for (const bad of [undefined, null, '', '   ']) {
+    const r2 = await submitSentence(
+      { sentence: 'I use a cup.', word: 'mug', scene: 'kitchen' },
+      { fetchImpl: async () => okEnvelope(goodBody), apiKey: bad },
+    );
+    assert.equal(r2.reason, FEEDBACK_FAIL_REASONS.AUTH_FAILED);
+  }
+});
+
 test('HTTP 504 / 408 → 归 timeout 一档（网关超时不是"响应非法"，也不是泛泛的 http_error）', async () => {
-  // 复审 Item 2：这两个分支此前**一个用例都没有**——上面那组 HTTP 分档只跑
-  // 400/401/429/500/502/503，把 `gatewayTimeout` 判据整个删掉也不会红。
-  // 它们必须与"服务端回了别的非 2xx"分开的理由见 `web/units/compose.mjs` 的那段注释：
-  // 真凶是网关/上游慢，处置方向是重试与看上游，而不是"去改端侧输入或模型契约"。
+  // 复审 Item 2：这两个分支必须有专门的用例——它们与"模型服务回了别的非 2xx"分开的理由见
+  // `web/units/compose.mjs` 的那段注释：真凶是网关/上游慢，处置方向是重试与看上游。
   for (const status of [504, 408]) {
     const r = await submitSentence(
       { sentence: 'I use a cup.', word: 'mug', scene: 'kitchen' },
-      { fetchImpl: fakeFetch({ ok: false, status, json: async () => ({ error: 'gateway_timeout' }) }) },
+      { ...KEY, fetchImpl: fakeFetch({ ok: false, status, json: async () => ({ error: 'gateway_timeout' }) }) },
     );
     assert.equal(r.status, 'pending', `HTTP ${status} 是 pending`);
     assert.equal(r.reason, FEEDBACK_FAIL_REASONS.TIMEOUT, `HTTP ${status} 必须归 timeout（不是 http_error）`);
@@ -248,7 +348,7 @@ test('HTTP 504 / 408 → 归 timeout 一档（网关超时不是"响应非法"�
 test('网络层抛错（断网）→ request_failed，带上原始错误信息', async () => {
   const r = await submitSentence(
     { sentence: 'I use a cup.', word: 'mug', scene: 'kitchen' },
-    { fetchImpl: async () => { throw new TypeError('Failed to fetch'); } },
+    { ...KEY, fetchImpl: async () => { throw new TypeError('Failed to fetch'); } },
   );
   assert.equal(r.status, 'pending');
   assert.equal(r.reason, FEEDBACK_FAIL_REASONS.REQUEST_FAILED);
@@ -260,6 +360,7 @@ test('上限到点（fetch 那一句被中止）→ timeout，而不是"请求�
   const r = await submitSentence(
     { sentence: 'I use a cup.', word: 'mug', scene: 'kitchen' },
     {
+      ...KEY,
       timeoutMs: 20,
       // 如实遵守 signal 的 fetch：上限到点时以 TimeoutError 拒绝（与真 fetch 一致）
       fetchImpl: (url, init) => new Promise((_resolve, reject) => {
@@ -280,10 +381,11 @@ test('上限到点（fetch 那一句被中止）→ timeout，而不是"请求�
 test('响应头到了、body 还在流时上限到点 → 仍然算 timeout，不是 response_invalid', async () => {
   // Task 7 复审 Important 1 的同一条纪律，在造句这条链路上重演：
   // 这个 catch 里有两种完全不同的成因（body 停滞 vs 响应真的不是 JSON），
-  // 混为一谈会把一次网络停滞记进"改服务端或模型契约"那一档。
+  // 混为一谈会把一次网络停滞记进"改模型契约"那一档。
   const r = await submitSentence(
     { sentence: 'I use a cup.', word: 'mug', scene: 'kitchen' },
     {
+      ...KEY,
       timeoutMs: 20,
       fetchImpl: async (url, init) => ({
         ok: true,
@@ -303,12 +405,13 @@ test('响应头到了、body 还在流时上限到点 → 仍然算 timeout，�
   assert.match(r.error, /超时|timeout/i);
 });
 
-test('调用方主动取消（AbortError）归 timeout 一档：它不是"服务端契约不对"', async () => {
+test('调用方主动取消（AbortError）归 timeout 一档：它不是"模型契约不对"', async () => {
   // 用户离开这一屏时的主动取消，与上限到点在**处置方向**上是同一件事：
   // 都该重试，都不该被写成"模型契约有问题"。两档合并，理由写在常量说明里。
   const r = await submitSentence(
     { sentence: 'I use a cup.', word: 'mug', scene: 'kitchen' },
     {
+      ...KEY,
       fetchImpl: async () => { const e = new Error('The user aborted a request.'); e.name = 'AbortError'; throw e; },
     },
   );
@@ -316,9 +419,9 @@ test('调用方主动取消（AbortError）归 timeout 一档：它不是"服务
   assert.equal(r.reason, FEEDBACK_FAIL_REASONS.TIMEOUT);
 });
 
-test('请求带上 signal（没有它，上游半开时这个 Promise 永久 pending）', async () => {
-  const f = fakeFetch(okReply(goodBody));
-  await submitSentence({ sentence: 'I use a cup.', word: 'mug', scene: 'kitchen' }, { fetchImpl: f });
+test('请求带上 signal（没有它，模型服务半开时这个 Promise 永久 pending）', async () => {
+  const f = fakeFetch(okEnvelope(goodBody));
+  await submitSentence({ sentence: 'I use a cup.', word: 'mug', scene: 'kitchen' }, { fetchImpl: f, ...KEY });
   const signal = f.seen[0].init.signal;
   assert.ok(signal, '每一次造句请求都要带 signal');
   assert.equal(signal.aborted, false, '正常请求不该一开始就是中止状态');
@@ -331,14 +434,18 @@ test('每一档都有各自的取值，且都登记在 FEEDBACK_FAIL_REASONS 里
   assert.ok(Object.isFrozen(FEEDBACK_FAIL_REASONS), '档位是统计口径的一部分，不许被运行时改写');
   // 关键的一刀：超时与"响应非法"必须是两个不同的档
   assert.notEqual(FEEDBACK_FAIL_REASONS.TIMEOUT, FEEDBACK_FAIL_REASONS.RESPONSE_INVALID);
+  // 12A 最小扩展：auth_failed（401 / 没配 Key）与 rate_limited（429）各自独立成档
+  assert.equal(FEEDBACK_FAIL_REASONS.AUTH_FAILED, 'auth_failed');
+  assert.equal(FEEDBACK_FAIL_REASONS.RATE_LIMITED, 'rate_limited');
+  assert.notEqual(FEEDBACK_FAIL_REASONS.AUTH_FAILED, FEEDBACK_FAIL_REASONS.HTTP_ERROR);
 });
 
 // ───────────────────────────── 原句的归属（A2/A4：句子永不丢）─────────────────────────────
 
 test('pending 的原句一字不改、连空白一起带回去（补交时发出去的必须还是他写的那句）', async () => {
   const sentence = '  I use a cup .  ';
-  const f = fakeFetch({ ok: false, status: 500, json: async () => ({}) });
-  const r = await submitSentence({ sentence, word: 'mug', scene: 'kitchen' }, { fetchImpl: f });
+  const f = fakeFetch({ ok: false, status: 500, json: async () => ({}), text: async () => '' });
+  const r = await submitSentence({ sentence, word: 'mug', scene: 'kitchen' }, { fetchImpl: f, ...KEY });
   assert.equal(r.status, 'pending');
   assert.equal(r.sentence, sentence);
   assert.deepEqual(
@@ -346,14 +453,17 @@ test('pending 的原句一字不改、连空白一起带回去（补交时发出
     { word: 'mug', scene: 'kitchen' },
     'word/scene 也要一起带回去：补交时要重发同一份上下文',
   );
-  assert.equal(JSON.parse(f.seen[0].init.body).sentence, sentence, '发给服务端的也是原句');
+  assert.ok(
+    JSON.parse(f.seen[0].init.body).messages[1].content.includes(sentence),
+    '发给模型的原句同样一字不改',
+  );
 });
 
 test('ok 的结果同样带着原句（A4：这条路径上没有任何一处丢掉学习者的话）', async () => {
   const sentence = 'I use a cup.';
   const r = await submitSentence(
     { sentence, word: 'mug', scene: 'kitchen' },
-    { fetchImpl: fakeFetch(okReply(goodBody)) },
+    { fetchImpl: fakeFetch(okEnvelope(goodBody)), ...KEY },
   );
   assert.equal(r.status, 'ok');
   assert.equal(r.sentence, sentence);
@@ -631,27 +741,24 @@ test('上游 body 停滞到上限 → UPSTREAM_FAILED + 说清是超时（不是
   );
 });
 
-// ───────────────────────── 两条腿的上下限关系（硬要求，跨模块钉住）─────────────────────────
+// ───────────────────────── 客户端这一腿的上限（直连后唯一的腿）─────────────────────────
 
-test('服务端上游上限 < 客户端这一腿的上限：服务端要先超时、先把它自己的失败形状写回来', async () => {
-  assert.ok(
-    FEEDBACK_UPSTREAM_TIMEOUT_MS < FEEDBACK_REQUEST_TIMEOUT_MS,
-    `服务端上游上限 ${FEEDBACK_UPSTREAM_TIMEOUT_MS}ms 必须 < 客户端这条腿 ${FEEDBACK_REQUEST_TIMEOUT_MS}ms`
-    + '——顺序反过来的话，"模型慢"在数据里只会长成"客户端自己等烦了"，而服务端什么都没记',
-  );
+test('客户端这一腿的请求上限是正整数毫秒，导出的别名指同一个值', () => {
   assert.equal(FEEDBACK_TIMEOUT_MS, FEEDBACK_REQUEST_TIMEOUT_MS, '导出的别名必须指同一个值');
-  for (const v of [FEEDBACK_UPSTREAM_TIMEOUT_MS, FEEDBACK_REQUEST_TIMEOUT_MS]) {
-    assert.ok(Number.isInteger(v) && v > 0, '上限必须是正整数毫秒');
-  }
-  // 两条腿之间留的余量：上游到点后，服务端还要把 502 写回来、客户端还要读完它。
-  const gap = FEEDBACK_REQUEST_TIMEOUT_MS - FEEDBACK_UPSTREAM_TIMEOUT_MS;
-  assert.ok(gap >= 2000, `两条腿之间只留了 ${gap}ms；上游到点后服务端还需要时间把 502 写回来`);
-  // 上界：这条腿不能长过服务端整个请求的上限（30s），否则服务端会先把连接收掉，
-  // 客户端只看到一次网络中断，分不清模型慢、服务端挂了还是网络断。
-  // （跨模块那一条——`SERVER_REQUEST_TIMEOUT_MS > FEEDBACK_REQUEST_TIMEOUT_MS`——在
-  //  `tests/feedback-endpoint.test.mjs` 里，理由见文件头。）
-  assert.ok(
-    FEEDBACK_REQUEST_TIMEOUT_MS < 30_000,
-    `客户端这条腿 ${FEEDBACK_REQUEST_TIMEOUT_MS}ms 必须留在服务端整体请求上限（30s）之内`,
-  );
+  assert.ok(Number.isInteger(FEEDBACK_REQUEST_TIMEOUT_MS) && FEEDBACK_REQUEST_TIMEOUT_MS > 0);
+  // 直连后这是**唯一的**腿：原"服务端上游上限（20s）必须小于客户端（24s）"的跨模块关系
+  // 随代理退役（server/ 12C 才删，但客户端不再依赖它先超时）。取值理由（实弹探针
+  // 1068–3439ms、最慢自报 3210ms、约 7 倍余量）见 `web/units/compose.mjs` 的常量注释。
+  assert.equal(FEEDBACK_REQUEST_TIMEOUT_MS, 24_000);
+});
+
+// ───────────────────────── 移植 parity：客户端提示词与 server 原版逐字一致 ─────────────────────────
+
+test('客户端移植的提示词与规则和 server 原版逐字一致（server 退役前的 parity 闸）', () => {
+  assert.equal(FEEDBACK_PROMPT, SERVER_FEEDBACK_PROMPT, '提示词是模型契约：移植时一个字都不许改');
+  assert.equal(FEEDBACK_RULE_VERDICTS, SERVER_FEEDBACK_RULE_VERDICTS);
+  assert.equal(FEEDBACK_RULE_ERROR_TYPES, SERVER_FEEDBACK_RULE_ERROR_TYPES);
+  assert.equal(FEEDBACK_RULE_CORRECT, SERVER_FEEDBACK_RULE_CORRECT);
+  assert.equal(FEEDBACK_RULE_FLAWED, SERVER_FEEDBACK_RULE_FLAWED);
+  assert.equal(FEEDBACK_RULE_UNCERTAIN, SERVER_FEEDBACK_RULE_UNCERTAIN);
 });

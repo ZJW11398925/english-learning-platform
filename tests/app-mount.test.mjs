@@ -21,6 +21,8 @@
 import { test, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
 import { mount } from '../web/app.mjs';
+import { createKeyring, API_KEY_STORAGE_KEY } from '../web/units/keyring.mjs';
+import { fakeLocalStorage } from './helpers/fakes.mjs';
 import {
   harness, openCameraAndShoot, withFetch, makeBlob, OK_STATS, okFetch, realRecognizeWithFallback,
   settleFeedback,
@@ -448,6 +450,118 @@ test('mount 的入参契约：容器不是元素时抛 TypeError（而不是挂�
   await assert.rejects(() => mount(null, deps), TypeError);
   await assert.rejects(() => mount(undefined, deps), TypeError);
   await assert.rejects(() => mount({}, deps), TypeError);
+});
+
+// ─────────────────────── Task 12A：API Key 的设置入口与无 Key 引导 ───────────────────────
+
+/** 一把没有配置任何 Key 的 keyring（空存储）。 */
+const emptyKeyring = () => createKeyring({ storage: fakeLocalStorage() });
+
+test('设置（API Key）入口每屏可达：ready 屏与 word 屏都点得进去', async () => {
+  const h = await harness();
+  assert.ok(btn(h.root, '设置（API Key）'), 'ready 屏要有设置入口');
+  await btn(h.root, '设置（API Key）').click();
+  assert.match(text(h.root), /设置 · API Key/);
+  await btn(h.root, '返回').click();
+  assert.equal(h.machine.state, 'ready', '返回要回到原来的屏');
+
+  const h2 = await withFetch({ fetchImpl: okFetch, recognize: realRecognizeWithFallback });
+  await openCameraAndShoot(h2);
+  assert.equal(h2.machine.state, 'word');
+  assert.ok(btn(h2.root, '设置（API Key）'), 'word 屏同样要有设置入口（任务书点名 ready/word 可达）');
+  h2.restoreFetch();
+});
+
+test('设置屏显示"已配置/未配置"，**不回显明文**，输入框永远从空白开始', async () => {
+  const h = await harness(); // 夹具默认注入"已配置合成 Key"的 keyring
+  await btn(h.root, '设置（API Key）').click();
+  assert.match(text(h.root), /已配置/);
+  assert.doesNotMatch(text(h.root), /sk-test-harness/, '已配置的 Key 内容绝不回显');
+  const inputs = byTag(h.root, 'INPUT');
+  assert.equal(inputs.length, 1);
+  assert.equal(inputs[0].value, '', '输入框不预填任何内容');
+  assert.equal(inputs[0].type, 'password', '密码型输入：肩窥也看不到');
+
+  await btn(h.root, '清除 Key').click();
+  assert.match(text(h.root), /未配置/, '清除后状态当场可见');
+});
+
+test('保存：合法的合成 Key 存进注入的 keyring，之后按拍照能正常走链路', async () => {
+  const storage = fakeLocalStorage();
+  const h = await harness({ keyring: createKeyring({ storage }) });
+  await btn(h.root, '设置（API Key）').click();
+  byTag(h.root, 'INPUT')[0].value = 'sk-test-newly-saved-key';
+  await btn(h.root, '保存').click();
+  assert.equal(storage.getItem(API_KEY_STORAGE_KEY), 'sk-test-newly-saved-key', 'Key 落进存储');
+  assert.equal(h.machine.state, 'ready', '保存成功后回到原屏');
+  assert.equal(errorText(h.root), '', '成功路径不留报错');
+
+  // 存好 Key 之后主流程就通了（直连识物需要它）：挂一份新应用、共用同一个存储
+  const h2 = await harness({ keyring: createKeyring({ storage }) });
+  await btn(h2.root, '拍照').click();
+  assert.equal(h2.machine.state, 'capturing', '配好 Key 后拍照放行');
+});
+
+test('保存：粘贴不全的 Key（无 sk- 前缀 / 空白）被拦下，错误说人话，且不写存储', async () => {
+  const storage = fakeLocalStorage();
+  const h = await harness({ keyring: createKeyring({ storage }) });
+  await btn(h.root, '设置（API Key）').click();
+  for (const bad of ['not-a-key', '   ']) {
+    byTag(h.root, 'INPUT')[0].value = bad;
+    await btn(h.root, '保存').click();
+    assert.match(errorText(h.root), /sk-|空/, '错误区要给出能行动的解释');
+    assert.equal(storage.getItem(API_KEY_STORAGE_KEY), null, '校验不过一个字节都不写');
+    assert.match(text(h.root), /设置 · API Key/, '留在设置屏让用户改');
+  }
+});
+
+test('清除：清掉的 Key 从存储里消失，主流程随之被拦下（引导回来）', async () => {
+  const h = await harness(); // 默认已配置
+  await btn(h.root, '设置（API Key）').click();
+  await btn(h.root, '清除 Key').click();
+  await btn(h.root, '返回').click();
+  assert.match(text(h.root), /还没有配置 API Key/, 'ready 屏出现引导文案');
+  await btn(h.root, '拍照').click();
+  assert.equal(h.machine.state, 'ready', '没有 Key 不进拍摄');
+  assert.match(errorText(h.root), /设置（API Key）/, '拦下时把出路再指一次');
+});
+
+test('无 Key：ready 屏给引导文案（怎么拿 / 为什么需要 / 存哪 / 只存本机），不是死路', async () => {
+  const h = await harness({ keyring: emptyKeyring() });
+  const ready = text(h.root);
+  assert.match(ready, /还没有配置 API Key/, '说清现状');
+  assert.match(ready, /platform\.deepseek\.com/, '说清去哪拿');
+  assert.match(ready, /按用量计费|调用/, '说清为什么需要');
+  assert.match(ready, /只保存在这台手机|本机/, '说清存在哪、只存本机');
+  assert.ok(btn(h.root, '设置（API Key）'), '出路（设置入口）就在同一屏');
+});
+
+test('无 Key 点「拍照」：不开相机、不进 capturing、不落事件，错误区指到设置', async () => {
+  const h = await harness({ keyring: emptyKeyring() });
+  await btn(h.root, '拍照').click();
+  assert.equal(h.machine.state, 'ready');
+  assert.equal(h.calls.openCamera.length, 0, '没有 Key 就不该开相机（反正也发不了请求）');
+  assert.equal(h.events.length, 0, '什么都没发生就不落事件（缺 Key 不是一次识物失败）');
+  assert.match(errorText(h.root), /设置（API Key）/);
+});
+
+test('auth_failed 的反馈降级文案指向设置入口（用户自己能修的一档要说清去哪修）', async () => {
+  const compose = {
+    submitSentence: async () => ({
+      status: 'pending', reason: 'auth_failed', error: 'http_401',
+      detail: '模型服务说这个 API Key 无效或没有权限（HTTP 401）。请到「设置（API Key）」检查或重新粘贴。',
+      sentence: 'I use a cup.', word: 'mug', scene: 'kitchen',
+    }),
+  };
+  const h = await withFetch({ fetchImpl: okFetch, recognize: realRecognizeWithFallback, compose });
+  await openCameraAndShoot(h);
+  await btn(h.root, '我会读了（开始跟读）').click();
+  await btn(h.root, '跳过跟读').click();
+  byTag(h.root, 'textarea')[0].value = 'I use a cup.';
+  await btn(h.root, '提交造句').click();
+  await settleFeedback(h);
+  assert.match(text(h.root), /API Key 无效|设置（API Key）/, 'auth_failed 的提示要指回设置');
+  h.restoreFetch();
 });
 
 test('mount 返回识物链路需要的注入点：machine / sessionId / store / grab', async () => {

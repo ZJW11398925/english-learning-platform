@@ -1,18 +1,19 @@
 // tests/feedback-endpoint.test.mjs
 //
-// `/api/feedback` 与 `/api/recognize` 是**同一条代理契约**下的两个端点：密钥只在服务端、
-// 上游响应先过形状校验、任何畸形输入只坏这一个请求。本文件把这条契约在造句端点上重钉一遍。
+// `/api/feedback` 端点契约（server/ 12C 才退役，期间它的路由行为照旧被钉住）+ **直连形态**
+// 的整链路证据。Task 12A 起**客户端不再调用本代理**（浏览器直连模型服务），所以：
+//   · 服务端半区的用例（端点状态码、日志卫生、信封守卫、畸形输入）原样保留——server 代码
+//     本任务不改，它还在被测试守着；
+//   · 原"真客户端 × 真代理"的跨层用例改写为**直连整链路**：真 `submitSentence`（apiBase 注入）
+//     → 真 HTTP → 上游桩。"客户端拿代理信封怎么判"的那几条随之退役——那个信封在直连形态
+//     里已经不存在（客户端只认 `choices[0].message.content`）。
 //
 // 上游用**本地桩服务**替掉（设计文档 §5.2："真实模型调用不写自动测"指的是不拿真模型当
-// 测试依赖，而不是不测路由）。真实调用由 `scripts/probe-feedback-live.mjs` 负责，结果记在
-// task-8-report.md 的实弹探针一节。
+// 测试依赖，而不是不测路由）。
 //
-// 这里最要紧的一条是**信封与语义的分工**：
-//   · 服务端管**信封**——上游 HTTP 状态、`choices[0].message.content` 在不在、它是不是 JSON、
-//     解出来是不是对象。任一项不成立就是 `502 upstream_invalid`，绝不让垃圾长得像成功；
-//   · 四个字段的**语义**由客户端的 `validateFeedback`（Task 4）判，这里**不重复判**
-//     （两处各判一套，迟早各自漂移）。所以"verdict 取值越界"的响应在端点这一层是 200，
-//     到客户端才变成 pending——下面有用例把这条分工钉住。
+// 这里最要紧的一条仍是**信封与语义的分工**（12A 后由客户端独立承担）：
+// 端点/信封这一层管"能不能解析出对象"，四个字段的**语义**由 `validateFeedback`（Task 4）判
+// ——两处各判一套迟早漂移，所以"verdict 取值越界"的响应在信封层是成功，到客户端才变 pending。
 import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { createServer } from 'node:http';
@@ -30,6 +31,9 @@ const ENV = {
   DEEPSEEK_MODEL: 'deepseek-flash',
   VISION_DETAIL: 'low',
 };
+
+/** 直连客户端用的合成 Key（仓库里只允许合成钥匙）。 */
+const CLIENT_KEY = 'sk-test-client-side-key-fedcba987654';
 
 /** 一份合法的模型反馈（模型会把四个字段放在 content 的 JSON 字符串里）。 */
 const GOOD = { verdict: 'flawed', error_type: 'word_choice', rewrite: 'I use a mug.', note: '词选得更准' };
@@ -62,12 +66,13 @@ function upstreamStub() {
 let upstream;
 let app;
 let origin;
+let upstreamBase;   // 上游桩的地址：直连形态的 e2e 用例把客户端 apiBase 指到这里
 const logs = [];
 
 before(async () => {
   upstream = upstreamStub();
   await new Promise((resolve) => upstream.server.listen(0, '127.0.0.1', resolve));
-  const upstreamBase = `http://127.0.0.1:${upstream.server.address().port}`;
+  upstreamBase = `http://127.0.0.1:${upstream.server.address().port}`;
 
   app = createApp({
     env: { ...ENV, DEEPSEEK_API_BASE: upstreamBase },
@@ -271,18 +276,20 @@ test('上游 200 但缺 choices / content → 502 upstream_invalid', async () =>
   }
 });
 
-test('信封与语义的分工：四个字段的取值越界由客户端判 —— 端点这一层是 200，客户端落 pending', async () => {
-  // 服务端管"能不能解析出对象"，语义归 Task 4 的校验器。这条分工写在这里，免得将来有人
-  // 在服务端又写一套字段校验（两处各判一套，迟早漂移）。
+test('信封与语义的分工（12A 改直连整链路）：语义越界在信封层是成功，真客户端落 pending', async () => {
+  // 这条分工写在这里，免得将来有人在服务端/信封层又写一套字段校验（两处各判一套，迟早漂移）。
   upstream.replyContent({ verdict: 'great', error_type: 'none', rewrite: null, note: 'x' });
+
+  // 代理端点这一层不判语义：原样 200 透传（server 12C 才退役，期间行为照旧）
   const res = await postFeedback(SAID);
   assert.equal(res.status, 200, '服务端不判语义');
   const proxyResult = await res.json();
   assert.equal(proxyResult.ok, true);
 
-  // 客户端拿到这份响应 → pending（校验器说了算），诊断里点名出错的字段
+  // 直连形态的整链路证据：真客户端（apiBase 指向桩）→ 真 HTTP → 拿到模型内容 → pending，
+  // 诊断点名出错的字段，原句保留
   const clientResult = await submitSentence(SAID, {
-    fetchImpl: async () => ({ ok: true, json: async () => proxyResult }),
+    apiKey: CLIENT_KEY, apiBase: upstreamBase, fetchImpl: fetch,
   });
   assert.equal(clientResult.status, 'pending');
   assert.equal(clientResult.reason, FEEDBACK_FAIL_REASONS.RESPONSE_INVALID);
@@ -438,19 +445,19 @@ test('上游先回响应头、再半截 body 卡住 → 502 upstream_failed（�
 //
 // 正确形状与 `/api/recognize` 一致：**逐字段显式构造**，服务端自己的字段永远权威。
 
-test('模型多回一个 `ok`（与我们的字段撞名）→ 服务端自己的 ok 仍权威，判定**照样可用**', async () => {
+test('模型多回一个 `ok`（与我们的字段撞名）→ 代理层自己的 ok 仍权威；直连客户端照样可用', async () => {
   const withOk = { ...GOOD, ok: false };
   upstream.replyContent(withOk);
 
   const res = await postFeedback(SAID);
   assert.equal(res.status, 200);
   const proxyResult = await res.json();
-  assert.equal(proxyResult.ok, true, '模型回 ok:false 不许盖掉服务端自己的 ok');
+  assert.equal(proxyResult.ok, true, '代理层（server 12C 退役前）自己的 ok 不被模型盖掉');
   assert.equal(proxyResult.verdict, 'flawed', '四个字段照样透传');
 
-  // 客户端那一侧：这是一份**可用**的判定，必须落 ok，不是 pending。
+  // 直连客户端只认 content 里那份对象：多出来的 `ok` 只是多余键，判定照样可用
   const clientResult = await submitSentence(SAID, {
-    fetchImpl: async () => ({ ok: true, json: async () => proxyResult }),
+    apiKey: CLIENT_KEY, apiBase: upstreamBase, fetchImpl: fetch,
   });
   assert.equal(clientResult.status, 'ok', '一份四个字段齐备的合法判定不许因为模型多给了 ok 就变成 pending');
   assert.equal(clientResult.uncertain, false);
@@ -477,7 +484,7 @@ test('模型多回 `latency_ms` / `usage` → 服务端自报的耗时与 token 
   );
 });
 
-test('模型多回的**其它**未知键照旧原样透传（这份放行是契约，不许被"防撞名"顺手收紧）', async () => {
+test('模型多回的**其它**未知键照旧原样透传；直连客户端交回的就是解析产物本身', async () => {
   const modelExtra = {
     ...GOOD,
     model_extra: '上游多给的键',
@@ -490,35 +497,32 @@ test('模型多回的**其它**未知键照旧原样透传（这份放行是契�
   const body = await res.json();
   assert.equal(body.ok, true);
   assert.equal(body.model_extra, '上游多给的键', '多余键原样带下去（Task 4 复审钉住的放行）');
-  assert.equal(body.sessionId, '模型编的会话号', '连与事件顶层撞名的键也照样透传——服务端不当过滤器');
+  assert.equal(body.sessionId, '模型编的会话号', '连与事件顶层撞名的键也照样透传——代理不当过滤器');
 
-  // 端到端：多余键穿到客户端，不影响"可用"的判定，也不会跟着进事件 payload。
+  // 直连整链路：多余键穿到客户端，不影响"可用"的判定，也不会跟着进事件 payload。
   const r = await submitSentence(SAID, {
-    fetchImpl: (path, init) => fetch(`${origin}${path}`, init),
+    apiKey: CLIENT_KEY, apiBase: upstreamBase, fetchImpl: fetch,
   });
   assert.equal(r.status, 'ok');
   assert.equal(validateFeedback(r.feedback).ok, true);
-  assert.equal(r.feedback.model_extra, '上游多给的键', '客户端交回的就是入参本身（不重建、不裁剪）');
+  assert.equal(r.feedback.model_extra, '上游多给的键', '客户端交回的就是解析产物（不重建、不裁剪）');
 });
 
-test('模型回的 `ok` 不是布尔（例如 ok:"yes"）→ 它一透传下去就会变成一份"不可用"的判定', async () => {
-  // 这一条钉的是**保护面**而不是"要不要拦"：服务端不判 `ok` 的取值（那是模型的字段，
-  // 语义归客户端校验器），但正因为如此，它自己的 `ok` 必须是响应里唯一的那个——
-  // 否则模型给一个 ok:"yes" 就能让 `raw.ok === false` 那条判断之外的任何形状漏下去。
+test('模型回的 `ok` 不是布尔（例如 ok:"yes"）→ 直连客户端读 content，古怪的 ok 不碍事', async () => {
   upstream.replyContent({ ...GOOD, ok: 'yes' });
   const body = await (await postFeedback(SAID)).json();
   assert.equal(body.ok, true);
   assert.equal(body.verdict, 'flawed');
-  const r = await submitSentence(SAID, { fetchImpl: async () => ({ ok: true, json: async () => body }) });
+  const r = await submitSentence(SAID, { apiKey: CLIENT_KEY, apiBase: upstreamBase, fetchImpl: fetch });
   assert.equal(r.status, 'ok', '四个字段齐备就是可用：不因为模型多给了个古怪的 ok 就作废');
 });
 
-// ───────────────────── 客户端 → 真服务端 → 桩上游：整条链路一起走一遍 ─────────────────────
+// ───────────────────── 直连整链路：真客户端 → 真 HTTP → 桩上游（12A 的新链路）─────────────────────
 
-test('端到端（真客户端 + 真路由 + 桩上游）：submitSentence 拿回 ok 与校验过的反馈', async () => {
+test('端到端（真客户端 + 真 HTTP + 桩上游）：submitSentence 拿回 ok 与校验过的反馈', async () => {
   upstream.replyContent(GOOD);
   const r = await submitSentence(SAID, {
-    fetchImpl: (path, init) => fetch(`${origin}${path}`, init),
+    apiKey: CLIENT_KEY, apiBase: upstreamBase, fetchImpl: fetch,
   });
   assert.equal(r.status, 'ok');
   assert.equal(r.feedback.verdict, 'flawed');
@@ -526,18 +530,34 @@ test('端到端（真客户端 + 真路由 + 桩上游）：submitSentence 拿�
   assert.equal(r.uncertain, false);
   assert.equal(validateFeedback(r.feedback).ok, true);
   assert.equal(r.sentence, SAID.sentence);
+
+  // 直连的关键性质：**密钥由客户端随请求头注入**（原服务端注入的那层没有了）
+  const sent = upstream.seen.at(-1);
+  assert.equal(sent.headers.authorization, `Bearer ${CLIENT_KEY}`, '客户端自己的 Key 随 Authorization 头上行');
+  assert.equal(sent.url, '/chat/completions');
 });
 
 test('端到端：上游失败时 learner 的句子仍然完整回来（A2/A4 的整链路证据）', async () => {
   upstream.setReply({ status: 500, raw: '{"error":"boom"}' });
   const said = 'I put the mug on the desk.';
   const r = await submitSentence({ ...SAID, sentence: said }, {
-    fetchImpl: (path, init) => fetch(`${origin}${path}`, init),
+    apiKey: CLIENT_KEY, apiBase: upstreamBase, fetchImpl: fetch,
   });
   assert.equal(r.status, 'pending');
   assert.equal(r.reason, FEEDBACK_FAIL_REASONS.HTTP_ERROR);
   assert.equal(r.sentence, said, '失败路径上原句一字不差地带回来（补交全靠它）');
   assert.deepEqual({ word: r.word, scene: r.scene }, { word: 'mug', scene: 'kitchen' });
+});
+
+test('端到端：上游 401 → 直连客户端单独落 auth_failed（12A 的新分档，指回设置页）', async () => {
+  upstream.setReply({ status: 401, raw: '{"error":{"message":"Incorrect API key provided"}}' });
+  const r = await submitSentence(SAID, {
+    apiKey: CLIENT_KEY, apiBase: upstreamBase, fetchImpl: fetch,
+  });
+  assert.equal(r.status, 'pending');
+  assert.equal(r.reason, FEEDBACK_FAIL_REASONS.AUTH_FAILED, '401 是"去设置里修 Key"的一档');
+  assert.match(r.error, /401/);
+  assert.equal(r.sentence, SAID.sentence, '原句照旧保留');
 });
 
 // ───────────────────────────── 服务端 / 客户端两条腿的常量 ─────────────────────────────
