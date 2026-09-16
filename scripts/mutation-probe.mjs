@@ -16,7 +16,7 @@
  *   speak(TTS) 单元 T1–T6、app TTS 装配 T7–T8；
  *   **退役**：K1–K7 与 P11–P14、Q13——它们的 SpeechRecognition 判定靶子已随 12B 删除，
  *   可迁移的变异意图（可用性只认函数、注入点不被忽略）由 T3/T7 在新实现上重新承载）
- * 固化成仓库内可复跑的证据——逐个"把实现改坏"，跑 `tests/` 下被登记的那 23 个测试文件，报告每个
+ * 固化成仓库内可复跑的证据——逐个"把实现改坏"，跑 `tests/` 下被登记的那 24 个测试文件，报告每个
  * 变异体是被测试抓到（DETECTED）还是溜过去了（MISSED），只要有该抓没抓到的就以非零码退出。
  *
  * 用法（在仓库根）：
@@ -180,8 +180,10 @@ const TEST_FILES = [
   'tests/speak.test.mjs',
   'tests/speak-mount.test.mjs',
   'tests/recurrence-mount.test.mjs',
-  // Task 12B 接入：相册导入的装配层（ready 屏入口 → 同一条质检/识物链路）。
-  // A4/A5（app 的相册守卫与解码分档）靠它抓；它 import 的 app / helpers 临时树里都有。
+  // Task 12B 接入：相册导入的单元契约（A1–A4 靠它抓——灰度管道/缩放口径/解码分档/关位图）
+  // 与装配层（ready 屏入口 → 同一条质检/识物链路，A5/A6 靠它抓）。
+  // 装配层那份 import 的 app / helpers 临时树里都有。
+  'tests/album.test.mjs',
   'tests/album-mount.test.mjs',
   // Task 9B 接入：待补反馈队列（纯逻辑 + 装配）与存储层的配额路径。
   // `tests/event-log.test.mjs` 同时接进来：`reading_missed` 是事件表的契约变更，
