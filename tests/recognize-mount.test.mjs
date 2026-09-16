@@ -15,8 +15,8 @@ import { test, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
 
 import {
-  withFetch, openCameraAndShoot, makeBlob, okFetch, failingFetch, realRecognizeWithFallback,
-  disposeAllHarnesses,
+  harness, withFetch, openCameraAndShoot, makeBlob, okFetch, failingFetch, realRecognizeWithFallback,
+  okRecognize, disposeAllHarnesses,
 } from './helpers/mount-harness.mjs';
 
 // 每条用例之后拆掉 mount 挂的定时器（待补反馈的自动重试会挂 10 秒的 setTimeout，
@@ -93,6 +93,19 @@ test('recognize_ok 带 payload.latencyMs（12A 起是客户端实测口径）且
   assert.equal(typeof ok[0].payload.latencyMs, 'number', '直连后耗时是客户端实测值，不再来自服务端信封');
   assert.ok(Number.isFinite(ok[0].payload.latencyMs), '实测值必然是有限数（缺数就不写键，绝不写 0 冒充）');
   h.restoreFetch();
+});
+
+test('拿不到实测耗时（链路返回 null）→ 不写 latencyMs 键，**绝不补 0**（X12 守的直连版）', async () => {
+  // 12A 后"服务端没给"这个情形不存在了，但"拿不到实测值"仍在（时钟异常时链路如实返回
+  // null）。挂载层对 null 无计可施——只能不写键。写 0 会让 latency_p95 看起来完美，
+  // 把"没拿到"这个真凶盖住；用注入的识物器把 null 送进装配层，钉住"省略键"这个口径。
+  const h = await harness({ recognize: okRecognize({ latencyMs: null }) });
+  await openCameraAndShoot(h);
+  const ok = h.events.filter((e) => e.type === 'recognize_ok');
+  assert.equal(ok.length, 1);
+  assert.equal('latencyMs' in ok[0].payload, false,
+    '拿不到就不写这个键——判据统计那侧只在键真的缺失时报缺口，两边对"缺"的表达必须一致');
+  assert.notEqual(ok[0].payload.latencyMs, 0);
 });
 
 test('帧被端侧拦下 → 一条事件都不落（没有请求就没有耗时，别用 0 冒充它）', async () => {

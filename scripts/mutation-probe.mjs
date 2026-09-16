@@ -1564,9 +1564,10 @@ const MUTANTS = [
   },
   {
     name: 'X12_writeLatencyZeroWhenMissing', target: APP, expect: 'detected',
-    why: '服务端没给耗时时**写 0**（`Number.isFinite(x) ? x : 0`）：0 是一个"合法且极好"的读数，'
-      + '于是 `latency_p95` 永远漂亮，而真凶（服务端没回这个数）被一个假数字盖住。'
-      + '注意它在"服务端给了有限数"那一支上与真实现**完全一致**，所以只有"没给"那条用例能抓它',
+    why: '拿不到耗时（链路返回 null，直连后是时钟异常那一档）时**写 0**：0 是一个"合法且极好"的读数，'
+      + '于是 `latency_p95` 永远漂亮，而真凶（没拿到实测值）被一个假数字盖住。'
+      + '注意它在"耗时是有限数"那一支上与真实现**完全一致**，所以只有"返回 null"那条用例能抓它'
+      + '（12A 起由注入的识物器把 null 送进装配层来抓）',
     find: '        ...(Number.isFinite(picked.latencyMs) ? { latencyMs: picked.latencyMs } : {}),',
     replace: '        latencyMs: Number.isFinite(picked.latencyMs) ? picked.latencyMs : 0,',
   },
