@@ -110,13 +110,17 @@ function fakeTts({ voices = [] } = {}) {
 test('播一个词：utterance 带目标词、lang=en-US，播完（onend）才收口', async () => {
   const { win, spoken, utterances } = fakeTts();
   const done = playWord('mug', { win });
+  let settled = false;
+  done.then(() => { settled = true; }, () => { settled = true; });
   assert.equal(spoken.length, 1, 'playWord 必须真的调了 speak');
   assert.equal(utterances[0].text, 'mug', '合成的是目标词本身');
   assert.equal(utterances[0].lang, 'en-US');
   assert.equal(spoken[0], utterances[0], '交给 speak 的就是那个 utterance');
-  await done;                                   // onend 还没回调时绝不 resolve
+  await new Promise((r) => setTimeout(r, 1));   // 给微任务一次机会：onend 没回调就不许收口
+  assert.equal(settled, false, 'onend 还没回调时绝不 resolve（挂住而不是失败，本项目吃过的亏）');
   utterances[0].onend?.({});
   await done;
+  assert.equal(settled, true);
 });
 
 test('有英文声就设 voice 与 lang（en-US 优先；只有 en-GB 时用 en-GB 的 voice 与 lang）', async () => {
@@ -140,7 +144,8 @@ test('有英文声就设 voice 与 lang（en-US 优先；只有 en-GB 时用 en-
 test('没有任何英文声（或引擎没给 voices）→ 照播：voice 不设、lang 兜底 en-US', async () => {
   const { win, spoken, utterances } = fakeTts({ voices: [{ lang: 'zh-CN' }] });
   const p = playWord('mug', { win });
-  await p.then(() => utterances[0].onend?.({}));
+  utterances[0].onend?.({});
+  await p;
   assert.equal(spoken.length, 1, '选不到英文声不该变成"播不了"');
   assert.equal(utterances[0].lang, 'en-US');
   assert.equal(utterances[0].voice, undefined);
@@ -163,7 +168,18 @@ test('speak 当场抛错 → 拒绝（不留挂住的 Promise）', async () => {
 test('空词 / 纯空白 / 非字符串 → 拒绝且不碰引擎（不播一个空示范音）', async () => {
   for (const bad of ['', '   ', null, undefined, 42]) {
     const { win, spoken } = fakeTts();
-    await assert.rejects(() => playWord(bad, { win }), /词/);
+    // 不用 await assert.rejects 直接等：它若变成"永不收口"（挂住而不是失败），
+    // 这条测试就得跟着挂死。用有限等待把"挂住"变成一种**可断言的失败**。
+    const outcome = await Promise.race([
+      playWord(bad, { win }).then(
+        () => 'resolved',
+        (err) => ({ rejected: String(err?.message ?? err) }),
+      ),
+      new Promise((r) => setTimeout(r, 50).then(() => 'hung')),
+    ]);
+    assert.notEqual(outcome, 'hung', `playWord(${String(bad)}) 必须当场收口（挂住是最坏的收口）`);
+    assert.equal(typeof outcome, 'object', `playWord(${String(bad)}) 必须是拒绝，不是照常 resolve`);
+    assert.match(outcome.rejected, /词/);
     assert.equal(spoken.length, 0, `playWord(${String(bad)}) 不许调 speak`);
   }
 });
