@@ -962,10 +962,11 @@ const MUTANTS = [
     name: 'C2_httpOkMeansUsable', target: COMPOSE, expect: 'detected',
     why: '去掉校验器那一关，直接把响应当反馈交出去：`ok` 从"校验通过、可用"退化成"HTTP 200"，'
       + '缺字段/取值越界的响应会以 `status:ok` 的形式流进界面与事件流——'
-      + '全局约束 3（失败不得静默降级为成功）的反面',
-    find: `  const verdict = validateFeedback(raw);
+      + '全局约束 3（失败不得静默降级为成功）的反面'
+      + '（12A 同步：直连改造后信封解析产物改名 `parsed`，find 随实现更新，变异意图不变）',
+    find: `  const verdict = validateFeedback(parsed);
   if (!verdict.ok) {`,
-    replace: `  const verdict = { ok: true, value: raw };
+    replace: `  const verdict = { ok: true, value: parsed };
   if (false) {`,
   },
   {
