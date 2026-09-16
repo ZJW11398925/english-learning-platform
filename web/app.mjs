@@ -177,7 +177,7 @@ const FALLBACK_SCENE_WORDS = Object.freeze(['mug', 'cup', 'book', 'pen', 'bottle
  * @param {object} [deps] 注入点（测试与 Task 8/9 用；全部有默认值，浏览器里不传即可）
  *   - `doc` DOM 工厂，默认 `globalThis.document`
  *   - `urlApi` 默认 `globalThis.URL`（冻结画面用 `createObjectURL`）
- *   - `camera` / `store` / `recordEvent` / `recognizeWithFallback` 覆盖懒加载的浏览器依赖。
+ *   - `camera` / `album` / `store` / `recordEvent` / `recognizeWithFallback` 覆盖懒加载的浏览器依赖。
  *     ⚠️ `store` 必须提供 `readWords()` 与 `putWord()`（Task 9 起本层要读写复现队列；
  *     真的 `units/store.mjs` 两个都有）。缺了会**响亮**报错，不会静默跳过入队。
  *   - `sessionId`、`clock`（时间戳函数）、`cameraOptions`、`onCompose`（造句原文的接线点）
@@ -201,6 +201,7 @@ export async function mount(root, deps = {}) {
     doc = globalThis.document,
     urlApi = globalThis.URL,
     camera: givenCamera = null,
+    album: givenAlbum = null,
     frameQC: givenQC = null,
     store: givenStore = null,
     recordEvent: givenRecord = null,
@@ -225,6 +226,8 @@ export async function mount(root, deps = {}) {
 
   // 懒加载浏览器专属依赖：注入了什么就不 import 什么（Node 测试里全都注入，于是不碰这些模块）。
   const camera = givenCamera ?? await import('./units/camera.mjs');
+  // 12B：相册导入单元——产出与 grabFrame 同形状的帧，识物链路眼里与相机帧无法区分。
+  const album = givenAlbum ?? await import('./units/album.mjs');
   const frameQC = givenQC ?? await import('./units/frame-qc.mjs');
   const record = givenRecord ?? (await import('./units/event-log.mjs')).recordEvent;
   const recognizeModule = givenRecognize === null ? await import('./units/recognize.mjs') : null;
@@ -359,6 +362,7 @@ export async function mount(root, deps = {}) {
   // **原句只从 `lastComposeText` 与 `result.sentence` 两处来**，界面不另存一份（免得两处不一致）。
   let feedback = null;
   let opening = false;         // 正在开相机（挡住双击：否则会开出两路流，多出来的那路没人关）
+  let albumBusy = false;       // 正在处理一次相册选图（挡住连选：一次选图还没走完，忽略下一次）
   let lastShotBlob = null;     // 最近一次 `grab()` 拿到的帧（识别链走后，freeze 用的是它）
   // 跟读这一格的现场只剩"示范音正在播"一个标志（12B：判定已退役，没有转写现场了）。
   // **它只在同一格里活着**，离开 reading 就随重渲染作废（按钮重新可点）。
@@ -753,6 +757,20 @@ export async function mount(root, deps = {}) {
             + (others > 0 ? `另有 ${others} 个词也到期了，先取这一个就行。` : '')));
         }
         action('拍照', onCapture, storageFull());
+        // 12B：相册导入入口——与「拍照」并列的第二条输入源。背后是一个
+        // `input[type=file][accept=image/*]`（移动浏览器上它会拉起相册/拍照选择器），
+        // 选中后走**同一条**帧质检 → 识物链路（onAlbumPicked）。按钮负责把入口说人话。
+        const albumInput = doc.createElement('input');
+        albumInput.type = 'file';
+        albumInput.accept = 'image/*';
+        albumInput.addEventListener('change', () => onAlbumPicked(albumInput));
+        const albumButton = doc.createElement('button');
+        albumButton.textContent = '从相册选图';
+        albumButton.disabled = storageFull();
+        albumButton.addEventListener('click', () => {
+          if (typeof albumInput.click === 'function') albumInput.click();
+        });
+        row.append(albumInput, albumButton);
         break;
       }
       case 'capturing': {
@@ -1055,7 +1073,87 @@ export async function mount(root, deps = {}) {
     shownWord = null;
     awaitingManualPick = false;
     recurrenceNote = null;
+    await recognizeAndAdvance(grab);
+  }
 
+  /**
+   * 「从相册选图」（Task 12B，转向 DEC-…26 第三项形态）：选中的图片走**同一条**
+   * 帧质检 → 识物链路。与快门唯一的差别是"这一帧从哪来"——先在**本函数里**把文件解码成
+   * 一帧（`units/album.mjs`，与 `grabFrame` 同形状的 `{ blob, stats }`），解码成功后
+   * `send('capture')` 进 capturing，再把它交给 `recognizeAndAdvance`：质检与识物
+   * 看见的东西与相机帧无法区分。事件口径不变：轮次与三类结论事件全部来自
+   * `recognizeAndAdvance` 这一处起源（不新增事件类型，roundIndex 连续性照旧）。
+   *
+   * 为什么解码放在 `send('capture')` **之前**：状态机的 capturing 是"取词进行中"
+   * （快门那一格），而"图打不开"是**用户情形**——解码失败时什么都没发生，
+   * 状态机不许动、事件不许落，用户留在 ready 换一张再选。先推进再解码会让
+   * 一次选图失败把用户搁在快门那一屏（那里没有"回去"的按钮）。
+   */
+  async function onAlbumPicked(input) {
+    if (albumBusy) return;                    // 连选/双触发：上一次选图还在路上，忽略这一次
+    setError('');
+    // 与「拍照」同一条守卫：没有 Key 的识物是一个必然 401 的空转，图根本不该解码。
+    // 不落事件、不动状态机：什么都没发生，就没有什么可记（"缺 Key"不是一次识物失败）。
+    if (!hasKey()) {
+      setError('先配置 API Key 再开始：点下面的「设置（API Key）」粘贴保存（platform.deepseek.com 可以创建）。');
+      render(machine.state);
+      return;
+    }
+    // 存储写满 → 停止派发新任务（§5.1）：与「拍照」同一条闸。
+    if (storageFull()) {
+      setError(STORAGE_FULL_SHORT);
+      render(machine.state);
+      return;
+    }
+    // 用户取消选择（没有文件）→ 什么都不发生。选完立刻清空 value：
+    // 同一张图第二次选中时 change 才会再触发（浏览器的口径）。
+    const file = input?.files?.[0] ?? null;
+    try { input.value = ''; } catch { /* 个别替身上赋值失败就随它去，不影响主流程 */ }
+    if (file === null) return;
+    albumBusy = true;
+    try {
+      // 解码（含 RGBA→灰度→质检统计，全部在 album 单元里，与相机同一条管道）。
+      const canvas = doc.createElement('canvas');
+      const shot = await album.frameFromImageFile(file, canvas);
+      // 解码成功 → 从这里起与快门同一条路：进 capturing（取词进行中），交共用尾巴。
+      machine.send('capture');
+      // 上一轮的结果清掉（与快门同一份清单）。
+      lastPick = null;
+      shownWord = null;
+      awaitingManualPick = false;
+      recurrenceNote = null;
+      lastShotBlob = shot.blob;
+      await recognizeAndAdvance(async () => shot);
+    } catch (err) {
+      // 解码的错：只把"这张图打不开"（IMAGE_NOT_READABLE）当成**用户情形**——
+      // 状态机没动过、一条事件不落，错误区给一句能行动的话。
+      if (err?.code === album.IMAGE_NOT_READABLE) {
+        setError(`这张图片打不开，请换一张试试（${err?.message ?? err}）`);
+        return;
+      }
+      // RangeError（参数/缓冲契约违约）= 编程错误：显示出来是为了不让用户面对"选了没反应"，
+      // **同时原样重抛**，让它带着栈冒到控制台——绝不静默变成一次"这张照片不行"。
+      if (err?.name === 'RangeError') {
+        setError(`读图失败（这是程序缺陷，不是你的图片问题）：${err?.message ?? err}`);
+      } else {
+        setError(`读图失败：${err?.message ?? err}`);
+      }
+      throw err;
+    } finally {
+      albumBusy = false;
+    }
+  }
+
+  /**
+   * 取帧 → 端侧质检 → 最多两次识物请求 → 落事件/推进状态：**快门与相册选图共用的同一条尾巴**
+   * （12B 抽取——两条输入源只有"这一帧从哪来"不同，此后的一切必须共用一处起源，
+   * 否则事件口径迟早各自漂移）。
+   *
+   * 进本函数前调用方必须已把状态机送进 capturing（快门在 capturing 里天然成立；
+   * 相册路径在解码成功后 `send('capture')`）。这里的取帧错误只剩**相机**的用户情形
+   * （按快门太早）：相册的解码错误在 `onAlbumPicked` 里就地处置，到不了这里。
+   */
+  async function recognizeAndAdvance(grabFn) {
     let picked;
     try {
       // 取帧 → 端侧质检 → 最多两次识物请求，全在 `recognizeWithFallback` 里。
@@ -1065,10 +1163,11 @@ export async function mount(root, deps = {}) {
       // 于是"谁是网络出口"只有一个决定点，注入式测试也能接管它。
       // 12A：直连模型服务的 Key 在发请求那一刻从 keyring 读——设置里存好/清掉，下一拍就生效。
       picked = await runRecognize({
-        grab, frameQC, acceptableSets: ACCEPTABLE_SETS, exclude: [], apiKey: apiKeyNow(),
+        grab: grabFn, frameQC, acceptableSets: ACCEPTABLE_SETS, exclude: [], apiKey: apiKeyNow(),
       });
     } catch (err) {
-      // `grab()` 的错：只把"用户按快门太早"（VIDEO_NOT_READY）当成可预期的用户情形。
+      // `grab()` 的错：只把"用户按快门太早"（VIDEO_NOT_READY）当成可预期的用户情形，
+      // 不落事件、不改状态（没有产出结论就不是一轮）。
       if (err?.code === camera.VIDEO_NOT_READY) {
         setError('画面还没准备好，请稍等一秒再按快门。');
         return;
@@ -1086,10 +1185,10 @@ export async function mount(root, deps = {}) {
 
     lastPick = picked;
 
-    // 走到这里说明这一按**真的产出了一轮结论** → 开一轮。
-    // 上面那个 `catch` 里的三种情形（按太早、RangeError、其它取帧错误）都到不了这里：
+    // 走到这里说明这次取词动作（快门**或**相册选图，12B 起）**真的产出了一轮结论** → 开一轮。
+    // 上面那个 `catch` 里的三种情形（按太早/图打不开、RangeError、其它取帧错误）都到不了这里：
     // 它们要么 return、要么原样重抛，一条事件都不落——所以事件流里的 roundIndex 是连续的
-    // 1、2、3…，没有空洞（"按了但没产出结论"不是一轮，见 units/rounds.mjs 的定义）。
+    // 1、2、3…，没有空洞（"做了但没产出结论"不是一轮，见 units/rounds.mjs 的定义）。
     const roundIndex = rounds.next();
     // 反馈事件（Task 8）沿用这一轮的编号：造句发生在取词的**同一轮**里，
     // 它不是一次新的快门——给反馈单开一个轮次号会让判据 B 的轮数虚增。
@@ -1098,7 +1197,8 @@ export async function mount(root, deps = {}) {
     if (picked.mode === 'frame_rejected') {
       // 如实记录这一档（设计文档 §5.1）：先落事件再退状态，两件事都不许省。
       // 这一帧没送到模型，所以 attempts 是 0（见 units/recognize.mjs 的口径说明）。
-      // 但它**同样是一次快门**，故同样带 roundIndex——端侧拦下的重拍也是重拍（判据 B 的主要来源）。
+      // 但它**同样是一次取词动作**（快门或选图），故同样带 roundIndex——端侧拦下的重拍也是重拍
+      // （判据 B 的主要来源；相册选图被端侧拦下同样计入，两条输入源一个口径）。
       record(store, 'frame_rejected', { sessionId, roundIndex, reason: picked.reason }, clock);
       machine.send('frameBad', { reason: picked.reason });
       return;
