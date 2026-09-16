@@ -8,10 +8,11 @@
  * + Task 9 的 28 个（跟读判定 K1–K6 + 已证等价的 K7，接线 P1–P22）
  * + Task 9B 的 13 个（待补反馈队列 Q1–Q8、storage_full Q9–Q11、reading_missed Q12–Q13）
  * + Task 10 的 17 个（导出统计口径 X1–X14 + 耗时落盘的 R16–R17；
- *   X12 的目标是 `web/app.mjs`，R16–R17 的目标是 `web/units/recognize.mjs`）
+ *   X12 的目标是 `web/app.mjs`，R16–R17 的目标是 `web/units/recognize.mjs`；
+ *   R16 于 Task 12A 退役——直连改造重写了那一行，证据责任移交 D9，见变异体表内注释）
  * + Task 12A 的 14 个（浏览器直连 + Key 管理：keyring D1–D3、deepseek D4–D5、
  *   识物直连 D6–D10 与 D14、造句直连 D11–D13）
- * 固化成仓库内可复跑的证据——逐个"把实现改坏"，跑 `tests/` 下被登记的那 17 个测试文件，报告每个
+ * 固化成仓库内可复跑的证据——逐个"把实现改坏"，跑 `tests/` 下被登记的那 22 个测试文件，报告每个
  * 变异体是被测试抓到（DETECTED）还是溜过去了（MISSED），只要有该抓没抓到的就以非零码退出。
  *
  * 用法（在仓库根）：
