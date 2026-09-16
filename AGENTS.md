@@ -47,12 +47,13 @@ node scripts/mutation-probe.mjs          # 变异探针（跑前先冻住工作�
 ## dmcp 段（跨会话续接第一入口）
 
 - **workspace_id**：`ws-db58afd2-145c-4e81-9a7b-b562d8679071`（**带 `ws-` 前缀**；对象 id 里的 `OPI-ecb3037d-…` 是 project id，拿它当 workspace 用会 `WORKSPACE_NOT_FOUND`）
-- **最新一轮（2026-09-17 会话，rev 43→51）**：
+- **最新一轮（2026-09-17 会话，rev 43→52）**：
   - `DEC-OPI-5a247eb9-6816-4e78-b80f-1c5eeff7ceb3.7` —— 实弹探针跑通 + 超时标定（**结论：三条常量原样保留**）
   - `DEC-OPI-5a247eb9-6816-4e78-b80f-1c5eeff7ceb3.10` —— readiness **结构性不可达**根因 + 两条解封路径（**下会话若要碰 readiness 先读这条**）
   - `VAL-OPI-5a247eb9-6816-4e78-b80f-1c5eeff7ceb3.13` —— 线上/仓库一致性断言：首跑 `VR-…b3.17` = **FAIL**（3 处注释级落后），部署后二跑 `VR-…b3.38` = **PASS**（0/19 不一致）；`DEC-…b3.19` 定 `REDEPLOY_TO_SYNC`
   - `VAL-OPI-5a247eb9-6816-4e78-b80f-1c5eeff7ceb3.33` —— 无 Key 引导路径（`VR-…b3.35` = **PASS**，5/5）；`DEC-…b3.36` 登记 HUMAN_RUBRIC 出不了机读 verdict 这条能力边界
   - `DEC-OPI-5a247eb9-6816-4e78-b80f-1c5eeff7ceb3.24` —— 文档摘要**零漂移**确认 + 归一约定（防假漂移）
+  - `DEC-OPI-5a247eb9-6816-4e78-b80f-1c5eeff7ceb3.40` —— 部署脚本误拦快进的真缺陷（已修已验）
   - 本轮唯一代码改动是 `scripts/deploy-pages.mjs`（修快进误拦，见上）；`node --test` 494/494 复跑绿
 - **契约载体**（GOAL / IN_SCOPE / OUT_OF_SCOPE / 约束 / CORE_JOURNEY）：`DEC-OPI-ecb3037d-1a56-46d3-b931-4d482dcc668f.19`
 - **文档绑定决策**（三份治理文档的 SHA-256 登记在其 ASSUMPTIONS 断言里；文档变更后 digest 不匹配即漂移证据）：`DEC-OPI-5c134c67-9bdd-46d2-b9bc-7d51bfde8585.5`
