@@ -19,7 +19,8 @@
 - **界面已重做（`DEC-…b3.44`，rev 53）**：从「浏览器默认外观」改成有设计系统的界面。**样式单源 = `web/styles.css`**（`index.html` 里已无内联 `<style>`，有测试钉住不许回流），**`app.mjs` 一行未改**（DOM 契约零改动，494 个既有测试的语义未动）。口径：安静的效率工具 + 一个暖调重音；颜色/圆角/间距/时长全部令牌化（组件规则不许写死颜色）；暖纸 `#faf8f5` / 暖黑 `#161513`；单一深青重音 `#0f766e`；**要学的英文词用系统衬线、中文界面用系统无衬线**（零外部字体，因为零外部资源是硬约束）；深色模式走系统偏好。
   - **动 UI 前先看这里**：① `web/gallery.html` 是**界面走查台**（注入假存储 + 惰性 fetch，把生产那份 app.mjs 在各档位挂起来截图，`?scenario=ready|ready-due|pending|settings`，`?key=unset` 看不配 Key 那一屏）；起服务：`node tmp/serve-web.mjs 4189`。② `tests/styles.test.mjs` 十条样式契约（已做变异校验）。③ 改 web/ 后别忘了重新部署。
   - **主操作重音的判据**（三次踩坑换来的，别再猜）：`settings` 与 `pending` 的动作行 DOM 形状**完全一样**（同为 `#app > div > div.row`），位置/数量判据都分不开；现用「主屏靠 `input[type=file]` 认行、设置屏靠 `input[type=password]` 认屏，其余动作行一律次级」。`nth-child` 与 `only-of-type` 两种写法都被测试明确禁止。
-  - 验证：`node --test` **504/504**（494 + 新 10）；改前/改后/深色截图在 `docs/ui-redesign/`。**未覆盖**：`composing`/`feedback`/`done` 需真识别链路，走查台未 mock，未截图；真机渲染未跑。**本轮 UI 改动未部署**。
+  - 验证：`node --test` **504/504**（494 + 新 10）；改前/改后/深色截图在 `docs/ui-redesign/`。**未覆盖**：`capturing`/`word`/`composing`/`feedback` 需真识别链路，走查台未 mock，未截图——已铸任务书 `TASK-…b3.54` 交给子代理补验。
+  - **已上线**（`VAL-…b3.51` → `VR-…b3.53` = **PASS**）：`node scripts/deploy-pages.mjs` 快进 `e982789..83d827d`（非强推），线上 22 文件在 LF 归一字节口径下 **0 不一致**，首页已引用 `styles.css` 且无内联 `<style>`。⚠️ 部署后 **GitHub Pages 构建 + CDN** 需要几分钟：期间新文件会 404、首页 `Last-Modified` 还是上一次的（本次等了约 7 分钟）。
 - **实弹标定已完成（`DEC-…b3.7`，2026-09-17，5 次真实计费调用全 200、零超时）**：识物腿 `latencyMs=1860.4ms`（返 mug 0.95 / cup 0.4）；造句反馈腿端到端 1718/1291/1681/1683 ms，usage 完整，`validateFeedback` 四条全过；另 1 次零计费空句 `status=pending reason=empty_sentence`（一次请求都没发）。**结论：三条常量原样保留**（`RECOGNIZE_REQUEST_TIMEOUT_MS=12000` / `FEEDBACK_REQUEST_TIMEOUT_MS=24000` / `PLAY_WORD_TIMEOUT_MS=15000`，余量 6.5x/14x/8.9x），不收紧（本机有线≠弱网，假超时比多等更坏）也不抬高（无弱网证据）。**真实瓶颈已定位不在网络而在模型侧 reasoning token 生成**（completion 144-239，其中 reasoning 100-177）。上传腿有界：相机/相册同口径先缩后编（长边 512 / JPEG 0.8），base64 后约 40-80KB，对 32MiB 上限有 3 个数量级余量。**如实登记两处未验**：`uncertain` 一档本轮 4 条语料 **0 次命中**（探针如实报不一致）；`--degenerate` 三条退化语料**未跑**（3 次计费调用，未授权）。
 - **线上已与仓库对齐（`VAL-…b3.13` 二次跑 `VR-…b3.38` = PASS）**：首跑 `VR-…b3.17` = **FAIL**（19 文件中 3 处不一致，**全部只在注释**——线上仍在注释里点名已退役的 `server/*-upstream.mjs`，HEAD 已改为「旧服务端代理（已退役）」，可执行代码逐字节一致、功能性漂移 = 0；线上落后 HEAD 恰 1 个提交）。已按 `DEC-…b3.19` 跑 `node scripts/deploy-pages.mjs` 把 gh-pages 从 `f9d73d4` **快进**到 `e982789`，复跑得 **mismatched_files=0 / in-sync=19/19**。
   - **部署脚本已修**（`scripts/deploy-pages.mjs`）：原逻辑只要远端 SHA ≠ split SHA 就报「不一致且无法快进」并要人 `--force`，但它**从不检查祖先关系**——而 split 是确定性的，远端是本地结果的祖先时本应是一次普通快进（`--force` 反而会丢掉远端那个祖先提交，把增量部署变成历史改写）。现改为先问 `merge-base --is-ancestor`，只有真分叉才拦。首次触发场景：上一次部署后又有只改注释的提交（`e476063`）没发上去。
@@ -43,15 +44,17 @@ node scripts/mutation-probe.mjs          # 变异探针（跑前先冻住工作�
 
 ## 工作红线（实施期教训沉淀，细节见台账「环境教训」段）
 
+0. **总控不亲自执行（`DEC-…b3.56`，流程违规的纠正）**：按「持续开发工作流（总控模式）」，主对话是**总控**（评审/核验/决策/布置），**执行交给新上下文子代理并携带自足任务书**。**开工前置步骤：任何执行类工作（写代码/写测试/跑探针/部署）先 `task_build` 铸任务书，再委派**——`task_build` 没有任何强制力（不存在"没 TASK 就不许改代码"的闸门），这条完全靠自律，所以必须显式做。**代价是真实的**：亲自执行会把执行噪声灌进总控上下文，直接侵蚀后续的评审与核验能力；且没有任务书的工作只能由自己的断言佐证、无法被独立复核。（2026-09-17 界面重做那一轮整个违反了这条——产物保留、流程认错，见 `DEC-…b3.56`。）
 1. **变异测试必须带基线护栏**：重定向后原实现必须全绿，否则"脚本坏了"会被误读成"测试有效"。本环境禁止 piped 子进程 stdio，`process.exitCode` 须读 `exit` 事件。
 2. **跑探针前冻住工作树**：包括自己在内不写仓库内任何文件（报告、清单、注释都算），跑完再改——探针的仓库完整性校验在并发写入下会假 FAIL。
 3. **一轮只落一条结论事件**：不开新事件类型（`recognize_ok` 的 `latencyMs` 是字段不是新事件）。
 4. **服务端没给的数不发明**：缺键不写 0——0 是"合法且极好"的读数，会盖住真凶。
+5. **比对线上文件必须 LF 归一 + 字节级**（踩过两次，方法错不是部署错）：① 别用 `Invoke-WebRequest` 的 `.Content` 做字符串比对——PowerShell 会把 UTF-8 当 GBK 解，往返即损坏，曾让 `favicon.svg` 假报 MISMATCH（实际两侧都是 691 字节、SHA-256 逐位相等）；② 本地 checkout 是 CRLF、git 存 LF，**纯字节比对会让 17 个文本文件假报 MISMATCH**。正确尺子：**先做 CRLF→LF 归一再算 sha256**（`DEC-…b3.13` 已定的口径）。
 
 ## dmcp 段（跨会话续接第一入口）
 
 - **workspace_id**：`ws-db58afd2-145c-4e81-9a7b-b562d8679071`（**带 `ws-` 前缀**；对象 id 里的 `OPI-ecb3037d-…` 是 project id，拿它当 workspace 用会 `WORKSPACE_NOT_FOUND`）
-- **最新一轮（2026-09-17 会话，rev 43→54）**：
+- **最新一轮（2026-09-17 会话，rev 43→57）**：
   - `DEC-OPI-5a247eb9-6816-4e78-b80f-1c5eeff7ceb3.7` —— 实弹探针跑通 + 超时标定（**结论：三条常量原样保留**）
   - `DEC-OPI-5a247eb9-6816-4e78-b80f-1c5eeff7ceb3.10` —— readiness **结构性不可达**根因 + 两条解封路径（**下会话若要碰 readiness 先读这条**）
   - `VAL-OPI-5a247eb9-6816-4e78-b80f-1c5eeff7ceb3.13` —— 线上/仓库一致性断言：首跑 `VR-…b3.17` = **FAIL**（3 处注释级落后），部署后二跑 `VR-…b3.38` = **PASS**（0/19 不一致）；`DEC-…b3.19` 定 `REDEPLOY_TO_SYNC`
@@ -59,6 +62,8 @@ node scripts/mutation-probe.mjs          # 变异探针（跑前先冻住工作�
   - `DEC-OPI-5a247eb9-6816-4e78-b80f-1c5eeff7ceb3.24` —— 文档摘要**零漂移**确认 + 归一约定（防假漂移）
   - `DEC-OPI-5a247eb9-6816-4e78-b80f-1c5eeff7ceb3.40` —— 部署脚本误拦快进的真缺陷（已修已验）
   - **`DEC-OPI-5a247eb9-6816-4e78-b80f-1c5eeff7ceb3.44` —— 界面重做口径**（令牌化样式单源 + 走查台；`VAL-…b3.46` → `VR-…b3.48` = **PASS**，504/504）
+  - `VAL-OPI-5a247eb9-6816-4e78-b80f-1c5eeff7ceb3.51` —— 界面重做**上线核验**（`VR-…b3.53` = **PASS**，线上 22 文件 0 不一致）
+  - **`DEC-OPI-5a247eb9-6816-4e78-b80f-1c5eeff7ceb3.56` —— 流程违规的纠正**（总控亲自执行了开发；见红线 0）+ 任务书 **`TASK-OPI-5a247eb9-6816-4e78-b80f-1c5eeff7ceb3.54`**（剩余档位补验，已委派子代理）
   - 本轮代码改动：`scripts/deploy-pages.mjs`（修快进误拦）+ `web/styles.css` / `web/gallery.html` / `web/favicon.svg` / `web/index.html` / `tests/styles.test.mjs`（界面重做）；`app.mjs` 零改动
 - **契约载体**（GOAL / IN_SCOPE / OUT_OF_SCOPE / 约束 / CORE_JOURNEY）：`DEC-OPI-ecb3037d-1a56-46d3-b931-4d482dcc668f.19`
 - **文档绑定决策**（三份治理文档的 SHA-256 登记在其 ASSUMPTIONS 断言里；文档变更后 digest 不匹配即漂移证据）：`DEC-OPI-5c134c67-9bdd-46d2-b9bc-7d51bfde8585.5`
