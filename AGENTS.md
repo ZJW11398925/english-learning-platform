@@ -16,6 +16,10 @@
 - **公测前清单**（`DEC-…d5d39b50.21` 钉住）：①直连实弹探针跑一轮并标定超时——**已完成**（见下）；②无 Key 线上引导路径走查——**已完成**（`VAL-…b3.33` → `VR-…b3.35` = **PASS**，5/5 评分项；Playwright + Edge 无头移动仿真 390x844 直打线上，证据 `docs/evidence-2026-09-17/`）；③改 web/ 后手动 `node scripts/deploy-pages.mjs`（无 CI）——**本轮已实跑一次并修好脚本的误拦**（见下）；④本机 `.env` 建议手删（已无代码引用）——**已核实 `.env` 在 `.gitignore:8`、未被 git 跟踪**，且探针要用它，故保留。**四项全清。**
 - **无 Key 走查结论（`VAL-…b3.33` PASS）**：首次访问者**不需要先撞墙**——ready 屏当场就给出完整引导段（为什么需要 Key / `platform.deepseek.com` 去哪拿 / `sk-` 形状 / 只存本机不上传 / 清浏览器数据会连 Key 一起删）；点「拍照」与「从相册选图」都被拦下并指向设置，且**状态保持 ready、未发起相机调用**（守卫先于能力）；设置屏含未配置声明 + 创建指引 + `sk-` 输入框 + 保存/清除/返回三键，可返回 ready。唯一控制台报错是 `favicon.ico` 404（装饰性）。**未覆盖**：桌面 Edge 的移动仿真**非真机**，触屏与软键盘未测。
 - **⚠️ HUMAN_RUBRIC 出不了机读 verdict（`DEC-…b3.36`）**：本运行时 `validation_submit` 对 `criterion.type = HUMAN_RUBRIC` 以 `VALIDATION_REQUIREMENT_INVALID`（「only METRIC_COMPARATOR criteria are evaluable at attestation depth」）诚实拒绝——`validation_define` 会接受、submit 不认。**以后要机读 verdict 的验收一律写成 `METRIC_COMPARATOR`**（把评分表转成 `rubric_items_passed == N`），评分项全文写进 proposition/measurements 保留语义。**未定性为缺陷**（无法区分「刻意信任边界」与「实现缺口」，只登记不报缺陷）。
+- **界面已重做（`DEC-…b3.44`，rev 53）**：从「浏览器默认外观」改成有设计系统的界面。**样式单源 = `web/styles.css`**（`index.html` 里已无内联 `<style>`，有测试钉住不许回流），**`app.mjs` 一行未改**（DOM 契约零改动，494 个既有测试的语义未动）。口径：安静的效率工具 + 一个暖调重音；颜色/圆角/间距/时长全部令牌化（组件规则不许写死颜色）；暖纸 `#faf8f5` / 暖黑 `#161513`；单一深青重音 `#0f766e`；**要学的英文词用系统衬线、中文界面用系统无衬线**（零外部字体，因为零外部资源是硬约束）；深色模式走系统偏好。
+  - **动 UI 前先看这里**：① `web/gallery.html` 是**界面走查台**（注入假存储 + 惰性 fetch，把生产那份 app.mjs 在各档位挂起来截图，`?scenario=ready|ready-due|pending|settings`，`?key=unset` 看不配 Key 那一屏）；起服务：`node tmp/serve-web.mjs 4189`。② `tests/styles.test.mjs` 十条样式契约（已做变异校验）。③ 改 web/ 后别忘了重新部署。
+  - **主操作重音的判据**（三次踩坑换来的，别再猜）：`settings` 与 `pending` 的动作行 DOM 形状**完全一样**（同为 `#app > div > div.row`），位置/数量判据都分不开；现用「主屏靠 `input[type=file]` 认行、设置屏靠 `input[type=password]` 认屏，其余动作行一律次级」。`nth-child` 与 `only-of-type` 两种写法都被测试明确禁止。
+  - 验证：`node --test` **504/504**（494 + 新 10）；改前/改后/深色截图在 `docs/ui-redesign/`。**未覆盖**：`composing`/`feedback`/`done` 需真识别链路，走查台未 mock，未截图；真机渲染未跑。**本轮 UI 改动未部署**。
 - **实弹标定已完成（`DEC-…b3.7`，2026-09-17，5 次真实计费调用全 200、零超时）**：识物腿 `latencyMs=1860.4ms`（返 mug 0.95 / cup 0.4）；造句反馈腿端到端 1718/1291/1681/1683 ms，usage 完整，`validateFeedback` 四条全过；另 1 次零计费空句 `status=pending reason=empty_sentence`（一次请求都没发）。**结论：三条常量原样保留**（`RECOGNIZE_REQUEST_TIMEOUT_MS=12000` / `FEEDBACK_REQUEST_TIMEOUT_MS=24000` / `PLAY_WORD_TIMEOUT_MS=15000`，余量 6.5x/14x/8.9x），不收紧（本机有线≠弱网，假超时比多等更坏）也不抬高（无弱网证据）。**真实瓶颈已定位不在网络而在模型侧 reasoning token 生成**（completion 144-239，其中 reasoning 100-177）。上传腿有界：相机/相册同口径先缩后编（长边 512 / JPEG 0.8），base64 后约 40-80KB，对 32MiB 上限有 3 个数量级余量。**如实登记两处未验**：`uncertain` 一档本轮 4 条语料 **0 次命中**（探针如实报不一致）；`--degenerate` 三条退化语料**未跑**（3 次计费调用，未授权）。
 - **线上已与仓库对齐（`VAL-…b3.13` 二次跑 `VR-…b3.38` = PASS）**：首跑 `VR-…b3.17` = **FAIL**（19 文件中 3 处不一致，**全部只在注释**——线上仍在注释里点名已退役的 `server/*-upstream.mjs`，HEAD 已改为「旧服务端代理（已退役）」，可执行代码逐字节一致、功能性漂移 = 0；线上落后 HEAD 恰 1 个提交）。已按 `DEC-…b3.19` 跑 `node scripts/deploy-pages.mjs` 把 gh-pages 从 `f9d73d4` **快进**到 `e982789`，复跑得 **mismatched_files=0 / in-sync=19/19**。
   - **部署脚本已修**（`scripts/deploy-pages.mjs`）：原逻辑只要远端 SHA ≠ split SHA 就报「不一致且无法快进」并要人 `--force`，但它**从不检查祖先关系**——而 split 是确定性的，远端是本地结果的祖先时本应是一次普通快进（`--force` 反而会丢掉远端那个祖先提交，把增量部署变成历史改写）。现改为先问 `merge-base --is-ancestor`，只有真分叉才拦。首次触发场景：上一次部署后又有只改注释的提交（`e476063`）没发上去。
@@ -47,14 +51,15 @@ node scripts/mutation-probe.mjs          # 变异探针（跑前先冻住工作�
 ## dmcp 段（跨会话续接第一入口）
 
 - **workspace_id**：`ws-db58afd2-145c-4e81-9a7b-b562d8679071`（**带 `ws-` 前缀**；对象 id 里的 `OPI-ecb3037d-…` 是 project id，拿它当 workspace 用会 `WORKSPACE_NOT_FOUND`）
-- **最新一轮（2026-09-17 会话，rev 43→52）**：
+- **最新一轮（2026-09-17 会话，rev 43→54）**：
   - `DEC-OPI-5a247eb9-6816-4e78-b80f-1c5eeff7ceb3.7` —— 实弹探针跑通 + 超时标定（**结论：三条常量原样保留**）
   - `DEC-OPI-5a247eb9-6816-4e78-b80f-1c5eeff7ceb3.10` —— readiness **结构性不可达**根因 + 两条解封路径（**下会话若要碰 readiness 先读这条**）
   - `VAL-OPI-5a247eb9-6816-4e78-b80f-1c5eeff7ceb3.13` —— 线上/仓库一致性断言：首跑 `VR-…b3.17` = **FAIL**（3 处注释级落后），部署后二跑 `VR-…b3.38` = **PASS**（0/19 不一致）；`DEC-…b3.19` 定 `REDEPLOY_TO_SYNC`
   - `VAL-OPI-5a247eb9-6816-4e78-b80f-1c5eeff7ceb3.33` —— 无 Key 引导路径（`VR-…b3.35` = **PASS**，5/5）；`DEC-…b3.36` 登记 HUMAN_RUBRIC 出不了机读 verdict 这条能力边界
   - `DEC-OPI-5a247eb9-6816-4e78-b80f-1c5eeff7ceb3.24` —— 文档摘要**零漂移**确认 + 归一约定（防假漂移）
   - `DEC-OPI-5a247eb9-6816-4e78-b80f-1c5eeff7ceb3.40` —— 部署脚本误拦快进的真缺陷（已修已验）
-  - 本轮唯一代码改动是 `scripts/deploy-pages.mjs`（修快进误拦，见上）；`node --test` 494/494 复跑绿
+  - **`DEC-OPI-5a247eb9-6816-4e78-b80f-1c5eeff7ceb3.44` —— 界面重做口径**（令牌化样式单源 + 走查台；`VAL-…b3.46` → `VR-…b3.48` = **PASS**，504/504）
+  - 本轮代码改动：`scripts/deploy-pages.mjs`（修快进误拦）+ `web/styles.css` / `web/gallery.html` / `web/favicon.svg` / `web/index.html` / `tests/styles.test.mjs`（界面重做）；`app.mjs` 零改动
 - **契约载体**（GOAL / IN_SCOPE / OUT_OF_SCOPE / 约束 / CORE_JOURNEY）：`DEC-OPI-ecb3037d-1a56-46d3-b931-4d482dcc668f.19`
 - **文档绑定决策**（三份治理文档的 SHA-256 登记在其 ASSUMPTIONS 断言里；文档变更后 digest 不匹配即漂移证据）：`DEC-OPI-5c134c67-9bdd-46d2-b9bc-7d51bfde8585.5`
   - 覆盖：设计 spec（`docs/superpowers/specs/2026-09-14-…-design.md`）、实施计划（`docs/superpowers/plans/2026-09-14-….md`）、真机清单（`docs/真机验证清单.md`），登记于 2026-09-15
