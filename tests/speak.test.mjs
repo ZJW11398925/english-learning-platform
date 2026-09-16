@@ -1,169 +1,195 @@
 // tests/speak.test.mjs
 //
-// 跟读判定的纯逻辑测试（设计文档 §4.3）：**只判"有没有说出目标词"**，不做音素级音准评分
-// ——那是本切片显式写下的妥协，任何"打分/相似度"的实现都是超出设计的发明。
+// 跟读示范音单元（`web/units/speak.mjs`）的测试。Task 12B（转向 DEC-…23/26）把跟读这一格
+// 从「SpeechRecognition 自动判定」改成「听示范 → 自己念 → 自评」——本模块的职责随之收窄成
+// **一件事：把目标词用浏览器本地的 speechSynthesis 念出来**。
 //
-// 本文件的结构：前 5 条是计划里给的测试（**逐字保留**，它们是这份模块的验收基线），
-// 后面是 Task 9 补的边界：标点与大小写、空值不抛错、多词目标词、转写原样保留、
-// 可用性判定的"必须是函数"这一层，以及"本模块零浏览器 API"。
+// 识别与判定（checkSpeech / isSpeechAvailable / token 规则）已随 SpeechRecognition 一并退役：
+// `reading_done` / `reading_missed` / `speech_unsupported` 三个事件类型保留在 schema 里
+//（历史数据要在诊断页继续渲染），但新流程不再产生它们——"有没有念出这个词"从此由
+// 学习者自己确认，系统不判定。这份文件 therefore 只钉三件事：
+//   1. `pickVoice`：语音选择——优先 en-US，选不到退任何英文声（en-GB / en / en_US 同类），
+//      再没有就 null（界面照播，靠 u.lang='en-US' 让引擎自己挑）；
+//   2. `isTtsAvailable`：可用性判定——speechSynthesis.speak 与 SpeechSynthesisUtterance
+//      **都必须是函数**（调用方会 `new` 它，占位对象会把一次"点击即崩"留给用户）；
+//   3. `playWord`：播放——成功/失败都要收口（不留挂住的 Promise）、空词不播、
+//      失败带引擎错误码、清理不把主流程带崩。
 //
-// **一次口径变更**（控制器裁定，见 `task-9-report.md`）：多词目标词从"永远判不出"改成
-// "连续 token 子序列"匹配。单词目标词的用例（含计划那 5 条）在变更前后逐字未动、全绿。
-//
-// 为什么会需要后面那些：本项目已三次被证明"测试全绿 ≠ 算法被锁住"（Task 3 的 18 个变异体里，
-// 计划自带的 11 条测试只抓到 4 个）。所以每一条边界都要有用例，否则变异探针只能报 MISSED。
+// 与旧版同一条架构纪律：**零 import、零浏览器全局**（speechSynthesis / Utterance 全部经
+// 参数注入，`mount()` 的 deps 缺省才给 globalThis），于是它能在 Node 里直接测。
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 
-import { checkSpeech, isSpeechAvailable } from '../web/units/speak.mjs';
+import { pickVoice, isTtsAvailable, playWord } from '../web/units/speak.mjs';
 
-// ─────────────────────────── 计划自带的 5 条（逐字保留）───────────────────────────
+// ─────────────────────────── pickVoice：语音选择 ───────────────────────────
 
-test('转写里出现目标词即算说出（大小写与标点无关）', () => {
-  assert.equal(checkSpeech('mug', 'I see a Mug.').said, true);
+test('有 en-US 就选 en-US（优先级最高），且返回的就是列表里那个对象', () => {
+  const enUS = { lang: 'en-US', name: 'A' };
+  const enGB = { lang: 'en-GB', name: 'B' };
+  assert.equal(pickVoice([enGB, enUS]), enUS, '必须选 en-US 那一个（不是第一个）');
 });
 
-test('只出现词的一部分不算说出（避免 mug 与 mugshot 混淆）', () => {
-  assert.equal(checkSpeech('mug', 'mugshot').said, false);
+test('没有 en-US 时退任何英文声：en-GB 也可以', () => {
+  const enGB = { lang: 'en-GB', name: 'B' };
+  assert.equal(pickVoice([{ lang: 'fr-FR' }, enGB]), enGB);
 });
 
-test('完全没念到则 said=false，且原样保留转写', () => {
-  const r = checkSpeech('mug', 'I see a cup');
-  assert.equal(r.said, false);
-  assert.equal(r.transcript, 'I see a cup');
+test('裸 lang（不带地区）也算英文声：en 与 en-US 同族', () => {
+  const en = { lang: 'en' };
+  assert.equal(pickVoice([{ lang: 'de-DE' }, en]), en);
 });
 
-test('空转写不抛错', () => {
-  assert.equal(checkSpeech('mug', '').said, false);
+test('下划线写法（en_US）与大小写差异（EN-us）都归一后匹配（真实平台两种都有）', () => {
+  const underscore = { lang: 'en_US' };
+  assert.equal(pickVoice([{ lang: 'ja-JP' }, underscore]), underscore);
+  const weirdCase = { lang: 'EN-us' };
+  assert.equal(pickVoice([weirdCase]), weirdCase, '首选匹配同样大小写无关');
 });
 
-test('没有 SpeechRecognition 时判为不可用（走手动打勾降级）', () => {
-  assert.equal(isSpeechAvailable({}), false);
-  assert.equal(isSpeechAvailable({ SpeechRecognition: function R() {} }), true);
-  assert.equal(isSpeechAvailable({ webkitSpeechRecognition: function R() {} }), true);
+test('一个英文声都没有 → null（调用方照播，靠 u.lang=en-US 让引擎自己挑，不硬塞非英文声）', () => {
+  assert.equal(pickVoice([{ lang: 'fr-FR' }, { lang: 'zh-CN' }]), null);
+  assert.equal(pickVoice([]), null);
 });
 
-// ─────────────────────────── Task 9 补的边界 ───────────────────────────
-
-test('词边界按 token 判：标点当分隔符，同一句里出现两次也算说出', () => {
-  // brief §3.1 点名的那条：`I see a Mug.` 只覆盖了"句号 + 首字母大写"，
-  // 这里把逗号、感叹号、重复出现一次都钉住。
-  assert.equal(checkSpeech('mug', 'a mug, and a MUG!').said, true);
-  // 但 token 相等仍然是**整个 token**：mugs / mugshot 都不算（英文的复数与合成词是别的词）
-  assert.equal(checkSpeech('mug', 'two mugs').said, false);
-  assert.equal(checkSpeech('mug', 'a mugshot').said, false);
-});
-
-test('目标词的大小写无关（识别链路给的词可能带大写）', () => {
-  assert.equal(checkSpeech('MUG', 'I see a mug.').said, true);
-  assert.equal(checkSpeech('Mug', 'MUG').said, true);
-});
-
-test('多词目标词：按"连续 token 出现"判定（控制器裁定的口径变更）', () => {
-  // 背景（task-9-report 有完整记录）：更早的实现把目标词整体当一个 token 去比，于是含空格/连字符的
-  // 目标词**永远判不出"说出"**——而这是**可达**的：`web/app.mjs` 的 ACCEPTABLE_SETS 里有
-  // `laptop: ['laptop', 'notebook computer']`。用户念对了却被判"没说"、重试永远过不去，
-  // 界面还不告诉他这个词判不了（一处用户可见的静默失败）。控制器因此裁定改为
-  // **连续 token 子序列**匹配。
-  assert.equal(checkSpeech('notebook computer', 'I have a notebook computer at home.').said, true,
-    '连续出现即算说出（这次变更要修的就是这一件事）');
-  assert.equal(checkSpeech('notebook computer', 'a NOTEBOOK, COMPUTER!').said, true, '大小写与标点仍然无关');
-  // 反向：不完整 / 词序颠倒 / 中间插了别的词，都不算——判据不许松成"这些词都出现过"
-  assert.equal(checkSpeech('notebook computer', 'I have a notebook.').said, false, '只说了前半截');
-  assert.equal(checkSpeech('notebook computer', 'computer notebook').said, false, '词序颠倒不算');
-  assert.equal(checkSpeech('notebook computer', 'notebook and computer').said, false, '中间插了别的词不算');
-  // 单词目标词的行为在这次变更里**一个字都没变**（计划那 5 条用例就是这条保证）
-  assert.equal(checkSpeech('mug', 'two mugs').said, false);
-  assert.equal(checkSpeech('mug', 'a mugshot').said, false);
-});
-
-test('连字符与空格同形：`ice-cream` 与 `ice cream` 互相都判得出', () => {
-  assert.equal(checkSpeech('ice-cream', 'ice cream').said, true, '连字符只是分隔符，不是词的一部分');
-  assert.equal(checkSpeech('ice cream', 'ice-cream').said, true);
-  assert.equal(checkSpeech('ice-cream', 'icecream').said, false, '连写成一个词仍算别的词（不猜词形）');
-});
-
-test('目标词切完没有 token（空串 / 纯符号 / 纯空白）→ 判没说，且不抛错', () => {
-  // 这一条钉住的是"空目标词不许命中任何转写"：判定的默认值必须是"没说"，
-  // 否则一条配置错误（词表里写了空串）会让所有人**自动**通过跟读。
-  for (const bad of ['', '   ', '!!!', '---', '…', null, undefined]) {
-    const r = checkSpeech(bad, 'I see a mug.');
-    assert.equal(r.said, false, `目标词为 ${JSON.stringify(bad)} 时必须判没说，而不是命中任何转写`);
-    assert.equal(r.transcript, 'I see a mug.', '转写仍要原样带回来');
+test('坏输入不吃惊：null / undefined / 非数组 / 条目缺 lang 都安全跳过', () => {
+  for (const bad of [null, undefined, 42, 'en-US', {}, () => {}]) {
+    assert.equal(pickVoice(bad), null, `pickVoice(${String(bad)}) 必须是 null 而不是抛错`);
   }
+  assert.equal(pickVoice([null, undefined, {}, { name: 'no lang' }, { lang: 'en-US' }])?.lang, 'en-US',
+    '坏条目跳过后仍要能选到好条目');
 });
 
-test('非字母字符是分隔符，所以 mug2 与 mug 的 2 同形（这条规则如实钉住）', () => {
-  // 转写来自语音引擎，可能带数字/中文/标点。当前规则把它们一律当分隔符，
-  // 于是 `mug2` 会被判成说出了 `mug`。**这不是"应该如此"，而是这条规则的后果**：
-  // 钉住它是为了让将来改分隔符类的人知道自己在改什么（改动会让这条用例红）。
-  assert.equal(checkSpeech('mug', 'mug2').said, true);
-  assert.equal(checkSpeech('mug', 'mug的').said, true);
+// ─────────────────────────── isTtsAvailable：可用性判定 ───────────────────────────
+
+test('speechSynthesis.speak 与 SpeechSynthesisUtterance 都是函数才算可用', () => {
+  const ok = { speechSynthesis: { speak() {} }, SpeechSynthesisUtterance: function U() {} };
+  assert.equal(isTtsAvailable(ok), true);
 });
 
-test('空值不抛错：null / undefined / 非字符串的转写都按"没说出"处理', () => {
-  for (const bad of [null, undefined]) {
-    const r = checkSpeech('mug', bad);
-    assert.equal(r.said, false, `转写为 ${String(bad)} 时不许抛错，也不许判成说出`);
-    assert.equal(r.transcript, '');
-  }
-  assert.equal(checkSpeech('', 'mug').said, false, '目标词为空 → 永不判说出');
-  assert.equal(checkSpeech('', 'mug').transcript, 'mug', '目标词为空也要把转写原样带回来');
-  assert.equal(checkSpeech(null, 'mug').said, false, '目标词为 null → 永不判说出');
-  assert.equal(checkSpeech(undefined, '').said, false);
+test('缺任何一个（或不是函数）都不可用：占位对象会把"点击即崩"留给用户', () => {
+  assert.equal(isTtsAvailable({ speechSynthesis: { speak() {} } }), false, '缺 Utterance 构造器');
+  assert.equal(isTtsAvailable({ SpeechSynthesisUtterance: function U() {} }), false, '缺 speechSynthesis');
+  assert.equal(isTtsAvailable({ speechSynthesis: {}, SpeechSynthesisUtterance: function U() {} }), false,
+    'speak 不是函数');
+  assert.equal(isTtsAvailable({ speechSynthesis: { speak: 'yes' }, SpeechSynthesisUtterance: function U() {} }),
+    false, 'speak 是字符串同样不算');
 });
 
-test('转写原样保留：不 trim、不改写、不动大小写（它是"用户到底说了什么"的唯一证据）', () => {
-  const said = '  I say Mug ,  twice MUG. ';
-  const r = checkSpeech('mug', said);
-  assert.equal(r.said, true);
-  assert.equal(r.transcript, said, '转写必须逐字带回来（trim 过就再也无法复核引擎到底给了什么）');
-  assert.notEqual(r.transcript.length, said.trim().length, '这一条的输入本身带首尾空白，trim 了就会红');
-  // 中文/非 ASCII 的转写同样原样带回（引擎识别错语言时，证据要留着）
-  assert.equal(checkSpeech('mug', '一个 mug').transcript, '一个 mug');
-});
-
-test('返回值形状固定：永远有 said 与 transcript 两个字段', () => {
-  for (const [w, t] of [['mug', 'mug'], ['mug', 'cup'], ['mug', ''], ['', '']]) {
-    const r = checkSpeech(w, t);
-    assert.deepEqual(Object.keys(r).sort(), ['said', 'transcript']);
-    assert.equal(typeof r.said, 'boolean');
-    assert.equal(typeof r.transcript, 'string');
-  }
-});
-
-test('可用性判定只认函数：同名字段是对象/字符串/0 都不算可用', () => {
-  // `typeof x === 'function'` 与 `x != null` 的差别就在这里：后者会把一个
-  // 随便什么占位符当成"浏览器支持转写"，于是界面进到"按住说话"那条路，
-  // 而 `new` 一个对象当构造器会在用户点下去的那一刻抛错——一次 UI 崩溃。
-  assert.equal(isSpeechAvailable({ SpeechRecognition: {} }), false);
-  assert.equal(isSpeechAvailable({ SpeechRecognition: 'yes' }), false);
-  assert.equal(isSpeechAvailable({ SpeechRecognition: 0 }), false);
-  assert.equal(isSpeechAvailable({ SpeechRecognition: null }), false);
-  assert.equal(isSpeechAvailable({ webkitSpeechRecognition: {} }), false);
-  assert.equal(isSpeechAvailable({ SpeechRecognition: {}, webkitSpeechRecognition: function R() {} }), true,
-    '只要有一个是函数就算可用（Chrome 两个都挂，Safari 只有 webkit 那个）');
-});
-
-test('可用性判定不吃坏入参：undefined / null / 数字 / 字符串一律判"不可用"且不抛错', () => {
+test('可用性判定不吃坏入参：undefined / null / 数字 / 字符串一律"不可用"且不抛错', () => {
   for (const bad of [undefined, null, 0, 1, 'window', true, Symbol('w')]) {
-    assert.equal(isSpeechAvailable(bad), false, `isSpeechAvailable(${String(bad)}) 必须是 false 而不是抛错`);
+    assert.equal(isTtsAvailable(bad), false, `isTtsAvailable(${String(bad)}) 必须是 false 而不是抛错`);
   }
 });
 
-test('本模块零浏览器 API 依赖（纯逻辑：Node 里可直接测）', () => {
-  // 与 frame-qc / pick-word / recognize 同一条纪律。用源码扫描钉住，而不是靠约定：
-  // 出现 window / document / navigator 之类就红——一旦有人把 `isSpeechAvailable()` 的默认值
-  // 写成内部读浏览器全局，这个模块就不再能在 Node 里直接测（而它正是被 Node 测的那一层）。
+// ─────────────────────────── playWord：播放 ───────────────────────────
+
+/** 可用的假环境：`{ win, spoken, utterances }`（`utterances` 用来驱动 onend/onerror）。 */
+function fakeTts({ voices = [] } = {}) {
+  const spoken = [];
+  const utterances = [];
+  class FakeUtterance {
+    constructor(text) {
+      this.text = text;
+      this.lang = '';
+      utterances.push(this);
+    }
+  }
+  const win = {
+    speechSynthesis: {
+      getVoices: () => voices,
+      speak(u) { spoken.push(u); },
+    },
+    SpeechSynthesisUtterance: FakeUtterance,
+  };
+  return { win, spoken, utterances };
+}
+
+test('播一个词：utterance 带目标词、lang=en-US，播完（onend）才收口', async () => {
+  const { win, spoken, utterances } = fakeTts();
+  const done = playWord('mug', { win });
+  assert.equal(spoken.length, 1, 'playWord 必须真的调了 speak');
+  assert.equal(utterances[0].text, 'mug', '合成的是目标词本身');
+  assert.equal(utterances[0].lang, 'en-US');
+  assert.equal(spoken[0], utterances[0], '交给 speak 的就是那个 utterance');
+  await done;                                   // onend 还没回调时绝不 resolve
+  utterances[0].onend?.({});
+  await done;
+});
+
+test('有英文声就设 voice 与 lang（en-US 优先；只有 en-GB 时用 en-GB 的 voice 与 lang）', async () => {
+  const enUS = { lang: 'en-US', name: 'A' };
+  const a = fakeTts({ voices: [{ lang: 'fr-FR' }, enUS] });
+  const p = playWord('mug', { win: a.win });
+  a.utterances[0].onend?.({});
+  await p;
+  assert.equal(a.utterances[0].voice, enUS);
+  assert.equal(a.utterances[0].lang, 'en-US');
+
+  const enGB = { lang: 'en-GB', name: 'B' };
+  const b = fakeTts({ voices: [enGB] });
+  const q = playWord('mug', { win: b.win });
+  b.utterances[0].onend?.({});
+  await q;
+  assert.equal(b.utterances[0].voice, enGB);
+  assert.equal(b.utterances[0].lang, 'en-GB', 'lang 跟着选中的 voice 走（引擎按它挑音色）');
+});
+
+test('没有任何英文声（或引擎没给 voices）→ 照播：voice 不设、lang 兜底 en-US', async () => {
+  const { win, spoken, utterances } = fakeTts({ voices: [{ lang: 'zh-CN' }] });
+  const p = playWord('mug', { win });
+  await p.then(() => utterances[0].onend?.({}));
+  assert.equal(spoken.length, 1, '选不到英文声不该变成"播不了"');
+  assert.equal(utterances[0].lang, 'en-US');
+  assert.equal(utterances[0].voice, undefined);
+});
+
+test('引擎报错（onerror）→ 拒绝，错误消息带引擎原样错误码', async () => {
+  const { win, utterances } = fakeTts();
+  const done = playWord('mug', { win });
+  utterances[0].onerror?.({ error: 'not-allowed' });
+  await assert.rejects(() => done, /not-allowed/);
+});
+
+test('speak 当场抛错 → 拒绝（不留挂住的 Promise）', async () => {
+  const { win, utterances } = fakeTts();
+  win.speechSynthesis.speak = () => { throw new Error('engine boom'); };
+  await assert.rejects(() => playWord('mug', { win }), /engine boom/);
+  assert.equal(utterances.length, 1);
+});
+
+test('空词 / 纯空白 / 非字符串 → 拒绝且不碰引擎（不播一个空示范音）', async () => {
+  for (const bad of ['', '   ', null, undefined, 42]) {
+    const { win, spoken } = fakeTts();
+    await assert.rejects(() => playWord(bad, { win }), /词/);
+    assert.equal(spoken.length, 0, `playWord(${String(bad)}) 不许调 speak`);
+  }
+});
+
+test('没有 speechSynthesis / 没有 Utterance 构造器 → 拒绝（rejected promise，不是同步抛错）', async () => {
+  await assert.rejects(() => playWord('mug', { win: {} }));
+  await assert.rejects(() => playWord('mug', { win: { speechSynthesis: { speak() {} } } }),
+    undefined, '缺 Utterance 构造器同样播不了');
+  await assert.rejects(() => playWord('mug', { win: null }));
+});
+
+test('Utterance 构造器自己抛错 → 拒绝', async () => {
+  const { win } = fakeTts();
+  win.SpeechSynthesisUtterance = function Boom() { throw new Error('ctor boom'); };
+  await assert.rejects(() => playWord('mug', { win }), /ctor boom/);
+});
+
+// ─────────────────────────── 模块纪律 ───────────────────────────
+
+test('本模块零 import、零浏览器全局（纯逻辑：Node 里可直接测，浏览器依赖全靠注入）', () => {
   const src = readFileSync(fileURLToPath(new URL('../web/units/speak.mjs', import.meta.url)), 'utf8');
   const importLines = src.split(/\r?\n/).filter((l) => /^\s*import\b/.test(l));
   assert.deepEqual(importLines, [], '零 import：本模块不依赖任何别的模块');
-  // **注释先剥掉再扫**：本模块的文件头正是用这些词解释"为什么这里不许碰它们"，
-  // 不剥就等于"注释里提一次就红"——那样这条断言会逼着人把解释删掉，方向是反的。
-  // 剥的是行注释与块注释（真代码里没有字符串形式的注释，故不需要更复杂的词法分析）。
+  // **注释先剥掉再扫**：文件头正是用这些词解释"为什么这里不许碰它们"，不剥就等于
+  // "注释里提一次就红"——那条断言会逼着人把解释删掉，方向是反的。
   const code = src.replace(/\/\*[\s\S]*?\*\//g, '').replace(/^[ \t]*\/\/.*$/gm, '');
   assert.doesNotMatch(code, /\b(document|window|navigator|localStorage|indexedDB|globalThis)\b/,
-    '真代码里不许出现浏览器全局（剥掉注释后仍命中即为回归）');
+    '真代码里不许出现浏览器全局（globalThis 由 mount 的 deps 缺省提供）');
 });
