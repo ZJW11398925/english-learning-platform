@@ -28,11 +28,19 @@ export function makeEl(tag) {
     addEventListener(type, fn) {
       listeners.set(type, [...(listeners.get(type) ?? []), fn]);
     },
+    /**
+     * 触发一次任意类型的事件（12B 起 file input 的 change 要靠它驱动——
+     * 浏览器里"选中文件"由文件选择器触发，假 DOM 里由测试直接喂）。
+     * 多个监听器时返回它们结果的数组（与 click 同款）。
+     */
+    fire(type, event) {
+      const fns = listeners.get(type) ?? [];
+      const results = fns.map((fn) => fn(event ?? { type }));
+      return results.length === 1 ? results[0] : Promise.all(results);
+    },
     /** 触发一次 click；多个监听器时返回它们结果的数组。 */
     click() {
-      const fns = listeners.get('click') ?? [];
-      const results = fns.map((fn) => fn({ type: 'click' }));
-      return results.length === 1 ? results[0] : Promise.all(results);
+      return el.fire('click', { type: 'click' });
     },
   };
   if (el.tagName === 'VIDEO') {
