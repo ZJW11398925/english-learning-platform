@@ -1,0 +1,153 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <title>界面走查台 · 英语学习 场景取词</title>
+  <link rel="stylesheet" href="./styles.css">
+</head>
+<body class="gallery">
+  <!--
+    ⚠️ 这是**开发用的界面走查台**，不是产品页面（产品页是 index.html）。
+
+    它存在的理由（对应 frontend-dev-playbook 的 Phase 1/4）：改样式必须先能**反复看到**
+    每一个屏与每一个档位——否则"我只能确认首页长得还行"就是全部证据。这里用
+    **注入的假存储 + 假的 fetch** 把真实 app.mjs 挂起来，于是：
+
+      · 不花一次模型调用（fetch 被替换，永远打不到 api.deepseek.com）；
+      · 每个档位都可复现（数据写死在下面，不看真机状态）；
+      · 渲染的是**生产那份 app.mjs**——不是另画一套假界面，所以它不会与线上漂移。
+
+    假数据的形状逐字对齐 `units/pending.mjs`（pendingFeedbackQueue）与
+    `units/scheduler.mjs`（dueWords：isMaintained 为假、dueAt 是有限数且 ≤ now）——
+    形状写错的话这一屏会**静默变空**，于是走查台自己先失真。
+  -->
+  <div id="app"></div>
+
+  <script type="module">
+    const params = new URLSearchParams(location.search);
+    const scenario = params.get('scenario') ?? 'ready';
+    const keyMode = params.get('key') ?? 'set';   // set | unset
+
+    const HOUR = 3600000;
+    const DAY = 86400000;
+    const now = Date.now();
+    const SESSION = 'gallery-session-1';
+
+    // ── 假存储：形状照 units/store.mjs 的键名与 units/event-log.mjs 的 REQUIRED ──
+    const events = [];
+    const words = {};
+    let key = null;
+
+    if (keyMode === 'set') key = 'sk-gallery-demo-key-not-real-000000000000';
+
+    if (scenario === 'ready-due') {
+      // 三个词到期，最早的一个在 2 天前——复现提示要显示"上次是在「厨房」场景学的"。
+      words.mug = {
+        id: 'mug', label: 'mug', scene: 'kitchen', stage: 0,
+        dueAt: now - 2 * DAY, lastScene: 'kitchen', createdAt: now - 3 * DAY,
+      };
+      words.kettle = {
+        id: 'kettle', label: 'kettle', scene: 'kitchen', stage: 1,
+        dueAt: now - 6 * HOUR, lastScene: 'kitchen', createdAt: now - 5 * DAY,
+      };
+      words.umbrella = {
+        id: 'umbrella', label: 'umbrella', scene: 'street', stage: 1,
+        dueAt: now - 1 * HOUR, lastScene: 'street', createdAt: now - 4 * DAY,
+      };
+    }
+
+    if (scenario === 'pending' || scenario === 'pending-empty') {
+      events.push({
+        ts: now - 3 * HOUR,
+        type: 'compose_submitted',
+        wordId: 'mug',
+        sessionId: SESSION,
+        roundIndex: 1,
+        payload: { sentence: 'I very like my mug.', word: 'mug', scene: 'kitchen' },
+      });
+      if (scenario === 'pending') {
+        events.push({
+          ts: now - 3 * HOUR + 40,
+          type: 'feedback_pending',
+          wordId: 'mug',
+          sessionId: SESSION,
+          roundIndex: 1,
+          payload: {
+            pendingId: 'pend-1',
+            sentence: 'I very like my mug.',
+            word: 'mug',
+            scene: 'kitchen',
+            reason: 'timeout',
+          },
+        });
+        events.push({
+          ts: now - 2 * HOUR,
+          type: 'compose_submitted',
+          wordId: 'kettle',
+          sessionId: SESSION,
+          roundIndex: 2,
+          payload: { sentence: 'The kettle is boiling already.', word: 'kettle', scene: 'kitchen' },
+        });
+        events.push({
+          ts: now - 2 * HOUR + 40,
+          type: 'feedback_pending',
+          wordId: 'kettle',
+          sessionId: SESSION,
+          roundIndex: 2,
+          payload: {
+            pendingId: 'pend-2',
+            sentence: 'The kettle is boiling already.',
+            word: 'kettle',
+            scene: 'kitchen',
+            reason: 'network',
+          },
+        });
+      }
+    }
+
+    const fakeStorage = {
+      getItem: (k) => {
+        if (k === 'elp.events') return JSON.stringify(events);
+        if (k === 'elp.words') return JSON.stringify(words);
+        if (k === 'elp.apiKey') return key;
+        return null;
+      },
+      setItem: () => {},
+      removeItem: () => {},
+    };
+
+    // 假 fetch：**永不 resolve 也永不 reject**。
+    //
+    // 为什么不是"抛错"：app.mjs 有**自动补交重试**，抛错会被真实链路接住并渲染出
+    // 「补交时出错…」错误条——那条横幅是真的，但它是**走查台自己造成的**，
+    // 会让每一张截图都带着一个与界面无关的红框。永远 pending 则既不发请求（结构上不可能花钱），
+    // 也不触发任何错误分支，走查台看到的才是界面本来该有的样子。
+    const inertFetch = () => new Promise(() => {});
+
+    const { mount } = await import('./app.mjs');
+
+    const root = document.getElementById('app');
+    await mount(root, {
+      keyring: (await import('./units/keyring.mjs')).createKeyring({ storage: fakeStorage }),
+      store: (await import('./units/store.mjs')).createStore({ localStorage: fakeStorage, indexedDB: null }),
+      recognizeWithFallback: inertFetch,
+      compose: { submitSentence: inertFetch },
+    });
+
+    if (scenario === 'pending' || scenario === 'pending-empty') {
+      // 待补那一屏是"任一屏都能打开的一个抽屉"，所以要按它的入口按钮进去。
+      const entry = [...root.querySelectorAll('button')]
+        .find((b) => b.textContent.includes('待补'));
+      if (entry) entry.click();
+    }
+    if (scenario === 'settings') {
+      const entry = [...root.querySelectorAll('button')]
+        .find((b) => b.textContent.includes('设置'));
+      if (entry) entry.click();
+    }
+
+    document.body.dataset.galleryReady = 'true';
+  </script>
+</body>
+</html>

@@ -1,0 +1,508 @@
+/* web/styles.css
+ *
+ * 界面样式（单一样式源）。**设计口径**：安静的效率工具 + 一个暖调重音——
+ * 这是一个学习工具，不是一个要"显得贵"的落地页；判断标准是"像一个正经 App"，
+ * 而不是"像一个漂亮的网页"。
+ *
+ * ── 三条约束（决定了下面很多写法）─────────────────────────────────────────────
+ * 1. **零外部资源**。`tests/index-html.test.mjs` 明确禁止引用外站：内网穿透的 HTTPS 下
+ *    外站不可达会白屏，所以**不允许 @import 字体**。整套字族取自系统：
+ *    中文用系统无衬线（PingFang / 苹方 / 微软雅黑 …），英文正文用系统衬线
+ *    （Charter / Iowan / Georgia …）。后者是这个产品唯一的排版个性：
+ *    **要学的那个英文词用衬线，与周围的中文界面分开**——它同时是一次语义提示
+ *    （"这是要记的东西"）和零成本的身份感。
+ * 2. **不改 DOM 结构就成立**。`app.mjs` 只产出 7 个类名（muted / error / row /
+ *    choices / pending-list / pending-item）加原生标签，且被 494 个测试按语义使用。
+ *    所以本文件只按**元素 + 既有类名**选型，不新增类名、不要求改 app.mjs。
+ *    （`.row` 在 app.mjs 里有两种用法：按钮组与"待补入口那一行"——前者自然横排，
+ *    后者只有一个按钮，两者共用同一套 gap/wrap 规则即可。）
+ * 3. **移动优先，44px 触控目标**。所有可点元素 min-height 44px；底部留 safe-area。
+ *
+ * ── 层级约定（每层只有一个手段，不叠加）───────────────────────────────────────
+ *   卡片  = 底色 + 1px 发丝边（**不用阴影**：本产品的卡片是分组，不是浮层）
+ *   浮层  = 阴影（待补抽屉里的条目）
+ *   重音  = 只给主操作（拍照）与焦点环；其余一律中性
+ * ── 光向约定：所有阴影都是"光从上方来"，typo 阴影带暖色调而非纯黑。
+ */
+
+/* ═══ 设计令牌 ═══════════════════════════════════════════════════════════════
+ * 颜色、圆角、间距、时长只在这里定义；下面任何一条规则都不许写死这些值。
+ * 灰阶**统一偏暖**（色相接近 40°，纸感），暗色模式是暖黑而非纯黑——
+ * 混用冷暖灰是"看起来像半成品"最常见的原因之一。
+ */
+:root {
+  /* 表面与文字（浅色：暖纸） */
+  --bg: #faf8f5;
+  --surface: #ffffff;
+  --surface-sunken: #f3f0eb;
+  --ink: #1a1815;
+  --ink-soft: #6d675e;
+  --ink-faint: #98918a;
+  --line: #e8e3db;
+  --line-strong: #d8d1c7;
+
+  /* 唯一重音（深青，白底对比度 ≈4.9:1，达 AA） */
+  --accent: #0f766e;
+  --accent-press: #0b5d56;
+  --accent-wash: #e9f3f1;
+  --on-accent: #ffffff;
+
+  /* 语义色 */
+  --danger: #b3261e;
+  --danger-wash: #fdeceb;
+  --ok: #3f6212;
+
+  /* 圆角：内层紧、容器软（一律同一种圆角是最典型的"模板感"来源） */
+  --r-sm: 8px;
+  --r: 12px;
+  --r-lg: 16px;
+  --r-xl: 22px;
+
+  /* 间距（4 的倍数） */
+  --s-1: 4px;
+  --s-2: 8px;
+  --s-3: 12px;
+  --s-4: 16px;
+  --s-5: 20px;
+  --s-6: 24px;
+  --s-7: 32px;
+
+  /* 字体：中文/界面用系统无衬线；英文词用系统衬线 */
+  --font-ui: system-ui, -apple-system, 'Segoe UI', 'PingFang SC',
+    'Hiragino Sans GB', 'Microsoft YaHei', 'Noto Sans SC', sans-serif;
+  --font-word: 'Iowan Old Style', 'Palatino Linotype', Palatino, Charter,
+    Georgia, 'Times New Roman', 'Songti SC', serif;
+  --font-mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+
+  /* 运动 */
+  --dur: 180ms;
+  --ease: cubic-bezier(0.2, 0, 0.2, 1);
+
+  /* 阴影：光从上方来，带暖调 */
+  --shadow-1: 0 1px 2px rgba(60, 46, 30, 0.05);
+  --shadow-2: 0 6px 20px -6px rgba(60, 46, 30, 0.18);
+
+  --ring: 0 0 0 3px color-mix(in srgb, var(--accent) 28%, transparent);
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    /* 暖黑：不是纯黑（纯黑会显得廉价且失去层次） */
+    --bg: #16151300;
+    --bg: #161513;
+    --surface: #201e1b;
+    --surface-sunken: #1a1917;
+    --ink: #f2efe9;
+    --ink-soft: #a8a199;
+    --ink-faint: #7d766e;
+    --line: #2f2c28;
+    --line-strong: #403c37;
+
+    --accent: #4fd1c5;
+    --accent-press: #38b2a8;
+    --accent-wash: #12302d;
+    --on-accent: #08201e;
+
+    --danger: #ff8a80;
+    --danger-wash: #331b19;
+    --ok: #a3c96b;
+
+    --shadow-1: 0 1px 2px rgba(0, 0, 0, 0.4);
+    --shadow-2: 0 8px 24px -8px rgba(0, 0, 0, 0.7);
+  }
+}
+
+/* ═══ 基底 ═══════════════════════════════════════════════════════════════════ */
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+html {
+  -webkit-text-size-adjust: 100%;
+}
+
+body {
+  margin: 0;
+  padding: 0;
+  background: var(--bg);
+  color: var(--ink);
+  font-family: var(--font-ui);
+  font-size: 16px;
+  line-height: 1.6;
+  /* 中英混排时西文用字族里更合适的那个，标点也交给字族判定 */
+  font-kerning: normal;
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+  /* 长按选中是学习场景的合理需求，不全局禁止；但去掉点击高亮块 */
+  -webkit-tap-highlight-color: transparent;
+}
+
+/* 容器：安全区 + 单列上限 + 底部留白（用户要能把最后一行滑到舒服的位置） */
+#app {
+  max-width: 560px;
+  margin: 0 auto;
+  padding: calc(var(--s-5) + env(safe-area-inset-top)) var(--s-5)
+    calc(var(--s-7) + env(safe-area-inset-bottom));
+}
+
+/* ═══ 排版 ═══════════════════════════════════════════════════════════════════ */
+h2 {
+  margin: 0 0 var(--s-3);
+  font-size: 1.5rem;
+  font-weight: 640;
+  line-height: 1.28;
+  letter-spacing: -0.018em;
+  /* 标题不要出现"最后一个词孤零零一行" */
+  text-wrap: balance;
+}
+
+p {
+  margin: 0 0 var(--s-3);
+  /* 正文不要长到难以回行（中文约 30–40 字/行在这个宽度下最舒适） */
+  max-width: 42ch;
+}
+
+/* 次级说明：比正文小一号、颜色退后一档 */
+.muted {
+  color: var(--ink-soft);
+  font-size: 0.9375rem;
+  line-height: 1.62;
+  text-wrap: pretty;
+}
+
+/* 错误：不用 window.alert，就地以块状呈现；带左侧重音条以示"这是需要处理的" */
+.error {
+  margin: 0 0 var(--s-4);
+  padding: var(--s-3) var(--s-4);
+  border-radius: var(--r);
+  border-left: 3px solid var(--danger);
+  background: var(--danger-wash);
+  color: var(--danger);
+  font-size: 0.9375rem;
+  line-height: 1.55;
+}
+.error:empty {
+  display: none;
+}
+
+/* 状态行：**第一个 `p.row`**。
+ * 实测 DOM（走查台 dump）：`#app` 的直接子节点依次是 `p.muted`（状态）、`p.error`、
+ * `div`（内容容器，含 h2/段落/`div.row` 动作行）、`p.muted`（诊断页）、`p.row`（设置按钮）。
+ * 注意状态行与设置行**都是 `p.row`**（app.mjs 两处都用了 .row），所以不能按 .row 泛选。 */
+#app > p.row:first-of-type {
+  margin-bottom: var(--s-4);
+  color: var(--ink-faint);
+  font-size: 0.75rem;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+a {
+  color: var(--accent);
+  text-decoration-color: color-mix(in srgb, var(--accent) 35%, transparent);
+  text-underline-offset: 3px;
+  transition: color var(--dur) var(--ease);
+}
+a:hover {
+  color: var(--accent-press);
+  text-decoration-color: currentColor;
+}
+
+/* ═══ 按钮 ═══════════════════════════════════════════════════════════════════
+ * 默认是**次要**外观（描边中立），主操作由 :first-child 那一颗升格为实心重音。
+ * 理由：一屏里只该有一个最重的动作；app.mjs 里主操作恒为该行第一颗按钮
+ * （ready 是「拍照」、word 是主推进、反馈是「下次」），所以这个映射是稳定的。
+ */
+button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 44px;
+  padding: 0 var(--s-5);
+  border: 1px solid var(--btn-line, var(--line-strong));
+  border-radius: var(--r);
+  background: var(--btn-bg, var(--surface));
+  color: var(--btn-fg, var(--ink));
+  font-family: inherit;
+  font-size: 1rem;
+  font-weight: 560;
+  line-height: 1;
+  cursor: pointer;
+  box-shadow: var(--shadow-1);
+  transition: background var(--dur) var(--ease), border-color var(--dur) var(--ease),
+    color var(--dur) var(--ease), transform var(--dur) var(--ease);
+}
+
+button:hover:not(:disabled) {
+  border-color: var(--btn-line-hover, var(--ink-faint));
+  background: var(--btn-bg-hover, var(--surface-sunken));
+}
+
+/* 按下要有"物理感"（位移 1px + 微缩），这是"像 App"最省力的一处 */
+button:active:not(:disabled) {
+  transform: translateY(1px) scale(0.985);
+  box-shadow: none;
+}
+
+button:focus-visible {
+  outline: none;
+  box-shadow: var(--ring);
+  border-color: var(--accent);
+}
+
+button:disabled {
+  color: var(--ink-faint);
+  background: var(--surface-sunken);
+  border-color: var(--line);
+  box-shadow: none;
+  cursor: not-allowed;
+}
+
+/* 「待补反馈（n 条）」与「设置（API Key）」各自独占一行（app.mjs 里都是 `p.row`）：
+ * 次级样式即可，不与主操作争重音。
+ *
+ * ⚠️ 两条纪律（都踩过）：
+ * 1. 必须写成 `p.row > button`（而非 `:only-of-type` 等更窄的形态）——它与下面
+ *    `div.row` 的选择器**同权重**，收窄会让"单独一颗按钮的入口行"被重音规则点亮。
+ * 2. 必须写在 `div.row` 那几条**之前**。权重相同时靠书写顺序取胜，而设置屏的 `保存`
+ *    恰恰也独占一个 `div.row`（`only-of-type` 规则会给它重音）——本规则若写在后面，
+ *    就会把 `保存` 重新压成白的，界面于是丢掉唯一的主操作。（实测记录：本规则原先
+ *    写在本节末尾，`保存` 的 computed background 因此是 rgb(255,255,255)。）
+ */
+p.row > button {
+  --btn-bg: var(--surface);
+  --btn-line: var(--line-strong);
+  --btn-fg: var(--ink);
+  font-weight: 560;
+}
+
+/* 主操作：**主屏那一条动作行**里的第一颗按钮。
+ *
+ * 做法：按钮的全部视觉都读 `--btn-*` 变量（带缺省值，见上面 button 规则），
+ * 这里**只覆写那一颗**的变量，于是"谁是主操作"是一处显式声明。
+ *
+ * ── 为什么不用"行内第一颗按钮"这种直觉判据（三条实测反例，全部踩过）──────
+ * `ready` 屏的动作行 = `[button(拍照), input[type=file], button(从相册选图)]`，
+ *   第二个**子节点**是那个隐藏 input——所以任何 `button:nth-child(2)` 类判据恒不成立。
+ * `settings` 屏的动作行 = `[保存, 清除 Key, 返回]`（**三颗**），而
+ * `pending` 屏的动作行 = `[手动补交, 返回]`（**两颗**）——所以"按行内按钮个数"分类
+ *   同样分不开：既踩过"≥3 算次级"把 `保存` 压成白的，也踩过"≥2 算主操作"把
+ *   `手动补交` 点亮成实心块。
+ *
+ * ── 真正的判据（与 DOM 一一对应，可机械复核）──────────────────────────────
+ * 实测（走查台 eval 取 `parentElement` / children / `matches()`，不是看截图猜的）：
+ *   ready    : `div.row` 内含 **`input[type=file]`**（相册入口那个隐藏 input）；
+ *   settings : `div.row` 三颗（保存 / 清除 Key / 返回），祖先链 `button < div.row < div`；
+ *   pending  : `div.row` 两颗（手动补交 / 返回），**祖先链与 settings 完全相同**；
+ *   feedback : `div.row` 两颗（下次 / 改写）。
+ *
+ * ⚠️ 关键事实：`settings` 与 `pending` 的动作行在 DOM 形状上**不可区分**（同为
+ * `#app > div > div.row`）。所以"谁是主操作"不能靠位置/数量判——两个屏幕唯一的区别是
+ * **设置屏有那句 `input[type=password]`**（Key 输入框），拿它当屏幕判据才成立。
+ * 前一版先后试过 `:only-of-type`（假设"保存独占一行"，实为 3 个子节点）与
+ * `.muted div.row`（假设祖先带 .muted，实为普通 div）——两次都 `matches()` 为 false，
+ * `保存` 因此丢了重音。记在这里，免得第三次再猜。
+ *
+ * ⚠️ 下面三条权重相同、按书写顺序取胜：先点亮两类主操作，再由「其余」那条压回描边。 */
+#app:has(input[type='password']) div.row > button:first-child,
+div.row:has(> input[type='file']) > button:first-child {
+  --btn-bg: var(--accent);
+  --btn-fg: var(--on-accent);
+  --btn-line: var(--accent);
+  --btn-bg-hover: var(--accent-press);
+  --btn-line-hover: var(--accent-press);
+  font-weight: 600;
+}
+
+/* 其余动作行一律描边外观（同权重、写在后面 ⇒ 靠顺序压住上面那条）。
+ * 例子：pending 的「手动补交 / 返回」是对等的两个选项；
+ * feedback 的「下次 / 改写 / …」同理，点亮其中之一会凭空制造出并不存在的优先级。 */
+div.row > button:first-child {
+  --btn-bg: var(--surface);
+  --btn-fg: var(--ink);
+  --btn-line: var(--line-strong);
+  --btn-bg-hover: var(--surface-sunken);
+  --btn-line-hover: var(--ink-faint);
+  font-weight: 560;
+}
+
+/* 禁用的按钮：压过上面所有变量声明（同权重、写在最后）。
+ * `p.row > button` 也要在这里列一次：它在本节之后才声明 --btn-*，靠顺序本来就能赢，
+ * 但禁用态必须与其余的禁用外观完全一致，所以显式钉住。 */
+div.row > button:first-child:disabled,
+p.row > button:disabled {
+  --btn-bg: var(--surface-sunken);
+  --btn-fg: var(--ink-faint);
+  --btn-line: var(--line);
+  box-shadow: none;
+}
+
+/* 不支持 `:has()` 的老浏览器退化为全部次要外观——重音缺失不影响任何功能。 */
+
+
+
+/* ═══ 按钮组（app.mjs 的 .row）═══════════════════════════════════════════════ */
+.row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--s-3);
+  margin: 0 0 var(--s-3);
+}
+
+/* 诊断页入口是**运维性**出口（真机走查用），不是这个产品的主线。
+ * 它每屏都挂着，所以必须够安静：默认退成中性色，hover/聚焦时才亮起来。
+ * 实测它在 DOM 里是 `#app > div > p.muted`（内容容器内），不是 `#app` 的直接子节点。 */
+#app > div > p.muted {
+  margin-top: var(--s-5);
+  font-size: 0.875rem;
+}
+#app > div > p.muted a {
+  color: var(--ink-faint);
+  text-decoration-color: var(--line-strong);
+}
+#app > div > p.muted a:hover,
+#app > div > p.muted a:focus-visible {
+  color: var(--accent);
+  text-decoration-color: currentColor;
+}
+
+/* 相册入口：原生 file input 是"隐形传送门"，按钮才是给人看的那个。
+ * input 必须在 DOM 里、也必须能被 click() 触发，所以用视觉隐藏而不是 display:none
+ * （后者在部分浏览器上会让 .click() 不生效）。*/
+input[type='file'] {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: -1px;
+  padding: 0;
+  border: 0;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
+
+/* ═══ 输入 ═══════════════════════════════════════════════════════════════════ */
+input[type='password'],
+input[type='text'],
+textarea {
+  display: block;
+  width: 100%;
+  padding: var(--s-3) var(--s-4);
+  border: 1px solid var(--line-strong);
+  border-radius: var(--r);
+  background: var(--surface);
+  color: var(--ink);
+  font-family: inherit;
+  font-size: 1rem;
+  line-height: 1.5;
+  transition: border-color var(--dur) var(--ease), box-shadow var(--dur) var(--ease);
+}
+
+/* 拼写/自动纠正在学习场景里是干扰（用户写的就是要评的东西） */
+textarea {
+  min-height: 6.5em;
+  resize: vertical;
+  font-size: 1.0625rem;
+}
+
+input::placeholder,
+textarea::placeholder {
+  color: var(--ink-faint);
+}
+
+input:focus,
+textarea:focus {
+  outline: none;
+  border-color: var(--accent);
+  box-shadow: var(--ring);
+}
+
+/* ═══ 候选词（app.mjs 的 .choices）═══════════════════════════════════════════
+ * 候选词是"要学的英文词"，故用衬线字族 + 大一号字号——这是本产品唯一的排版个性。
+ */
+.choices {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-2);
+  margin: var(--s-4) 0;
+}
+
+/* 候选按钮**不**参与"第一颗是主操作"那条规则：它们是一组等权选项。
+ * 这里也走 `--btn-*` 变量（而不是直接写 background），理由与主操作那条同源：
+ * 候选按钮的衬线字样要盖住基础 button 规则，变量比"再写一遍位置选择器"更不容易被顺序问题咬到。 */
+.choices > button {
+  --btn-bg: var(--surface);
+  --btn-line: var(--line-strong);
+  --btn-fg: var(--ink);
+  --btn-bg-hover: var(--accent-wash);
+  --btn-line-hover: var(--accent);
+  justify-content: flex-start;
+  min-height: 56px;
+  padding: 0 var(--s-4);
+  border-radius: var(--r-lg);
+  font-family: var(--font-word);
+  font-size: 1.25rem;
+  font-weight: 500;
+  letter-spacing: 0.01em;
+  text-align: left;
+}
+
+/* ═══ 待补反馈列表 ═══════════════════════════════════════════════════════════ */
+.pending-list {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-3);
+  margin: var(--s-4) 0 var(--s-5);
+}
+
+/* 浮层级：阴影 + 无边框，与"卡片=分组"那条约定区分开 */
+.pending-item {
+  padding: var(--s-4);
+  border-radius: var(--r-lg);
+  background: var(--surface);
+  box-shadow: var(--shadow-2);
+}
+
+/* 原句：**逐字显示，不许截断**（它是用户自己写的东西），所以用衬线原文呈现 */
+.pending-item > p:first-child {
+  margin: 0 0 var(--s-2);
+  font-family: var(--font-word);
+  font-size: 1.125rem;
+  line-height: 1.5;
+  color: var(--ink);
+  overflow-wrap: anywhere;
+}
+
+.pending-item > p.muted {
+  margin: 0;
+  font-size: 0.8125rem;
+  color: var(--ink-faint);
+  /* 元信息是"目标词 · 状态"这类短句，用紧凑一点的数字排布更好读 */
+  font-variant-numeric: tabular-nums;
+}
+
+/* ═══ 媒体 ═══════════════════════════════════════════════════════════════════ */
+img,
+video {
+  display: block;
+  width: 100%;
+  border-radius: var(--r-lg);
+  background: var(--surface-sunken);
+}
+
+video:not([src]) {
+  aspect-ratio: 4 / 3;
+}
+
+/* ═══ 减少动态（系统偏好）════════════════════════════════════════════════════ */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    transition-duration: 0.01ms !important;
+    animation-duration: 0.01ms !important;
+  }
+}

@@ -1,0 +1,12 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-label="英语学习 场景取词">
+  <!--
+    站点图标：一块"词卡"——深青底 + 衬线字母 a。
+    衬线字母是刻意与界面里"要学的英文词用衬线"同源（见 styles.css 的 --font-word）：
+    一个产品里同一个符号含义只有一种画法。
+    纯内联 SVG、零外部资源（tests/index-html.test.mjs 禁止外站引用）。
+  -->
+  <rect width="64" height="64" rx="14" fill="#0f766e"/>
+  <text x="32" y="45" text-anchor="middle"
+        font-family="Iowan Old Style, Palatino, Georgia, serif"
+        font-size="42" font-weight="600" fill="#ffffff">a</text>
+</svg>
