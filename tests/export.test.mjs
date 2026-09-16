@@ -494,7 +494,7 @@ test('有 recognize_ok 却一条耗时都没有 → 报缺口（两种成因与�
   const gap = s.gaps.find((g) => g.includes('latency'));
   assert.ok(gap, `必须有耗时缺口：${JSON.stringify(s.gaps)}`);
   assert.match(gap, /加字段之前/, '要说明"这份流可能是加字段之前落的（旧代码）"');
-  assert.match(gap, /服务端没回 latency_ms/, '要给出第二种成因');
+  assert.match(gap, /拿不到实测值/, '要给出第二种成因（Task 12C 起 server 退役：直连口径下这个数由浏览器实测，缺值=当时拿不到实测）');
   assert.match(gap, /不要.*填进判据 A/, '要写明不许用 0 或估算值填判据 A');
 });
 

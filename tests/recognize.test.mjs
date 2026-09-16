@@ -3,8 +3,8 @@
 // Task 7 的客户端识物单元；Task 12A 起传输层改为**浏览器直连** DeepSeek
 // （项目转向 DEC-…23/26：服务端代理退役）。本文件钉住的契约分两半：
 //   · **直连契约**（12A 新）：请求打到 `https://api.deepseek.com/v1/chat/completions`、
-//     `Authorization: Bearer <访问者自己的 Key>`、提示词与候选校验从 server/recognize-upstream.mjs
-//     移植到客户端（client 端就是最后一道校验口）；
+//     `Authorization: Bearer <访问者自己的 Key>`、提示词与候选校验移植自识物上游模块
+//     （那份已随 Task 12C 的 server 退役；client 端就是最后一道校验口）；
 //   · **取词行为契约**（Task 7 原样保留）：判帧只有一处起源、attempts 口径、绝不假造词、
 //     失败 reason 分档、超时闸。
 //
@@ -25,8 +25,7 @@ import {
   RECOGNIZE_REQUEST_TIMEOUT_MS, RECOGNIZE_PROMPT, MAX_CANDIDATES,
 } from '../web/units/recognize.mjs';
 import { DEEPSEEK_API_BASE, chatUrl } from '../web/units/deepseek.mjs';
-// 只为了钉住"移植口径与 server 原版一致"（parity 闸在 tests/deepseek.test.mjs，这里不重复）。
-// 本文件其余部分不碰服务端代码。
+// 只用于"桩上游会不会无限挂住"的护栏（真 HTTP 用例的看门狗）。
 import { settlesWithin } from './helpers/watchdog.mjs';
 
 /** 合成钥匙：形状合法、值是假的（仓库里只允许这种）。 */
@@ -71,7 +70,7 @@ test('直连契约：POST 到 /v1/chat/completions，带 Bearer Key，视觉消�
   assert.equal(body.messages[0].role, 'user', '图片必须在 user message 的 content 数组里（system/assistant 会 400）');
   const [textPart, imagePart] = body.messages[0].content;
   assert.equal(textPart.type, 'text');
-  assert.equal(textPart.text, RECOGNIZE_PROMPT, '提示词是移植自 server 原版的那一份');
+  assert.equal(textPart.text, RECOGNIZE_PROMPT, '提示词就是模块导出的那一份契约');
   assert.equal(imagePart.type, 'image_url');
   assert.match(imagePart.image_url.url, /^data:image\/jpeg;base64,/, '帧以 base64 data URL 上行');
   assert.equal(imagePart.image_url.detail, 'low', 'detail low：缩到 512×512，与端侧长边一致');

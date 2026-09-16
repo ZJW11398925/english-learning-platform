@@ -2,9 +2,13 @@
  * 变异探针（可重复运行的证据生成器，零依赖、非测试文件）。
  *
  * 用途：把 review 轮（`rv3-probe.mjs`）枚举的 18 个变异体 + Task 4 的 12 个变异体 + Task 5 修复轮
- * 的 3 个环境校验变异体 + Task 6 的 26 个（状态机 13 + 相机/灰度 13）+ Task 7 的 8 个识物变异体
- * + Task 7 修复轮的 12 个（轮次/判据 B 口径 6 + 上游响应校验与超时 6）
- * + Task 7 复审轮的 2 个（停滞的响应体归超时）+ Task 8 的 16 个（造句反馈：客户端 10 + 上游 6）
+ * 的 3 个环境校验变异体（N1–N3）+ Task 6 的 26 个（状态机 13 + 相机/灰度 13）+ Task 7 的 8 个识物变异体
+ * + Task 7 修复轮的 12 个（轮次/判据 B 口径 6 + 上游响应校验与超时的 U1–U7）
+ * + Task 7 复审轮的 2 个（停滞的响应体归超时）+ Task 8 的 16 个（造句反馈：客户端 C1–C10 + 服务端上游 V1–V6）
+ *
+ * **Task 12C 退役一批**（server 退役，转向 DEC-…23/26）：靶子在 server 模块上的 N1–N3 /
+ * U1–U7 / V1–V6 整体撤销——它们守的模型契约（提示词、响应校验、超时分档）已在 12A 移植进
+ * 客户端，由 D6–D10/D14（识物直连）与 C 系（造句客户端腿）继续承重。
  * + Task 9 的 28 个（跟读判定 K1–K6 + 已证等价的 K7，接线 P1–P22）
  * + Task 9B 的 13 个（待补反馈队列 Q1–Q8、storage_full Q9–Q11、reading_missed Q12–Q13）
  * + Task 10 的 17 个（导出统计口径 X1–X14 + 耗时落盘的 R16–R17；
@@ -16,7 +20,7 @@
  *   speak(TTS) 单元 T1–T6、app TTS 装配 T7–T8；
  *   **退役**：K1–K7 与 P11–P14、Q13——它们的 SpeechRecognition 判定靶子已随 12B 删除，
  *   可迁移的变异意图（可用性只认函数、注入点不被忽略）由 T3/T7 在新实现上重新承载）
- * 固化成仓库内可复跑的证据——逐个"把实现改坏"，跑 `tests/` 下被登记的那 24 个测试文件，报告每个
+ * 固化成仓库内可复跑的证据——逐个"把实现改坏"，跑 `tests/` 下被登记的那 22 个测试文件，报告每个
  * 变异体是被测试抓到（DETECTED）还是溜过去了（MISSED），只要有该抓没抓到的就以非零码退出。
  *
  * 用法（在仓库根）：
@@ -31,8 +35,7 @@
  *      `--only=S` 跑 Task 6 的状态机 13 条，`--only=C` 跑相机/灰度 13 条 **与 Task 8 的
  *      compose 10 条**（两批的 ID 都是 `C<数字>`，族匹配会一起选中：想单跑后者请用
  *      `--only=C1_empty` 这样的全串，或看下面的说明），
- *      `--only=R` 跑 Task 7 的 15 条（R1–R15），`--only=U` 跑上游响应校验与超时的 7 条（U1–U7），
- *      `--only=V` 跑 Task 8 的服务端造句上游 6 条（V1–V6），
+ *      `--only=R` 跑 Task 7 的 15 条（R1–R15），
  *      `--only=K` 跑 Task 9 的跟读判定 7 条（K1–K7），`--only=P` 跑 Task 9 的接线 22 条（P1–P22）；
  *      `--only=Q` 跑 Task 9B 的 13 条（Q1–Q13），`--only=X` 跑 Task 10 的导出统计 14 条（X1–X14）；
  *      `--only=R16` / `--only=R17` 跑 Task 10 收口的耗时落盘两条（**必须写全串**：
@@ -60,21 +63,19 @@
  *
  * 结论：见文末运行输出的汇总行（Task 3：17/17 可抓变异体 DETECTED + M2 证为等价变异体；
  * Task 4：12/12 可抓变异体 DETECTED，见 `task-4-report.md`；
- * Task 5 修复轮：N1–N3 → 3/3 DETECTED，见 `task-5-report.md` 修复轮一节；
+ * Task 5 修复轮：N1–N3 → 3/3 DETECTED，见 `task-5-report.md` 修复轮一节（N1–N3 已随 Task 12C 的靶子退役）；
  * Task 6：S1–S13 与 C1–C13 → 26/26 DETECTED，见 `task-6-report.md`；
  * Task 7：R1–R8 → 8/8 DETECTED，见 `task-7-report.md`；
  * Task 7 修复轮：R9–R14 与 U1–U6 → 12/12 DETECTED，见 `task-7-report.md` 修复轮一节——
- * 这一轮同时把 `server/recognize-upstream.mjs` 接进了探针（此前它的响应校验规则没有变异证据），
- * 仍**未接入**的是 `server/index.mjs`（路由层与魔数/超时守卫），理由见 TEST_FILES 上方注释）。
+ * 这一轮同时把识物上游模块接进了探针（此前它的响应校验规则没有变异证据；该模块与其 U 系
+ * 变异体已随 Task 12C 的 server 退役撤销，路由层从未接入）。
  * Task 7 复审轮的 R15 / U7 → 2/2 DETECTED，见 `task-7-report.md`「修复轮 2」一节——
  * 它们钉的是"响应头到了、body 还在流时上限到点"必须归**超时**（而不是"响应非法"），
  * 抓它的是两条真桩（真 createServer + 真 fetch，半截 body 挂住）的用例。
- * Task 8 的 C1–C9（`web/units/compose.mjs`）与 V1–V6（`server/feedback-upstream.mjs`）
- * → 15/15 DETECTED，见 `task-8-report.md`——这一轮把造句反馈链路的两半都接进了探针
- * （客户端那一腿的纯逻辑 + 服务端给上游的模型契约）。
+ * Task 8 的 C1–C9（`web/units/compose.mjs`）与 V1–V6（造句上游模型契约；V 系已随
+ * Task 12C 的 server 退役撤销）→ 15/15 DETECTED，见 `task-8-report.md`。
  * Task 8 复审轮的 C10（`web/units/compose.mjs` 的 504/408 分支）→ 1/1 DETECTED，
- * 见 `task-8-report.md`「修复轮 2」一节——这一轮同时把 `server/redact.mjs` 放进
- * MODULE_FILES（只为临时树里 import 得到，没有变异体）。
+ * 见 `task-8-report.md`「修复轮 2」一节。
  * Task 9 的 K1–K7（`web/units/speak.mjs` 的跟读判定，含一次口径变更：多词目标词改连续 token 匹配）
  * 与 P1–P22（`web/app.mjs` 的接线：入队幂等 / 到期提示 / 复现两种模式 / 不谎报换场景 / 落盘口径）
  * → 28/28 DETECTED，见 `task-9-report.md`——这一轮把 `speak` 接进了探针，
@@ -111,7 +112,6 @@ const MODULE_FILES = {
   scheduler: 'web/units/scheduler.mjs',
   'pick-word': 'web/units/pick-word.mjs',
   feedback: 'web/units/feedback.mjs',
-  env: 'server/env.mjs',
   'state-machine': 'web/units/state-machine.mjs',
   camera: 'web/units/camera.mjs',
   'frame-qc': 'web/units/frame-qc.mjs',
@@ -119,14 +119,10 @@ const MODULE_FILES = {
   app: 'web/app.mjs',
   recognize: 'web/units/recognize.mjs',
   rounds: 'web/units/rounds.mjs',
-  'recognize-upstream': 'server/recognize-upstream.mjs',
-  // Task 8 接入：造句反馈链路的两半——客户端那一腿（分档 + 原句保留 + 事件映射）与
-  // 服务端给上游的模型契约（请求体形状 + 上游信封校验 + 超时）。
+  // Task 8 接入：造句反馈链路的客户端那一腿（分档 + 原句保留 + 事件映射）。
+  //（表里原有的 env / recognize-upstream / feedback-upstream / redact 四份 server 模块
+  //  已随 Task 12C 的 server 退役整体删除；对应的 N1–N3 / U1–U7 / V1–V6 一并撤销。）
   compose: 'web/units/compose.mjs',
-  'feedback-upstream': 'server/feedback-upstream.mjs',
-  // Task 8 复审轮接入：两条上游腿共用的密钥形状抹除（进临时树只为"import 得到"，
-  // 没有对应变异体——它是个逐条替换的纯函数，坏法太多而断言面很窄）。
-  redact: 'server/redact.mjs',
   // Task 9 接入、Task 12B 重写：示范音单元（语音选择 + 可用性判定 + 播放收口）。
   // 零 import 的纯逻辑模块，浏览器 API 全部注入——它播错词/播不出还假装播过，没人看得出来。
   speak: 'web/units/speak.mjs',
@@ -156,18 +152,14 @@ const TEST_FILES = [
   'tests/scheduler.test.mjs',
   'tests/pick-word.test.mjs',
   'tests/feedback.test.mjs',
-  'tests/env.test.mjs',
   'tests/state-machine.test.mjs',
   'tests/camera.test.mjs',
   'tests/app-mount.test.mjs',
   'tests/recognize.test.mjs',
   'tests/recognize-mount.test.mjs',
-  // Task 7 修复轮接入的两份：`rounds`（判据 B 在事件流上的口径）与 `recognize-upstream`
-  // （上游响应的逐条校验/截断/超时）。后者**进得来**：它是零 import 的纯逻辑模块，
-  // 测试也只 import 它自己（不像 server/index.mjs 那样写死了 `../web/` 的绝对路径、
-  // 也不起子进程），所以接进来既不假红也不拖慢。
+  // Task 7 修复轮接入：`rounds`（判据 B 在事件流上的口径）。
+  //（同批接入的 recognize-upstream 上游契约测试已随 Task 12C 的 server 退役删除。）
   'tests/rounds.test.mjs',
-  'tests/recognize-upstream.test.mjs',
   // Task 8 接入：`compose`（客户端那一腿的纯逻辑：分档、原句保留、事件映射）与
   // `feedback-upstream`（零 import 的纯逻辑模块，理由同 recognize-upstream）。
   // 两条都进得来：只 import 模块本身，不起子进程、不写死 `../web/` 的绝对路径。
@@ -194,7 +186,7 @@ const TEST_FILES = [
   'tests/event-log.test.mjs',
   // Task 10 接入：导出的口径证据（X 系列的全部变异体都靠它抓）。
   // 它进得来：只 import `scripts/export.mjs` 与 `node:fs/os/path/child_process/url`，
-  // 不起服务、不 import `server/index.mjs`（那条纪律见下面的长注释）。
+  // 不起服务、不 import 任何仓库里的其它文件。
   'tests/export.test.mjs',
   // Task 12A 接入：Key 存取的单元契约（D1–D3 靠它抓）与直连共享契约（D4–D5）。
   // 两份都只 import 纯逻辑模块（keyring / deepseek / recognize + server 原版做 parity），
@@ -205,22 +197,11 @@ const TEST_FILES = [
 // `tests/index-html.test.mjs` **有意不进这张表**：它读 `web/index.html` 这个真实文件，
 // 而临时树只复制模块与测试，进来会因缺文件而假红。它由 `node --test` 全量套件守着。
 //
-// `tests/recognize-endpoint.test.mjs` / `tests/server.test.mjs` / `tests/feedback-endpoint.test.mjs`
-// 同样**有意不进**（Task 7 起；Task 8 把造句端点也归进这一类）：
-// 它们 import `server/index.mjs`，而后者的路由表里写死了 `../web/` 的绝对路径
-// （`fileURLToPath(new URL('../web/', import.meta.url))`）——在临时树里那会指向**临时树的 web/**，
-// 静态托管用例会对不上。要让它们进来，得先让临时树复制整个 `web/` 与 `server/`，
-// 而这两份测试里还有子进程 + 15s 超时闸的用例：单次变异体可能要跑一分钟以上。
-// 探针的价值在于**快**（现在一轮 < 2 分钟），因此这里只接纯逻辑模块，
-// 那几个服务层文件由 `node --test` 全量套件守着。
-// 连带的一条纪律（Task 8 的 `tests/compose.test.mjs` 就是照它写的）：进探针的测试文件
-// **不许 import `server/index.mjs`**，否则临时树基线立刻假红、整轮结论作废——
-// 跨模块的服务端关系用例要放在不进探针的那份文件里。
-// **未被变异证据覆盖的服务层代码（如实记，别当成没这回事）**：`server/index.mjs` 的
-// multipart 解析、错误分档、图片魔数校验、超时与半开连接守卫，造句端点的 body/字段守卫与
-// `config_missing` 分档，以及 `createApp()` 的注入点——
-// 它们由 tests/recognize-endpoint.test.mjs、tests/feedback-endpoint.test.mjs 与 tests/server.test.mjs
-// 覆盖，但**没有变异体**。
+// 历史注（Task 12C）：原来不进表的 tests/recognize-endpoint.test.mjs / tests/server.test.mjs /
+// tests/feedback-endpoint.test.mjs（server 代理的路由层测试，曾有"路由表写死绝对路径、
+// 临时树会假红"的接入纪律，故只由 `node --test` 全量套件守着）连同它们守的 server 层
+// 已随 Task 12C 整体退役——其中直连整链路三条（真客户端 + 真 HTTP + 桩上游）迁入了
+// tests/compose.test.mjs，随本表继续被守。
 const TEST_ARGS = ['--test', ...TEST_FILES];
 /**
  * 测试夹具体系（Task 7 起必需）：`tests/recognize-mount.test.mjs` 与 `tests/app-mount.test.mjs`
@@ -254,14 +235,11 @@ const sha256 = (buf) => createHash('sha256').update(buf).digest('hex');
 const SCHED = MODULE_FILES.scheduler;
 const PICK = MODULE_FILES['pick-word'];
 const FEEDBACK = MODULE_FILES.feedback;
-const ENV = MODULE_FILES.env;
 const SM = MODULE_FILES['state-machine'];
 const CAM = MODULE_FILES.camera;
 const REC = MODULE_FILES.recognize;
 const ROUNDS = MODULE_FILES.rounds;
-const UP = MODULE_FILES['recognize-upstream'];
 const COMPOSE = MODULE_FILES.compose;
-const FBUP = MODULE_FILES['feedback-upstream'];
 const SPEAK = MODULE_FILES.speak;
 const APP = MODULE_FILES.app;
 // Task 9B 的三个新目标
@@ -529,34 +507,8 @@ const MUTANTS = [
     find: '    errors.push(`error_type 取值越界: ${String(raw.error_type)}`);',
     replace: "    errors.push('error_type 取值越界');",
   },
-  // ── env（Task 5 修复轮）：N1–N3 ──
-  // 这三条是 Task 5 实施者用一次性脚本测出来"改回去测试仍然全绿"的三处，现在固化成探针条目。
-  // 注意：它们只跑 tests/env.test.mjs 能覆盖的纯函数层；`server/index.mjs` 未接入本探针
-  // （它有 import 语句，过不了下面的 `new Function` 语法闸；其路由层由 tests/server.test.mjs 覆盖）。
-  {
-    name: 'N1_dropPortValidation', target: ENV, expect: 'detected',
-    why: '删掉 PORT 正整数校验：PORT=abc → NaN / PORT=0 / PORT=8.5 都会被原样交给 listen()，'
-      + '把"配置写错"推迟成一句难懂的绑端口错误（甚至绑到随机端口）',
-    find: `  if (!Number.isInteger(env.PORT) || env.PORT <= 0) {
-    throw new Error(\`PORT 非法: \${String(source.PORT)}\`);
-  }`,
-    replace: '',
-  },
-  {
-    name: 'N2_dropStringCoercion', target: ENV, expect: 'detected',
-    why: '必需项不再 String() 转换：注入数字/布尔等 source 时返回值不再是字符串，'
-      + '下游按字符串用它（拼 URL、trim、比较）会静默变形',
-    find: '  for (const k of REQUIRED) env[k] = String(source[k]);',
-    replace: '  for (const k of REQUIRED) env[k] = source[k];',
-  },
-  {
-    name: 'N3_messageDropsStartCommand', target: ENV, expect: 'detected',
-    why: '报错信息丢掉"启动方式: node --env-file=.env server/index.mjs"那半句：'
-      + '读者分不清"密钥没填"和".env 没加载"，只能回头翻文档',
-    find: `      \`缺少必需的环境变量: \${missing.join(', ')}（见 .env.example）\\n\`
-      + \`启动方式: \${START_COMMAND}（.env 由 Node 运行时加载，不是由本程序解析）\`,`,
-    replace: `      \`缺少必需的环境变量: \${missing.join(', ')}\`,`,
-  },
+  // ── env（Task 5 修复轮）：N1–N3 已随 Task 12C 的 server 退役撤销（靶子是原环境装配模块，
+  //    已删；环境装配随「无服务端」一并失去意义。历史证据见 task-5-report 修复轮一节）──
   // ── 状态机（Task 6）：S1–S13 ──
   // 这批全部围绕同一个产品约束：**造句（composing）不可跳过**，以及"敷衍样本可筛"
   // 所依赖的两个记录量（停留时长、改写次数）。改坏任何一条，采集到的就不是
@@ -902,66 +854,9 @@ const MUTANTS = [
     }`,
     replace: '    // 变异体：不再区分"上限到点"与"响应体不是 JSON"',
   },
-  // ── 上游响应校验（Task 7 修复轮 · Important 4：把这份模块接进探针）：U1–U5 ──
-  // 这批是 review 点名的"没有变异证据"的四条规则（逐条 label 校验 / score → null /
-  // 3 条截断 / 32 MiB 上限），外加一条鉴权头。它们全在 server/recognize-upstream.mjs 里，
-  // 而那份测试只 import 它自己、也不碰 web/ 路径，所以接得进来（见 TEST_FILES 的说明）。
-  {
-    name: 'U1_emptyLabelAccepted', target: UP, expect: 'detected',
-    why: '空 label 不再判非法（只裁空白、不拒绝空串）：上游吐一个 `label: "  "` 就能通过校验，'
-      + '客户端拿到一条没有词的候选，`pickWord` 之后表现为"识别不出来"——把上游的垃圾说成模型没认出',
-    find: '  if (label === \'\') return null;',
-    replace: '  // 变异体：空 label 也当合法',
-  },
-  {
-    name: 'U2_scoreFabricatedZero', target: UP, expect: 'detected',
-    why: 'score 缺失时编一个 0 冒充置信度（而不是如实给 null）：下游看到的"模型很确定它是 0 分"'
-      + '是编出来的数，候选排序/诊断都会被带偏',
-    find: '  const score = Number.isFinite(raw.score) ? raw.score : null;',
-    replace: '  const score = Number.isFinite(raw.score) ? raw.score : 0;',
-  },
-  {
-    name: 'U3_noCandidateTruncation', target: UP, expect: 'detected',
-    why: '候选不再截到 3 条（设计文档 §4.1「三候选 + 人工重拍」）：上游多吐几条就全部回给客户端，'
-      + '界面与统计都按"最多 3 条"写，多出来的会静默改变选择结果',
-    find: '    candidates: normalized.slice(0, MAX_CANDIDATES),',
-    replace: '    candidates: normalized,',
-  },
-  {
-    name: 'U4_noDataUrlSizeGuard', target: UP, expect: 'detected',
-    why: '去掉 32 MiB 上限守卫：明知会被上游拒绝的超大图照样发出去——白花一次往返与一次计费，'
-      + '而且失败原因变成上游的 400，与"请求本身有问题"混在一起',
-    find: '  if (dataUrlBytes > MAX_DATA_URL_BYTES) {',
-    replace: '  if (false) {',
-  },
-  {
-    name: 'U5_noAuthHeader', target: UP, expect: 'detected',
-    why: '上游请求不带 Bearer 密钥：整条链路必然 401，而错误表现是"上游失败"，'
-      + '排查的人会去怀疑网络与模型，不会想到是这里把凭据弄丢了',
-    find: '        authorization: `Bearer ${env.DEEPSEEK_API_KEY}`,',
-    replace: "        authorization: 'Bearer ',",
-  },
-  {
-    name: 'U6_noUpstreamTimeout', target: UP, expect: 'detected',
-    why: '上游请求不带 signal（等于没有超时）：上游半开时这条 Promise 永久 pending，'
-      + '路由与连接都收不回来——本项目反复出现的"挂死而不是失败"',
-    find: `  const signal = AbortSignal.timeout(timeoutMs);`,
-    replace: '  const signal = undefined;',
-  },
-  {
-    name: 'U7_stalledBodyLooksInvalid', target: UP, expect: 'detected',
-    why: '上游先回响应头、body 再停滞时，不再认"上限到点"（复审 Important 1）：'
-      + '上游停滞被归成 `upstream_invalid` → 路由回 502 upstream_invalid，'
-      + '而这一档的意思是"模型契约不对"——排查的人会去改提示词/模型，真凶却是连接卡住',
-    find: `    if (isTimeoutAbort(err, signal)) {
-      const timedOut = new Error(
-        \`上游请求超时（\${timeoutMs}ms 未返回，已主动中止）：\${String(err?.message ?? err)}\`,
-      );
-      timedOut.code = UPSTREAM_FAILED;
-      throw timedOut;
-    }`,
-    replace: '    // 变异体：不再区分"上限到点"与"响应体不是 JSON"',
-  },
+  // ── 上游响应校验（Task 7 修复轮）：U1–U7 已随 Task 12C 的 server 退役撤销。它们守的
+  //    校验规则（逐条 label / score→null / 三候选截断 / 32 MiB 上限 / Bearer 头 / 超时）
+  //    已在 12A 移植进 `web/units/recognize.mjs`，由 D6–D10/D14 与 R14/R15 在客户端继续承重。
   // ── 造句反馈：客户端那一腿（Task 8）：C1–C10 ──
   // 这批钉的是这条链路的四条红线：①空句不花钱；②`ok` 必须是"校验通过"而不是"HTTP 200"；
   // ③**原句永不丢**（成功与失败两条路都要带回来——它是产品赌注的证据本身）；
@@ -1053,57 +948,10 @@ const MUTANTS = [
     find: '    const gatewayTimeout = res.status === 504 || res.status === 408;',
     replace: '    const gatewayTimeout = false;',
   },
-  // ── 造句反馈：服务端给上游的模型契约（Task 8）：V1–V6 ──
-  // 与识物那批（U1–U7）同一个理由：这一层是**会被改坏但测试全绿**的地方，
-  // 而它管的是"模型被要求输出什么"与"什么才算一份能往下走的响应"。
-  {
-    name: 'V1_promptLosesUncertainRewrite', target: FBUP, expect: 'detected',
-    why: '提示词里那条"uncertain 也要给改写建议"被删掉：设计文档 §4.2 要求拿不准时仍给改写建议，'
-      + '而 Task 4 的契约允许 `uncertain + rewrite: null`——不收紧校验器的前提下，'
-      + '提示词是唯一要得到它的地方（A1），删掉它界面上就只剩一句"拿不准"',
-    find: '  \'  When you answer "uncertain", STILL put a suggested rewrite in "rewrite"\',',
-    replace: "  '',",
-  },
-  {
-    name: 'V2_promptLosesFlawedRewrite', target: FBUP, expect: 'detected',
-    why: '提示词里"flawed 必须给改写建议"那半句被删掉：模型的判定对了、改写却可以不给，'
-      + '而界面上"哪里错了 + 该怎么写"是同一屏给出的（设计文档 §4.2 的响应契约要求 rewrite 可空'
-      + '并不等于我们希望它空）',
-    find: '  \'  (never "none"), and MUST give a corrected sentence in "rewrite".\',',
-    replace: "  '',",
-  },
-  {
-    name: 'V3_noJsonMode', target: FBUP, expect: 'detected',
-    why: '上游请求不带 `response_format: json_object`（控制器 A4 要求的兜底）：'
-      + '模型可以合法地吐一段散文，四个字段的解析随之变成"从文本里抠 JSON"——'
-      + '那一档失败会从"契约问题"变成"上游无效"，排查方向被带偏',
-    find: "    response_format: { type: 'json_object' },",
-    replace: '    // 变异体：不带 JSON 模式',
-  },
-  {
-    name: 'V4_seqSaysNone', target: FBUP, expect: 'detected',
-    why: '把 content 判成合法 JSON 即可，不再要求它解出来是**对象**：一个 JSON 数组或字符串'
-      + '（例如 `"correct"`、`[1,2]`）会被当成一份反馈往下走，而它连四个字段都没有',
-    find: `  if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) {`,
-    replace: '  if (false) {',
-  },
-  {
-    name: 'V5_proseAccepted', target: FBUP, expect: 'detected',
-    why: 'content 不是合法 JSON 时不再失败，而是编一个空对象当反馈：模型吐一段散文被静默降级成'
-      + '"一份缺四个字段的响应"，真凶（模型契约没被遵守）在数据里消失——全局约束 3 的反面',
-    find: `    throw invalid(\`上游 content 不是合法 JSON：\${redactSecrets(err?.message ?? err)}\`);`,
-    replace: '    parsed = {};',
-  },
-  {
-    name: 'V6_stalledBodyLooksInvalid', target: FBUP, expect: 'detected',
-    why: '上游 body 停滞到上限时不再认"上限到点"（复审 Important 1 的同一形状）：'
-      + '一次网络停滞被归成 `upstream_invalid` → 路由回 502 upstream_invalid，'
-      + '而这一档的意思是"模型契约不对"，排查的人会去改提示词',
-    find: `    if (isTimeoutAbort(err, signal)) {
-      throw failed(\`上游请求超时（\${timeoutMs}ms 未返回，已主动中止）：\${String(err?.message ?? err)}\`);
-    }`,
-    replace: '    // 变异体：不再区分"上限到点"与"响应体不是 JSON"',
-  },
+  // ── 造句上游模型契约（Task 8）：V1–V6 已随 Task 12C 的 server 退役撤销。提示词与信封
+  //    校验已在 12A 移植进 `web/units/compose.mjs`，由 compose.test.mjs 的契约用例与
+  //    C 系（客户端腿）继续承重。
+
   // ⚠️ 这一批里**不再有 K1–K7**（Task 12B 退役，先例 P3 / Q14 / R16）：它们的靶子是
   // `checkSpeech` 的 token 规则与 `isSpeechAvailable` 的转写可用性——12B 把跟读改成
   // 「听示范 → 自评」（转向 DEC-…26），整段判定逻辑从 `speak.mjs` 删除。其中可迁移的

@@ -1,10 +1,10 @@
 // tests/compose.test.mjs
 //
-// 造句反馈链路的单元测试（Task 8；Task 12A 起传输层改为**浏览器直连** DeepSeek）。
-// 两个被测单元在这里，因为它们是**一条**链路的两半：
+// 造句反馈链路的单元测试（Task 8；Task 12A 起传输层改为**浏览器直连** DeepSeek，
+// Task 12C 起 server 代理已退役，被测单元只剩一份：
 //   · `web/units/compose.mjs` —— 客户端那一腿（直连发请求 → 交给 `validateFeedback` → 分档）；
-//   · `server/feedback-upstream.mjs` —— 服务端给上游的模型契约（Task 12C 才退役；12A 起它的
-//     提示词/信封校验已**移植**到客户端，本文件里的 parity 用例钉住两份逐字一致）。
+//     原服务端给上游的模型契约（提示词/信封校验）已**整体移植**进来，parity 闸随
+//     被比对方退役，契约承重点就地钉住。
 //
 // 这层要钉住的几件事，每一条都对应一种"改坏了还不报错"：
 //   ① **`ok` 的意思是"校验通过、可用"，不是"HTTP 200"**：200 带着一份不可用的响应体是
@@ -22,12 +22,12 @@
 //
 // 全部用例用注入的假 fetch 与合成钥匙（sk-test-…），**不打真模型**（设计文档 §5.2）。
 //
-// ⚠️ **本文件不 import `server/index.mjs`**（有意）：本文件被 `scripts/mutation-probe.mjs`
-// 复制进临时工作树跑，而 `server/index.mjs` 的路由表里写死了 `../web/` 的绝对路径——
-// 在临时树里那会指向另一份 web/，基线会假红。所以"服务端整体请求上限"那条
-// 跨模块用例放在 `tests/feedback-endpoint.test.mjs` 里（那一份本来就不进探针）。
-import { test } from 'node:test';
+// ⚠️ 本文件被 `scripts/mutation-probe.mjs` 复制进临时工作树跑，所以**只 import 纯逻辑模块
+// 与 node 内置**（临时树里它们逐字在册）；直连整链路那一节用 node:http 起本地桩上游，
+// 不依赖仓库里的任何其它文件。
+import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
+import { createServer } from 'node:http';
 
 import {
   submitSentence, FEEDBACK_FAIL_REASONS, FEEDBACK_TIMEOUT_MS, FEEDBACK_REQUEST_TIMEOUT_MS,
@@ -36,15 +36,6 @@ import {
   FEEDBACK_RULE_FLAWED, FEEDBACK_RULE_UNCERTAIN,
 } from '../web/units/compose.mjs';
 import { chatUrl } from '../web/units/deepseek.mjs';
-import {
-  feedbackUpstream, FEEDBACK_PROMPT as SERVER_FEEDBACK_PROMPT, UPSTREAM_TIMEOUT_MS as FEEDBACK_UPSTREAM_TIMEOUT_MS,
-  UPSTREAM_FAILED, UPSTREAM_INVALID,
-  FEEDBACK_RULE_VERDICTS as SERVER_FEEDBACK_RULE_VERDICTS,
-  FEEDBACK_RULE_ERROR_TYPES as SERVER_FEEDBACK_RULE_ERROR_TYPES,
-  FEEDBACK_RULE_CORRECT as SERVER_FEEDBACK_RULE_CORRECT,
-  FEEDBACK_RULE_FLAWED as SERVER_FEEDBACK_RULE_FLAWED,
-  FEEDBACK_RULE_UNCERTAIN as SERVER_FEEDBACK_RULE_UNCERTAIN,
-} from '../server/feedback-upstream.mjs';
 import { recordEvent } from '../web/units/event-log.mjs';
 import { validateFeedback } from '../web/units/feedback.mjs';
 
@@ -65,11 +56,6 @@ function fakeFetch(reply) {
   impl.seen = seen;
   return impl;
 }
-
-/** 服务端时代（原 server/index.mjs 信封）的 200 响应形状——**只**供 server 半区的用例用。 */
-const okReply = (body, extra = {}) => ({
-  ok: true, status: 200, json: async () => body, text: async () => '', ...extra,
-});
 
 /**
  * 直连时代的 200 响应：把四字段对象包进上游信封（choices[0].message.content 里是严格 JSON）。
@@ -229,7 +215,7 @@ test('校验用的就是 Task 4 的 validateFeedback，且 value 原样往下走
 });
 
 test('上游信封不合法（直连后由客户端自己判）：缺 content / content 不是 JSON / 解出来不是对象 → pending', async () => {
-  // 原 server/feedback-upstream.mjs 的信封校验口径整体移植到客户端：
+  // 原（已随 Task 12C 退役的）上游模块的信封校验口径整体移植到客户端：
   // choices[0].message.content 必须是非空白字符串，解出来必须是对象（数组/原始值不算）。
   const cases = [
     { name: '缺少 choices', reply: { ok: true, status: 200, json: async () => ({ choices: [] }) } },
@@ -586,7 +572,7 @@ test('uncertain + error_type 非 none 是契约合法的组合：按 error_type 
   assert.equal(byVerdict.has('flawed'), false, 'uncertain 不得被当成 flawed（否则通过率被它污染）');
 });
 
-// ───────────────────────────── 服务端：模型契约与上游信封校验 ─────────────────────────────
+// ───────────────────────── 模型契约的承重点（移植自已退役的上游模块，就地钉住）─────────────────────────
 
 test('提示词要求四个字段、严格 JSON，并要求 uncertain 也给改写建议（设计文档 §4.2）', () => {
   for (const field of ['verdict', 'error_type', 'rewrite', 'note']) {
@@ -610,155 +596,103 @@ test('提示词要求四个字段、严格 JSON，并要求 uncertain 也给改�
   }
 });
 
-test('上游请求体形状：模型 / system+user 两条消息 / JSON 模式 / 低温度 / Bearer 密钥', async () => {
-  const seen = [];
-  const env = {
-    DEEPSEEK_API_KEY: 'sk-fake-key-for-test',
-    DEEPSEEK_API_BASE: 'https://api.deepseek.com',
-    DEEPSEEK_MODEL: 'deepseek-flash',
-  };
-  await feedbackUpstream({
-    sentence: 'I use a cup.',
-    word: 'mug',
-    scene: 'kitchen',
-    env,
-    fetchImpl: async (url, init) => {
-      seen.push({ url, init });
-      return okReply({
-        choices: [{ message: { content: JSON.stringify(goodBody) } }],
-        usage: { prompt_tokens: 300, completion_tokens: 40, total_tokens: 340 },
-        model: 'deepseek-flash',
-      });
-    },
-  });
-  assert.equal(seen.length, 1);
-  const { url, init } = seen[0];
-  assert.equal(url, 'https://api.deepseek.com/chat/completions');
-  assert.equal(init.method, 'POST');
-  assert.equal(init.headers.authorization, 'Bearer sk-fake-key-for-test', '密钥由服务端注入上游');
-  const body = JSON.parse(init.body);
-  assert.equal(body.model, 'deepseek-flash');
-  assert.deepEqual(body.response_format, { type: 'json_object' }, 'JSON 模式兜底"必须是 JSON"（语义仍由客户端校验器把关）');
-  assert.ok(body.temperature <= 0.3, '这一档要的是判定，不是发挥');
-  assert.ok(init.signal, '上游那一腿必须有上限');
-  const roles = body.messages.map((m) => m.role);
-  assert.deepEqual(roles, ['system', 'user']);
-  const userText = body.messages[1].content;
-  const flat = typeof userText === 'string' ? userText : JSON.stringify(userText);
-  for (const s of ['I use a cup.', 'mug', 'kitchen']) {
-    assert.ok(flat.includes(s), `用户消息里必须带上 ${s}（否则模型无从判定）`);
-  }
-});
-
-test('上游响应通过校验时**原样**返回四个字段（不做二次加工，多余键也带出去）', async () => {
-  const content = { ...goodBody, model_extra: 'x' };
-  const { feedback, usage } = await feedbackUpstream({
-    sentence: 'I use a cup.',
-    word: 'mug',
-    scene: 'kitchen',
-    env: { DEEPSEEK_API_KEY: 'k', DEEPSEEK_API_BASE: 'https://api.deepseek.com', DEEPSEEK_MODEL: 'deepseek-flash' },
-    fetchImpl: async () => okReply({ choices: [{ message: { content: JSON.stringify(content) } }], usage: { prompt_tokens: 7 } }),
-  });
-  assert.deepEqual(feedback, content);
-  assert.deepEqual(usage, { prompt_tokens: 7 });
-});
-
-test('上游信封不合法一律 UPSTREAM_INVALID，绝不让垃圾长得像成功', async () => {
-  const cases = [
-    { name: '非 JSON 响应体', reply: { ok: true, status: 200, json: async () => { throw new SyntaxError('Unexpected token <'); } } },
-    { name: 'HTTP 200 但 content 不是 JSON 字符串', reply: okReply({ choices: [{ message: { content: '当然可以！这句话很好。' } }] }) },
-    { name: '缺少 choices[0].message.content', reply: okReply({ choices: [] }) },
-    { name: 'content 是空串', reply: okReply({ choices: [{ message: { content: '   ' } }] }) },
-    { name: 'content 解析出来是数组', reply: okReply({ choices: [{ message: { content: '[1,2,3]' } }] }) },
-    { name: 'content 解析出来是字符串', reply: okReply({ choices: [{ message: { content: '"correct"' } }] }) },
-  ];
-  for (const c of cases) {
-    await assert.rejects(
-      () => feedbackUpstream({
-        sentence: 'I use a cup.', word: 'mug', scene: 'kitchen',
-        env: { DEEPSEEK_API_KEY: 'k', DEEPSEEK_API_BASE: 'https://api.deepseek.com', DEEPSEEK_MODEL: 'm' },
-        fetchImpl: async () => c.reply,
-      }),
-      (err) => {
-        assert.equal(err.code, UPSTREAM_INVALID, `${c.name} 应判 UPSTREAM_INVALID`);
-        return true;
-      },
-    );
-  }
-});
-
-test('上游 4xx/5xx 与抛错 → UPSTREAM_FAILED（与"形状不对"分开报）', async () => {
-  for (const reply of [
-    { ok: false, status: 500, text: async () => '{"error":"boom"}' },
-    { ok: false, status: 401, text: async () => '{"error":"bad key"}' },
-  ]) {
-    await assert.rejects(
-      () => feedbackUpstream({
-        sentence: 'x', word: 'mug', scene: 'kitchen',
-        env: { DEEPSEEK_API_KEY: 'k', DEEPSEEK_API_BASE: 'https://api.deepseek.com', DEEPSEEK_MODEL: 'm' },
-        fetchImpl: async () => reply,
-      }),
-      (err) => {
-        assert.equal(err.code, UPSTREAM_FAILED);
-        assert.match(err.message, new RegExp(String(reply.status)));
-        return true;
-      },
-    );
-  }
-  await assert.rejects(
-    () => feedbackUpstream({
-      sentence: 'x', word: 'mug', scene: 'kitchen',
-      env: { DEEPSEEK_API_KEY: 'k', DEEPSEEK_API_BASE: 'https://api.deepseek.com', DEEPSEEK_MODEL: 'm' },
-      fetchImpl: async () => { throw new TypeError('Failed to fetch'); },
-    }),
-    (err) => { assert.equal(err.code, UPSTREAM_FAILED); return true; },
-  );
-});
-
-test('上游 body 停滞到上限 → UPSTREAM_FAILED + 说清是超时（不是"契约不对"）', async () => {
-  await assert.rejects(
-    () => feedbackUpstream({
-      sentence: 'x', word: 'mug', scene: 'kitchen',
-      env: { DEEPSEEK_API_KEY: 'k', DEEPSEEK_API_BASE: 'https://api.deepseek.com', DEEPSEEK_MODEL: 'm' },
-      timeoutMs: 20,
-      fetchImpl: async (url, init) => ({
-        ok: true,
-        status: 200,
-        json: () => new Promise((_resolve, reject) => {
-          init.signal.addEventListener('abort', () => {
-            const err = new Error('The operation was aborted due to timeout');
-            err.name = 'TimeoutError';
-            reject(err);
-          });
-        }),
-      }),
-    }),
-    (err) => {
-      assert.equal(err.code, UPSTREAM_FAILED, '上游停滞 = 上游失败（超时），不是 upstream_invalid');
-      assert.match(err.message, /超时|timeout/i);
-      return true;
-    },
-  );
-});
-
 // ───────────────────────── 客户端这一腿的上限（直连后唯一的腿）─────────────────────────
 
 test('客户端这一腿的请求上限是正整数毫秒，导出的别名指同一个值', () => {
   assert.equal(FEEDBACK_TIMEOUT_MS, FEEDBACK_REQUEST_TIMEOUT_MS, '导出的别名必须指同一个值');
   assert.ok(Number.isInteger(FEEDBACK_REQUEST_TIMEOUT_MS) && FEEDBACK_REQUEST_TIMEOUT_MS > 0);
   // 直连后这是**唯一的**腿：原"服务端上游上限（20s）必须小于客户端（24s）"的跨模块关系
-  // 随代理退役（server/ 12C 才删，但客户端不再依赖它先超时）。取值理由（实弹探针
+  // 随代理退役（Task 12C）一并失效。取值理由（实弹探针
   // 1068–3439ms、最慢自报 3210ms、约 7 倍余量）见 `web/units/compose.mjs` 的常量注释。
   assert.equal(FEEDBACK_REQUEST_TIMEOUT_MS, 24_000);
 });
 
-// ───────────────────────── 移植 parity：客户端提示词与 server 原版逐字一致 ─────────────────────────
+// ───────────────────── 直连整链路：真客户端 → 真 HTTP → 桩上游（12A 起，12C 迁入本文件）─────────────────────
+// 原来放在 tests/feedback-endpoint.test.mjs（那份已随 Task 12C 的 server 退役整体删除）；
+// 这三条是它留下的**客户端价值**：单元用例里的 fetch 是假的，这三条走**真 fetch + 真 HTTP**，
+// 钉的是"请求真的上了线、Authorization 头真的带上了 Key、真信封真的被解析"。
 
-test('客户端移植的提示词与规则和 server 原版逐字一致（server 退役前的 parity 闸）', () => {
-  assert.equal(FEEDBACK_PROMPT, SERVER_FEEDBACK_PROMPT, '提示词是模型契约：移植时一个字都不许改');
-  assert.equal(FEEDBACK_RULE_VERDICTS, SERVER_FEEDBACK_RULE_VERDICTS);
-  assert.equal(FEEDBACK_RULE_ERROR_TYPES, SERVER_FEEDBACK_RULE_ERROR_TYPES);
-  assert.equal(FEEDBACK_RULE_CORRECT, SERVER_FEEDBACK_RULE_CORRECT);
-  assert.equal(FEEDBACK_RULE_FLAWED, SERVER_FEEDBACK_RULE_FLAWED);
-  assert.equal(FEEDBACK_RULE_UNCERTAIN, SERVER_FEEDBACK_RULE_UNCERTAIN);
+/** 上游桩：本地 HTTP 服务，按 `reply` 回 `choices[0].message.content` 形状的响应。 */
+function upstreamStub() {
+  const seen = [];
+  let reply = { status: 200, body: { choices: [{ message: { content: JSON.stringify(goodBody) } }] } };
+  const server = createServer((req, res) => {
+    const chunks = [];
+    req.on('data', (c) => chunks.push(c));
+    req.on('end', () => {
+      seen.push({ url: req.url, headers: req.headers, body: Buffer.concat(chunks).toString('utf8') });
+      const { status, raw, body } = reply;
+      res.writeHead(status, { 'content-type': 'application/json' });
+      res.end(raw !== undefined ? raw : JSON.stringify(body));
+    });
+  });
+  return {
+    server,
+    seen,
+    setReply(r) { reply = r; },
+    /** 上游回一份 content=JSON.stringify(obj) 的成功响应。 */
+    replyContent(obj) {
+      reply = { status: 200, body: { choices: [{ message: { content: JSON.stringify(obj) } }], usage: { prompt_tokens: 301 } } };
+    },
+  };
+}
+
+const SAID = { sentence: 'I use a cup.', word: 'mug', scene: 'kitchen' };
+/** 直连客户端用的合成 Key（仓库里只允许合成钥匙）。 */
+const CLIENT_KEY = 'sk-test-client-side-key-fedcba987654';
+
+let upstream;
+let upstreamBase; // 桩上游地址：这三条把客户端 apiBase 指到这里（真地址是 api.deepseek.com，测试不打它）
+
+before(async () => {
+  upstream = upstreamStub();
+  await new Promise((resolve) => upstream.server.listen(0, '127.0.0.1', resolve));
+  upstreamBase = `http://127.0.0.1:${upstream.server.address().port}`;
+});
+
+after(async () => {
+  upstream.server.closeAllConnections();
+  await new Promise((resolve) => upstream.server.close(resolve));
+});
+
+test('端到端（真客户端 + 真 HTTP + 桩上游）：submitSentence 拿回 ok 与校验过的反馈', async () => {
+  upstream.replyContent(goodBody);
+  const r = await submitSentence(SAID, {
+    // 生产里 base 自带 /v1（DEEPSEEK_API_BASE = https://api.deepseek.com/v1），桩这里照抄这个形状
+    apiKey: CLIENT_KEY, apiBase: `${upstreamBase}/v1`, fetchImpl: fetch,
+  });
+  assert.equal(r.status, 'ok');
+  assert.equal(r.feedback.verdict, 'flawed');
+  assert.equal(r.feedback.rewrite, 'I use a mug.');
+  assert.equal(r.uncertain, false);
+  assert.equal(validateFeedback(r.feedback).ok, true);
+  assert.equal(r.sentence, SAID.sentence);
+
+  // 直连的关键性质：**密钥由客户端随请求头注入**（原服务端注入的那层没有了）
+  const sent = upstream.seen.at(-1);
+  assert.equal(sent.headers.authorization, `Bearer ${CLIENT_KEY}`, '客户端自己的 Key 随 Authorization 头上行');
+  assert.equal(sent.url, '/v1/chat/completions', '直连契约的路径（原代理时代是 /chat/completions）');
+});
+
+test('端到端：上游失败时 learner 的句子仍然完整回来（A2/A4 的整链路证据）', async () => {
+  upstream.setReply({ status: 500, raw: '{"error":"boom"}' });
+  const said = 'I put the mug on the desk.';
+  const r = await submitSentence({ ...SAID, sentence: said }, {
+    apiKey: CLIENT_KEY, apiBase: upstreamBase, fetchImpl: fetch,
+  });
+  assert.equal(r.status, 'pending');
+  assert.equal(r.reason, FEEDBACK_FAIL_REASONS.HTTP_ERROR);
+  assert.equal(r.sentence, said, '失败路径上原句一字不差地带回来（补交全靠它）');
+  assert.deepEqual({ word: r.word, scene: r.scene }, { word: 'mug', scene: 'kitchen' });
+});
+
+test('端到端：上游 401 → 直连客户端单独落 auth_failed（12A 的新分档，指回设置页）', async () => {
+  upstream.setReply({ status: 401, raw: '{"error":{"message":"Incorrect API key provided"}}' });
+  const r = await submitSentence(SAID, {
+    apiKey: CLIENT_KEY, apiBase: upstreamBase, fetchImpl: fetch,
+  });
+  assert.equal(r.status, 'pending');
+  assert.equal(r.reason, FEEDBACK_FAIL_REASONS.AUTH_FAILED, '401 是"去设置里修 Key"的一档');
+  assert.match(r.error, /401/);
+  assert.equal(r.sentence, SAID.sentence, '原句照旧保留');
 });

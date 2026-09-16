@@ -5,19 +5,16 @@
 // 直连地址、模型名、视觉细节档、上游信封（choices[0].message.content）的解析是**两条链路
 // 共用的契约**，收在这里免得各自漂移。
 //
-// 另外两块移植口径的 parity 也钉在这里：`units/recognize.mjs` 从
-// `server/recognize-upstream.mjs` 移植的提示词与候选截断常量，在 server/ 退役（Task 12C）
-// 之前必须与原版**逐字一致**——移植时手抖改了一个词，两边就会各判一套。
+// 移植口径的落定也在这一份里：`units/recognize.mjs` 的提示词与候选截断常量是从
+// 识物上游模块整体搬来的（那份模块已随 Task 12C 的 server 退役删除）。
+// 原来的 parity 闸（客户端与原版逐字比对）随被比对方一起退役——现在**只剩这一份**契约，
+// 它的承重点（严格 JSON、候选形状、上位词禁令、空候选出口）就地钉住，改一个字都会响。
 //
 // 全部用合成钥匙与假信封，不打真模型。
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { DEEPSEEK_API_BASE, DEEPSEEK_MODEL, VISION_DETAIL, chatUrl, extractContent } from '../web/units/deepseek.mjs';
 import { RECOGNIZE_PROMPT, MAX_CANDIDATES } from '../web/units/recognize.mjs';
-import {
-  RECOGNIZE_PROMPT as SERVER_RECOGNIZE_PROMPT,
-  MAX_CANDIDATES as SERVER_MAX_CANDIDATES,
-} from '../server/recognize-upstream.mjs';
 
 // ───────────────────────────── 直连地址与常量口径 ─────────────────────────────
 
@@ -55,13 +52,20 @@ test('extractContent：信封不合法（缺 choices / 空 choices / content 非
   }
 });
 
-// ─────────────────────── 移植口径 parity：与 server 原版逐字一致 ───────────────────────
+// ─────────────────────── 移植口径落定：唯一一份模型契约就地钉住 ───────────────────────
 
-test('客户端移植的识物提示词与 server 原版逐字一致（server 退役前的 parity 闸）', () => {
-  assert.equal(RECOGNIZE_PROMPT, SERVER_RECOGNIZE_PROMPT, '提示词是模型契约：移植时一个字都不许改');
+test('识物提示词的承重点：严格 JSON、候选形状示例、上位词禁令、空候选出口', () => {
+  // 原来的 parity 闸（与识物上游原版逐字比对）随 Task 12C 的 server 退役一起撤销；
+  // 提示词从此是唯一一份契约，这几条是它"改一个字模型行为就可能变"的承重梁。
+  assert.ok(RECOGNIZE_PROMPT.includes('Return STRICT JSON only'), '必须要求严格 JSON（response_format 只是兜底）');
+  assert.ok(
+    RECOGNIZE_PROMPT.includes('{"candidates":[{"label":"mug","score":0.9,"scene":"kitchen"}]}'),
+    '候选形状示例在提示词里（客户端校验器按这个形状判）',
+  );
+  assert.ok(RECOGNIZE_PROMPT.includes('NEVER a hypernym'), '上位词禁令在提示词里（pickWord 只认具体名词）');
+  assert.ok(RECOGNIZE_PROMPT.includes('{"candidates":[]}'), '认不出时的空候选出口在提示词里（不许硬编）');
 });
 
-test('客户端移植的候选截断上限与 server 原版一致（三候选 + 人工重拍，设计 §4.1）', () => {
-  assert.equal(MAX_CANDIDATES, SERVER_MAX_CANDIDATES);
+test('候选截断上限：三候选 + 人工重拍（设计 §4.1）', () => {
   assert.equal(MAX_CANDIDATES, 3);
 });

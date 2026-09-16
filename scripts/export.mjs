@@ -71,12 +71,13 @@
  *   · `top1/top3` 需要两样东西：①"预声明可接受词集"（实验方案 §1，按测试物体声明，
  *     不在事件里）；②候选的**顺序**（`recognize_ok.payload.candidates` 有顺序、只存了 label）。
  *     故必须由 `--expect` 外部给判定表；不给就报 `null` + `gaps`，**绝不假装算出了准确率**。
- *   · `latency_p95` 取 `recognize_ok.payload.latencyMs`（**服务端自报**的耗时）。
+ *   · `latency_p95` 取 `recognize_ok.payload.latencyMs`（**浏览器实测**的耗时）。
  *     这个字段由 Task 10 收口时补上（`DEC-OPI-…87` 授权）：写入点 `web/app.mjs`，
- *     来源 `server/index.mjs` 200 分支信封里的 `latency_ms`，`web/units/recognize.mjs` 带出来。
- *     **服务端没给时那个键根本不写**（不写 0、不估算）——所以本模块"它不在"就等于"没拿到"。
+ *     来源 `web/units/recognize.mjs` 的客户端实测（12A 直连改造起 `performance.now()`
+ *     从发请求到解出候选；Task 12C 起 server 代理退役，不再有"服务端自报"的旧口径）。
+ *     **拿不到实测值时那个键根本不写**（不写 0、不估算）——所以本模块"它不在"就等于"没拿到"。
  *     一条 `recognize_ok` 都没有的流**不算缺口**（那是还没数据）；有 `recognize_ok` 却一条耗时
- *     都没有才报缺口，并写明两种成因（旧版本落的流 / 服务端没回）各自的处置。
+ *     都没有才报缺口，并写明两种成因（旧版本落的流 / 当时拿不到实测值）各自的处置。
  * `gaps` 是给 Task 11 看的一张"还缺什么"的清单，缺什么就写什么，不写空话。
  */
 import fs from 'node:fs';
@@ -234,7 +235,8 @@ export function summarize(events, words = {}, expect = {}) {
     gaps.push(`latency_p95 未计算：已有 ${recognized.length} 条 recognize_ok，但没有任何一条带 `
       + 'payload.latencyMs。两种可能，看时间分辨：'
       + '① 这份事件流是**加字段之前**的版本（旧代码）落的——重跑一轮即可；'
-      + '② 服务端没回 latency_ms（`server/index.mjs` 的 200 分支本应总是回它）——查服务端。'
+      + '② 写入那一刻拿不到实测值（直连口径：latencyMs 由浏览器 performance.now() 实测，'
+      + '时钟异常就不写键——设计如此，不是数据丢了）。'
       + '**不要**把这一格按 0 或估算值填进判据 A。');
   }
   const unknownTypes = [...new Set(list.map((e) => e?.type).filter((t) => !KNOWN_EVENT_TYPES.includes(t)))];
