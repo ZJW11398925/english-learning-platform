@@ -297,6 +297,17 @@ test('帧质检不通过时不发请求，直接要求重拍（省调用也省�
   });
   assert.equal(r.mode, 'frame_rejected');
   assert.equal(calls, 0, '太暗的帧不应触发任何模型调用');
+  // 被 R4 变异体钉住的口径：attempts 是"真的问过模型几次"——被端侧拦下的帧一次都没问，
+  // 记成 1 会把"按了几次快门"混进调用成本与 retry_rate 的输入里。
+  assert.equal(r.attempts, 0, '被拒的帧不消耗尝试次数');
+});
+
+test('帧被拒时 candidates 是空数组而不是 undefined（调用方不必区分两种"没有"）', async () => {
+  const r = await recognizeWithFallback({
+    grab: async () => ({ blob: new Blob(['x']), stats: { brightness: 10, laplacianVar: 10 } }),
+    acceptableSets: { mug: ['mug'] }, exclude: [], fetchImpl: okFetch, ...KEY,
+  });
+  assert.deepEqual(r.candidates, []);
 });
 
 test('manual 档的每一次落空都不许把模型候选塞进 word（假造词的唯一入口）', async () => {
