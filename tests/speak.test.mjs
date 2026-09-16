@@ -7,13 +7,16 @@
 // 识别与判定（checkSpeech / isSpeechAvailable / token 规则）已随 SpeechRecognition 一并退役：
 // `reading_done` / `reading_missed` / `speech_unsupported` 三个事件类型保留在 schema 里
 //（历史数据要在诊断页继续渲染），但新流程不再产生它们——"有没有念出这个词"从此由
-// 学习者自己确认，系统不判定。这份文件 therefore 只钉三件事：
+// 学习者自己确认，系统不判定。这份文件 therefore 只钉四件事：
 //   1. `pickVoice`：语音选择——优先 en-US，选不到退任何英文声（en-GB / en / en_US 同类），
 //      再没有就 null（界面照播，靠 u.lang='en-US' 让引擎自己挑）；
 //   2. `isTtsAvailable`：可用性判定——speechSynthesis.speak 与 SpeechSynthesisUtterance
 //      **都必须是函数**（调用方会 `new` 它，占位对象会把一次"点击即崩"留给用户）；
 //   3. `playWord`：播放——成功/失败都要收口（不留挂住的 Promise）、空词不播、
-//      失败带引擎错误码、清理不把主流程带崩。
+//      失败带引擎错误码、清理不把主流程带崩；
+//   4. `playWord` 的**墙钟上限**（Task 12C，12B 移交的遗留风险）：onend/onerror 谁都不来时
+//      到点先 `synth.cancel()` 再拒绝——"正在播放…"绝不永久挂住（循 recognize.mjs 的
+//      请求上限先例：挂住 ≠ 干净失败；时钟是注入点，测试不真等）。
 //
 // 与旧版同一条架构纪律：**零 import、零浏览器全局**（speechSynthesis / Utterance 全部经
 // 参数注入，`mount()` 的 deps 缺省才给 globalThis），于是它能在 Node 里直接测。
@@ -22,7 +25,7 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 
-import { pickVoice, isTtsAvailable, playWord } from '../web/units/speak.mjs';
+import { pickVoice, isTtsAvailable, playWord, PLAY_WORD_TIMEOUT_MS } from '../web/units/speak.mjs';
 
 // ─────────────────────────── pickVoice：语音选择 ───────────────────────────
 
@@ -195,6 +198,109 @@ test('Utterance 构造器自己抛错 → 拒绝', async () => {
   const { win } = fakeTts();
   win.SpeechSynthesisUtterance = function Boom() { throw new Error('ctor boom'); };
   await assert.rejects(() => playWord('mug', { win }), /ctor boom/);
+});
+
+// ─────────────────────────── playWord：墙钟上限（Task 12C）───────────────────────────
+
+/** 手动时钟：回调只在测试显扣扳机时才跑（不真等）；`events` 按序记下 set/clear 供排序断言。 */
+function fakeClock() {
+  const pending = [];
+  const events = [];
+  return {
+    timers: {
+      setTimer: (fn, ms) => {
+        const h = { fn, ms };
+        pending.push(h);
+        events.push(['set', ms]);
+        return h;
+      },
+      clearTimer: (h) => {
+        const i = pending.indexOf(h);
+        if (i >= 0) pending.splice(i, 1);
+        events.push(['clear']);
+      },
+    },
+    pending,
+    events,
+  };
+}
+
+test('墙钟到点（onend/onerror 都不来）：先 cancel 让引擎闭嘴、再拒绝收口，绝不永久挂住"正在播放…"', async () => {
+  const { win, utterances } = fakeTts();
+  const clock = fakeClock();
+  const cancelCalls = [];
+  win.speechSynthesis.cancel = () => {
+    cancelCalls.push('cancel');
+    clock.events.push(['cancel']); // 记进同一条时序线：cancel 必须排在"撤钟收口"之前
+  };
+  const played = playWord('mug', { win, timeoutMs: 1500, timers: clock.timers });
+  // 扣扳机：墙钟到点（onend / onerror 谁都没来）——手动时钟，测试不真等。
+  assert.equal(clock.pending.length, 1, '到点前：有且只有这一个墙钟在值守');
+  clock.pending[0].fn();
+  const outcome = await Promise.race([
+    played.then(
+      () => 'resolved',
+      (err) => ({ message: String(err?.message ?? err) }),
+    ),
+    new Promise((resolve) => setTimeout(() => resolve('hung'), 50)),
+  ]);
+  assert.notEqual(outcome, 'hung', '墙钟就是为"挂住"而设：它自己绝不能挂');
+  assert.equal(typeof outcome, 'object', '到点必须是拒绝（把挂住假扮成播过比挂住更坏）');
+  assert.match(outcome.message, /超时/);
+  assert.match(outcome.message, /1500/, '错误消息带上限毫秒数（界面/诊断要能如实转述等了多久）');
+  assert.deepEqual(clock.events.map((e) => e[0]), ['set', 'cancel', 'clear'],
+    '时序必须是：装钟 → cancel（abort）→ 撤钟收口——cancel 在收口之前');
+  assert.deepEqual(cancelCalls, ['cancel'], 'synth.cancel() 恰好被调一次');
+  // 迟到的 onend 不许再掀起任何波澜（settled 守卫：收口只有一次）。
+  utterances[0].onend?.({});
+  await new Promise((r) => setTimeout(r, 1));
+});
+
+test('正常播完与引擎报错都要撤掉墙钟（到点的回调绝不迟到放炮）', async () => {
+  // onend 路径：播出的那一刻有钟在值守，收口时撤岗
+  const a = fakeTts();
+  const ca = fakeClock();
+  const pa = playWord('mug', { win: a.win, timeoutMs: 5000, timers: ca.timers });
+  assert.equal(ca.pending.length, 1, 'speak 之后必须有墙钟在值守');
+  a.utterances[0].onend?.({});
+  await pa;
+  assert.equal(ca.pending.length, 0, 'onend 收口时墙钟撤岗');
+
+  // onerror 路径：同样撤岗
+  const b = fakeTts();
+  const cb = fakeClock();
+  const pb = playWord('mug', { win: b.win, timeoutMs: 5000, timers: cb.timers });
+  b.utterances[0].onerror?.({ error: 'not-allowed' });
+  await assert.rejects(() => pb, /not-allowed/);
+  assert.equal(cb.pending.length, 0, 'onerror 收口时墙钟同样撤岗');
+});
+
+test('墙钟上限：缺省常量是充裕的正整数毫秒；注入的 ms 原样传给时钟；非法值当场拒绝且不碰引擎', async () => {
+  assert.ok(Number.isInteger(PLAY_WORD_TIMEOUT_MS) && PLAY_WORD_TIMEOUT_MS >= 5000,
+    `缺省上限 ${PLAY_WORD_TIMEOUT_MS}ms——一个词的示范音给足慢设备余量（首轮设定值，待真机数据标定）`);
+
+  const a = fakeTts();
+  const ca = fakeClock();
+  const pa = playWord('mug', { win: a.win, timeoutMs: 1234, timers: ca.timers });
+  assert.equal(ca.pending[0]?.ms, 1234, '注入的上限原样交给时钟（测试不必真等）');
+  a.utterances[0].onend?.({});
+  await pa;
+
+  for (const bad of [0, -1, NaN, Infinity, '5000', null]) {
+    const b = fakeTts();
+    const cb = fakeClock();
+    const outcome = await Promise.race([
+      playWord('mug', { win: b.win, timeoutMs: bad, timers: cb.timers }).then(
+        () => 'resolved',
+        (err) => String(err?.message ?? err),
+      ),
+      new Promise((r) => setTimeout(() => r('hung'), 50)),
+    ]);
+    assert.notEqual(outcome, 'hung', `timeoutMs=${String(bad)} 也要当场收口`);
+    assert.equal(typeof outcome, 'string', `timeoutMs=${String(bad)} 必须是拒绝`);
+    assert.match(outcome, /上限/, '点名"墙钟上限"——它是"正在播放…"绝不久挂的保证');
+    assert.equal(b.spoken.length, 0, '参数写错是编程错误：不碰引擎');
+  }
 });
 
 // ─────────────────────────── 模块纪律 ───────────────────────────
