@@ -12,7 +12,7 @@
 //   2. **失败绝不长得像成功**（全局约束 3）：`status: 'ok'` 的意思是"校验通过、可用"，
 //      **不是**"HTTP 200"。一份 200 但字段不合契约的响应体是 `pending`，不是 `ok`。
 //
-// ── 从 server/feedback-upstream.mjs 移植的口径（parity 由 tests/compose.test.mjs 钉住）──
+// ── 自旧服务端代理（已退役）逐字移植的口径（parity 由 tests/compose.test.mjs 钉住）──
 // 服务端代理退役后，模型契约整体搬到客户端：
 //   · 强约束提示词 `FEEDBACK_PROMPT` 与四条**单独成常量**的规则（可被单独断言/变异），逐字移植；
 //   · 消息组装：system 放提示词，user 放 `Target word / Scene / Learner's sentence` 三行；
@@ -84,7 +84,7 @@ export const FEEDBACK_REQUEST_TIMEOUT_MS = 24_000;
 /** 同一个值的短别名：调用方读起来更顺（`FEEDBACK_TIMEOUT_MS`）。 */
 export const FEEDBACK_TIMEOUT_MS = FEEDBACK_REQUEST_TIMEOUT_MS;
 
-// ─────────────── 从 server/feedback-upstream.mjs 移植的提示词（逐字）───────────────
+// ─────────────── 自旧服务端代理（已退役）逐字移植的提示词───────────────
 //
 // 四条规则逐条单独成常量的理由：每一条都对应一个必须成立的行为，而"整段提示词里出现过
 // 某几个字"这种断言拦不住"把其中一条删掉"。拆开之后每条都能被单独断言，也就能被
@@ -108,7 +108,7 @@ export const FEEDBACK_RULE_UNCERTAIN = [
 
 /**
  * 提示词：强约束"只输出这四个字段"，并要求 `uncertain` 时**也给**改写建议。
- * **逐字移植自 server/feedback-upstream.mjs**（parity 闸：tests/compose.test.mjs 断言两份
+ * **逐字移植自旧服务端代理**（parity 闸：tests/compose.test.mjs 断言两份
  * 逐字相等，server 退役前不许漂移）。校验器仍是权威：它放行的东西才往下走。
  */
 export const FEEDBACK_PROMPT = [

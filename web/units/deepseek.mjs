@@ -5,7 +5,7 @@
 // （`choices[0].message.content`）的解析，是两条链路**共用**的契约——收在这里，免得两条链路
 // 各自拼 URL、各自拆信封，将来一边改了另一边不知道。
 //
-// 与被退役的 `server/recognize-upstream.mjs` / `server/feedback-upstream.mjs` 的关系：
+// 与被退役的旧服务端代理两个上游单元的关系（原文件已随退役删除，见 git 历史）：
 // 这两个服务端模块在 Task 12A **原样保留**（12C 才删），客户端这边把它们的模型契约**移植**
 // 过来。移植口径由 parity 用例钉住（tests/deepseek.test.mjs：提示词逐字一致、截断常量一致），
 // server 退役之前两边不许漂移。
@@ -21,7 +21,7 @@ export const DEEPSEEK_API_BASE = 'https://api.deepseek.com/v1';
 
 /**
  * 模型名（与 `.env.example` 的 `DEEPSEEK_MODEL` 同源）。识物这条腿必须用它：
- * `deepseek-v4-pro` **不支持 Vision**（见原 server/recognize-upstream.mjs 的契约记录）。
+ * `deepseek-v4-pro` **不支持 Vision**（契约记录见 git 历史中被退役的服务端上游单元）。
  */
 export const DEEPSEEK_MODEL = 'deepseek-flash';
 
