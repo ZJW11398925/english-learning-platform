@@ -160,6 +160,35 @@ test('没有跟读记录时给一句人话（而不是空白表）', () => {
   assert.match(out.reading, /还没有跟读记录/);
 });
 
+// ─────────────────── 12B 之后的契约：判定退役，历史数据照常渲染 ───────────────────
+//
+// Task 12B（转向 DEC-…26）把跟读改成「听示范 → 自评」，新流程**不再产生**
+// reading_done / reading_missed / speech_unsupported。三个事件类型保留在 schema 里，
+// 就是为了下面的场景：升级前留下的历史记录必须继续可读（走查的人还要看这些数）。
+// 诊断页本文件**有意不改**——这一条是回归钉（装配层回归钉，TDD 先红不适用于它，
+// 如实记录：页面未改，用例写下即绿）。
+
+test('只有历史跟读数据（判定时代留下的三类事件）时整页渲染正常，逐行与计数都对', () => {
+  const events = [
+    ev('reading_done', { word: 'mug', scene: 'kitchen', transcript: 'a mug' }, { roundIndex: 1 }),
+    ev('reading_missed', { word: 'cup', scene: 'desk', transcript: 'I see a cup', reason: 'word_not_found_in_transcript' }, { roundIndex: 2, ts: 1_700_000_001_000 }),
+    ev('speech_unsupported', { word: 'pen', scene: 'desk', reason: 'engine_error:aborted' }, { roundIndex: 3, ts: 1_700_000_002_000 }),
+  ];
+  const out = renderDiagnostics({ events });
+
+  // 逐次快门表没有三类结论事件 → 给人话，不崩
+  assert.match(out.rounds, /还没有快门记录/);
+  // 跟读判定表：done 与 missed 各一行，转写原样摊出
+  assert.equal(rowCount(out.reading), 3, '一次判定一行（表头 1 + 2 行判定）');
+  assert.match(out.reading, /跟读完成（念对了）/);
+  assert.match(out.reading, /跟读没通过（没听到目标词）/);
+  assert.match(out.reading, /I see a cup/);
+  // 会话卡片：念对/没通过分列，语音不可用单列且不算没通过
+  assert.match(out.summary, /念对 <b>1<\/b> 条 \/ 没通过 <b>1<\/b> 条/);
+  assert.match(out.summary, /语音识别不可用 1 条（<b>不算<\/b>没通过）/);
+  assert.match(out.dump, /跟读: 念对=1 没通过=1 判定合计=2 语音不可用=1/);
+});
+
 // ─────────────────────────── 复现：两种模式分列 ───────────────────────────
 
 test('复现两种模式**分列**计数：识物命中与手选各数各的，不合并成一个总数', () => {
