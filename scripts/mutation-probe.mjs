@@ -12,7 +12,11 @@
  *   R16 于 Task 12A 退役——直连改造重写了那一行，证据责任移交 D9，见变异体表内注释）
  * + Task 12A 的 14 个（浏览器直连 + Key 管理：keyring D1–D3、deepseek D4–D5、
  *   识物直连 D6–D10 与 D14、造句直连 D11–D13）
- * 固化成仓库内可复跑的证据——逐个"把实现改坏"，跑 `tests/` 下被登记的那 22 个测试文件，报告每个
+ * + Task 12B 的 14 个（相册导入 + TTS 示范：album 单元 A1–A4、app 相册装配 A5–A6、
+ *   speak(TTS) 单元 T1–T6、app TTS 装配 T7–T8；
+ *   **退役**：K1–K7 与 P11–P14、Q13——它们的 SpeechRecognition 判定靶子已随 12B 删除，
+ *   可迁移的变异意图（可用性只认函数、注入点不被忽略）由 T3/T7 在新实现上重新承载）
+ * 固化成仓库内可复跑的证据——逐个"把实现改坏"，跑 `tests/` 下被登记的那 23 个测试文件，报告每个
  * 变异体是被测试抓到（DETECTED）还是溜过去了（MISSED），只要有该抓没抓到的就以非零码退出。
  *
  * 用法（在仓库根）：
@@ -123,9 +127,12 @@ const MODULE_FILES = {
   // Task 8 复审轮接入：两条上游腿共用的密钥形状抹除（进临时树只为"import 得到"，
   // 没有对应变异体——它是个逐条替换的纯函数，坏法太多而断言面很窄）。
   redact: 'server/redact.mjs',
-  // Task 9 接入：跟读判定（token 规则 + 原样保留转写 + 可用性判定）。零 import 的纯逻辑模块，
-  // 与 frame-qc / pick-word 同一个处境：它判的是"用户有没有说出目标词"，判错了没人看得出来。
+  // Task 9 接入、Task 12B 重写：示范音单元（语音选择 + 可用性判定 + 播放收口）。
+  // 零 import 的纯逻辑模块，浏览器 API 全部注入——它播错词/播不出还假装播过，没人看得出来。
   speak: 'web/units/speak.mjs',
+  // Task 12B 接入：相册导入（相册图 → 与 grabFrame 同形状的一帧）。import camera 的
+  // toGrayscale（灰度转换只有一个起源），两份被依赖模块都在表里，临时树 import 得到。
+  album: 'web/units/album.mjs',
   // Task 9B 接入：待补反馈队列（从事件流派生 + 重试时序 + 补交的可区分标记）。
   // 它 import `compose.mjs`，所以两份都必须在表里（少一份临时树就 import 不到）。
   pending: 'web/units/pending.mjs',
@@ -165,13 +172,17 @@ const TEST_FILES = [
   // `feedback-upstream`（零 import 的纯逻辑模块，理由同 recognize-upstream）。
   // 两条都进得来：只 import 模块本身，不起子进程、不写死 `../web/` 的绝对路径。
   'tests/compose.test.mjs',
-  // Task 9 接入：`speak`（跟读判定的纯逻辑）与两份**挂载**测试（跟读接线、复现与落盘）。
-  // 后两条进得来是因为 `web/app.mjs` 本来就在 MODULE_FILES 里，夹具也都在 HELPER_FILES 里；
-  // 它们 import 的东西（app / scheduler / speak / helpers）临时树里一个不少。
-  // 不接它们的话，P 系列（入队幂等、复现两种模式、落盘口径）就没有任何变异证据。
+  // Task 9 接入、Task 12B 重写：`speak`（示范音的纯逻辑）与两份**挂载**测试
+  // （跟读接线、复现与落盘）。后两条进得来是因为 `web/app.mjs` 本来就在 MODULE_FILES 里，
+  // 夹具也都在 HELPER_FILES 里；它们 import 的东西（app / scheduler / speak / helpers）
+  // 临时树里一个不少。不接它们的话，P 系列（入队幂等、复现两种模式、落盘口径）
+  // 就没有任何变异证据。
   'tests/speak.test.mjs',
   'tests/speak-mount.test.mjs',
   'tests/recurrence-mount.test.mjs',
+  // Task 12B 接入：相册导入的装配层（ready 屏入口 → 同一条质检/识物链路）。
+  // A4/A5（app 的相册守卫与解码分档）靠它抓；它 import 的 app / helpers 临时树里都有。
+  'tests/album-mount.test.mjs',
   // Task 9B 接入：待补反馈队列（纯逻辑 + 装配）与存储层的配额路径。
   // `tests/event-log.test.mjs` 同时接进来：`reading_missed` 是事件表的契约变更，
   // 不接它的话"事件类型漏登记"这类变异体没有任何证据。
@@ -259,6 +270,8 @@ const EXPORT = MODULE_FILES.export;
 // Task 12A 的新目标（直连 + Key 管理）
 const KEYRING = MODULE_FILES.keyring;
 const DEEPSEEK = MODULE_FILES.deepseek;
+// Task 12B 的新目标（相册导入；speak 同名文件在 12B 整体重写为示范音单元）
+const ALBUM = MODULE_FILES.album;
 
 const PICK_ORIGINAL = `export function pickWord({ candidates, acceptableSets, exclude = [] }) {
   const accepted = new Set();
@@ -1089,69 +1102,13 @@ const MUTANTS = [
     }`,
     replace: '    // 变异体：不再区分"上限到点"与"响应体不是 JSON"',
   },
-  // ── 跟读判定（Task 9 · `web/units/speak.mjs`）：K1–K7 ──
-  // 这批钉的是设计文档 §4.3 那条判据的全部内容：**只判有没有说出目标词**。
-  // 判错了有两种方向，两种都很贵：判成"说出了"（用户没念也过关，跟读这一步等于没有）
-  // 与判成"没说"（用户念对了却说没听到，只能靠跳过跟读逃出去）。所以 token 边界、
-  // 大小写、转写原样保留、可用性只认函数、空序列默认值，各有一条。
+  // ⚠️ 这一批里**不再有 K1–K7**（Task 12B 退役，先例 P3 / Q14 / R16）：它们的靶子是
+  // `checkSpeech` 的 token 规则与 `isSpeechAvailable` 的转写可用性——12B 把跟读改成
+  // 「听示范 → 自评」（转向 DEC-…26），整段判定逻辑从 `speak.mjs` 删除。其中可迁移的
+  // 变异意图（"可用性只认函数"）由下方 T3 在 TTS 可用性上重新承载；token 规则类
+  // （K1/K2/K3/K7）随判定一起退役，没有可迁移的等价物：新流程不再判定"有没有说出目标词"。
+  // `speak` 的差分视图已随重写更新（见 DIFF_VIEWS）。
   //
-  // 口径变更（控制器裁定，见 task-9-report）：多词目标词从"永远判不出"改成"连续 token 子序列"。
-  // K7 也随之从"已证等价"变成**可抓**的一条——重构把空序列的处理收敛成唯一一处
-  // （`containsSequence` 的第一句），`checkSpeech` 不再另加早退，于是这一句是承重的。
-  {
-    name: 'K1_substringMatch', target: SPEAK, expect: 'detected',
-    why: '把"连续 token 出现"退化成"拼成串再做子串包含"：`mugshot` 会被判成说出了 `mug`'
-      + '（计划自带的用例就是为这条写的），于是"有没有说出这个词"不再成其为判据',
-    find: '  return { said: containsSequence(tokenize(raw), tokenize(targetWord)), transcript: raw };',
-    replace: "  return { said: tokenize(raw).join(' ').includes(tokenize(targetWord).join(' ')), transcript: raw };",
-  },
-  {
-    name: 'K2_caseSensitive', target: SPEAK, expect: 'detected',
-    why: '切词不做小写归一：语音引擎常把句首词首字母大写（`I see a Mug.`），'
-      + '于是"念对了"被判成"没听到"——用户只能跳过跟读，而数据里看不出是判定坏了',
-    find: "const tokenize = (s) => String(s ?? '').toLowerCase().split(/[^a-z']+/).filter(Boolean);",
-    replace: "const tokenize = (s) => String(s ?? '').split(/[^a-z']+/).filter(Boolean);",
-  },
-  {
-    name: 'K3_trimTranscript', target: SPEAK, expect: 'detected',
-    why: '返回的转写被 trim 过：它是"用户到底说了什么"的唯一证据（复核引擎听错、将来做人工标注'
-      + '都靠它），在这里顺手规整一下就把证据改掉了，而且改得没人看得见',
-    find: '  return { said: containsSequence(tokenize(raw), tokenize(targetWord)), transcript: raw };',
-    replace: '  return { said: containsSequence(tokenize(raw), tokenize(targetWord)), transcript: raw.trim() };',
-  },
-  {
-    name: 'K4_availabilityTruthyNotFunction', target: SPEAK, expect: 'detected',
-    why: '可用性判定只看"有没有这个字段"而不看它是不是函数：调用方会 `new` 它，'
-      + '一个占位对象就能让界面进到"开始说"那条路，用户点下去的那一刻抛错',
-    find: `  return typeof win?.SpeechRecognition === 'function'
-    || typeof win?.webkitSpeechRecognition === 'function';`,
-    replace: '  return win?.SpeechRecognition != null || win?.webkitSpeechRecognition != null;',
-  },
-  {
-    name: 'K5_availabilityIgnoresWebkit', target: SPEAK, expect: 'detected',
-    why: '只认 `SpeechRecognition`、丢掉 `webkitSpeechRecognition`：Safari / 旧 Chrome 只挂 webkit 那个名字，'
-      + '于是整个跟读判定在这些浏览器上永远走降级（speech_unsupported 虚高）',
-    find: `  return typeof win?.SpeechRecognition === 'function'
-    || typeof win?.webkitSpeechRecognition === 'function';`,
-    replace: "  return typeof win?.SpeechRecognition === 'function';",
-  },
-  {
-    name: 'K6_availabilityReadsGlobalThis', target: SPEAK, expect: 'detected',
-    why: '可用性判定不看传进来的对象、直接读全局：注入点就此失效（测试注入假引擎也没用），'
-      + '而且这个模块不再是纯逻辑——它再也不能在 Node 里直接测',
-    find: `  return typeof win?.SpeechRecognition === 'function'
-    || typeof win?.webkitSpeechRecognition === 'function';`,
-    replace: "  return typeof globalThis?.SpeechRecognition === 'function';",
-  },
-  {
-    name: 'K7_dropEmptySeqGuard', target: SPEAK, expect: 'detected',
-    why: '`containsSequence` 里"空序列不算出现"那一句被删掉：空目标词（空串 / 纯符号 / 纯空白 / null）'
-      + '会**命中任何非空转写**——词表里一个配置错误（空串）就让所有人**自动**通过跟读。'
-      + '这一句是该模块里**唯一**处理空序列的地方（`checkSpeech` 不再另加早退），所以它承重、'
-      + '也必须能被抓到（口径变更前它是"等价变异体"，重构后是可抓的一条）',
-    find: '  if (seq.length === 0) return false;',
-    replace: '  // 变异体：空序列也当"出现"',
-  },
   // ── Task 9 的接线（`web/app.mjs`）：P1–P22 ──
   // 这批钉的是这一轮新接的四条链：**入队幂等**（回环不许重置排期）、**复现两种模式分列**
   // （识物命中 / 手选，绝不合并）、**不许谎报换了场景**、**落盘口径**（submitCount /
@@ -1231,49 +1188,12 @@ const MUTANTS = [
     find: "      noteRecurrence('recognized');",
     replace: '      // 变异体：识物命中不算复现',
   },
-  {
-    name: 'P11_speechMissLooksSaid', target: APP, expect: 'detected',
-    why: '跟读判定结果被丢掉、一律当成"说出了"：**没念也过关**，跟读这一步等于没有，'
-      + '而 reading_done 照样落一条——数据上看不出任何异常',
-    find: "    const verdict = checkSpeech(shownWord?.word ?? '', transcript);",
-    replace: '    const verdict = { said: true, transcript };',
-  },
-  {
-    name: 'P12_unsupportedNotRecorded', target: APP, expect: 'detected',
-    why: '转写不可用时不再落 `speech_unsupported`：降级这件事在数据里消失，'
-      + '于是"多少人的浏览器根本做不了跟读判定"永远算不出来（全局约束 3：失败不得静默）',
-    find: `    record(store, 'speech_unsupported', {
-      sessionId,
-      roundIndex: lastRoundIndex,
-      wordId: null,
-      word: shownWord?.word ?? null,
-      scene: shownWord?.scene ?? null,
-      reason: 'no_speech_recognition',
-    }, clock);`,
-    replace: '    // 变异体：不记降级标签',
-  },
-  {
-    name: 'P13_unsupportedPretendsRead', target: APP, expect: 'detected',
-    why: '降级路径**伪装成读对了**：转写不可用时也落一条 `reading_done`。'
-      + '手动打勾只表示"我读了"，不是"系统听到我说出了目标词"——混记会让跟读通过率变成假的',
-    find: '    if (speechOk) return;',
-    replace: `    if (speechOk) return;
-    record(store, 'reading_done', {
-      sessionId,
-      roundIndex: lastRoundIndex,
-      wordId: null,
-      word: shownWord?.word ?? null,
-      scene: shownWord?.scene ?? null,
-      transcript: null,
-    }, clock);`,
-  },
-  {
-    name: 'P14_speechAvailabilityIgnoresInjection', target: APP, expect: 'detected',
-    why: '可用性判定改读全局而不是注入点：测试注入假引擎就再也驱动不了判定那条路，'
-      + '而浏览器里注入点也失去意义（"判定来源只有一个"这条设计就此破掉）',
-    find: '  const speechOk = isSpeechAvailable(speechWin);',
-    replace: '  const speechOk = isSpeechAvailable(globalThis);',
-  },
+  // ⚠️ 这一批里**不再有 P11–P14**（Task 12B 退役）：四个靶子全在 SpeechRecognition 判定
+  // 接线上（判定结果丢掉照算说出了 / 不落 speech_unsupported / 降级伪装成读对了 /
+  // 可用性改读全局）。判定路径整段删除后，前三个变异体没有可迁移的等价物——新流程
+  // 的"自评/跳过不产生判定事件"由装配层用例**正向钉住**（speak-mount 的 verdictEventsOf
+  // 断言：想落这些事件得先有人写出落它的代码，而代码里已经没有）；第四个意图由下方
+  // T7（可用性改读 globalThis）在 TTS 上重新承载。
   {
     name: 'P15_composeSubmittedMissing', target: APP, expect: 'detected',
     why: '提交造句不再落盘（Task 6 曾刻意延后到 Task 9 的那一条）：学习者的句子是本轮'
@@ -1454,20 +1374,9 @@ const MUTANTS = [
     }, clock);
     if (!machine.send('wordReady')) return;`,
   },
-  {
-    name: 'Q13_readingMissedBeforeMutualExclusion', target: APP, expect: 'detected',
-    why: '`reading_missed` 写在了"念对了"那条分支**之前**：一次判定落两条'
-      + '（`reading_done` + `reading_missed` 同时存在），跟读通过率与失败率都成了假数',
-    find: `    const verdict = checkSpeech(shownWord?.word ?? '', transcript);
-    if (verdict.said) {`,
-    replace: `    const verdict = checkSpeech(shownWord?.word ?? '', transcript);
-    record(store, 'reading_missed', {
-      sessionId, roundIndex: lastRoundIndex, wordId: null,
-      word: shownWord?.word ?? null, scene: shownWord?.scene ?? null,
-      transcript: verdict.transcript, reason: 'always',
-    }, clock);
-    if (verdict.said) {`,
-  },
+  // ⚠️ 这一批里**不再有 Q13**（Task 12B 退役）：它的靶子是 `onSpeak` 里"reading_missed 写在
+  // 念对分支之前"的双记缺陷——`onSpeak` 随判定路径整段删除。互斥性在新流程上自然成立
+  // （根本没有判定事件可落），由 speak-mount 的 verdictEventsOf 正向断言钉住。
   // ⚠️ 这一批里**没有**"调用方冗余去重"那条等价变异体（原编号 Q14，已删除）。
   // 它本来要证明的是：`app.mjs` 的 `openPending()` 里再加一层 `Set` 去重是**空的**
   // （归并已经在 `pending.mjs` 的 `pendingFeedbackArchive` 里做过）。事实成立
@@ -1708,6 +1617,136 @@ const MUTANTS = [
     find: "      mode: 'manual', word: null, candidates: [], attempts: 0,",
     replace: "      mode: 'manual', word: null, candidates: [], attempts: 2,",
   },
+
+  // ── Task 12B：相册导入（`web/units/album.mjs` 的 A1–A4 + `web/app.mjs` 的 A5–A6）──
+  // 这批钉的是相册这条新输入源的承重墙：与相机**同一条**灰度/缩放管道（两条输入源必须
+  // 产出同一种帧，C1/C8 的同类事故不许在相册路径重演）、解码失败必须带可识别的 code
+  // （装配层据此把它当用户情形而非程序缺陷）、位图用完即关（手机内存）、
+  // 无 Key 不解码（必然 401 的空转一次都不该有，与「拍照」同一条守卫）。
+  {
+    name: 'A1_albumRgbaPassthrough', target: ALBUM, expect: 'detected',
+    why: '相册帧把 RGBA 裸缓冲交给 computeStats（camera 修正 1 的同款事故在相册路径重演）：'
+      + '长度是像素数的 4 倍，computeStats 响亮抛 RangeError，一次选图变成一次崩溃',
+    find: '    stats: computeStats(toGrayscale(img.data, img.width, img.height), img.width, img.height),',
+    replace: '    stats: computeStats(img.data, img.width, img.height),',
+  },
+  {
+    name: 'A2_albumUpscalesSmallImage', target: ALBUM, expect: 'detected',
+    why: '去掉只缩不放的守卫：小图被放大到 512 长边——与相机路径不同的缩放口径，'
+      + '放大不增加信息还多花编码/上传的钱（"两条输入源一个口径"就此破掉）',
+    find: '  const scale = Math.min(1, maxEdge / Math.max(bw, bh));',
+    replace: '  const scale = maxEdge / Math.max(bw, bh);',
+  },
+  {
+    name: 'A3_decodeFailureUnflagged', target: ALBUM, expect: 'detected',
+    why: '解码失败不再带 IMAGE_NOT_READABLE 码：装配层分不清"用户选了张坏图"（提示换一张）'
+      + '与"程序缺陷"（响亮重抛），用户情形被当成未知故障抛到控制台',
+    find: `    const wrapped = new Error(\`这张图片打不开（解码失败）：\${String(err?.message ?? err)}\`);
+    wrapped.code = IMAGE_NOT_READABLE;
+    throw wrapped;`,
+    replace: '    throw err;',
+  },
+  {
+    name: 'A4_bitmapNeverClosed', target: ALBUM, expect: 'detected',
+    why: '解码出的位图不关闭：一张 12MP 解码图在手机内存里占几十 MB，连续选几张图内存就顶上去'
+      + '——清理不该依赖 GC 兜底',
+    find: '  try { bitmap.close?.(); } catch { /* 关不掉也无妨 */ }',
+    replace: '  // 变异体：不关位图',
+  },
+  {
+    name: 'A5_albumPickSkipsKeyGuard', target: APP, expect: 'detected',
+    why: '相册选图不再拦"没有 Key"：必然 401 的空转照样发生（图被解码、请求被打出去），'
+      + '"缺 Key 该去设置里修"的指引退化成一次盲目的识物失败——与「拍照」从此两条守卫口径',
+    find: `    // 与「拍照」同一条守卫：没有 Key 的识物是一个必然 401 的空转，图根本不该解码。
+    // 不落事件、不动状态机：什么都没发生，就没有什么可记（"缺 Key"不是一次识物失败）。
+    if (!hasKey()) {`,
+    replace: `    // 与「拍照」同一条守卫：没有 Key 的识物是一个必然 401 的空转，图根本不该解码。
+    // 不落事件、不动状态机：什么都没发生，就没有什么可记（"缺 Key"不是一次识物失败）。
+    if (false) {`,
+  },
+  {
+    name: 'A6_albumDecodeFailureRethrown', target: APP, expect: 'detected',
+    why: '"图打不开"（用户情形）落进未知错误分支响亮重抛：用户选一张坏图得到一次'
+      + '未处理的崩溃（控制台一个 rejection），而不是一句"换一张试试"',
+    find: `      if (err?.code === album.IMAGE_NOT_READABLE) {
+        setError(\`这张图片打不开，请换一张试试（\${err?.message ?? err}）\`);
+        return;
+      }`,
+    replace: '      // 变异体：解码失败不再按用户情形分档',
+  },
+
+  // ── Task 12B：TTS 示范（`web/units/speak.mjs` 的 T1–T6 + `web/app.mjs` 的 T7–T8）──
+  // 这批钉的是示范音这条新腿的承重墙：语音选择的三级优先（en-US → 任何英文声 → null 不硬塞）、
+  // 可用性只认函数（占位对象会把"点击即崩"留给用户）、空词不播（失败不许长得像成功）、
+  // lang 兜底（没有英文声时引擎至少知道要念英文）、报错要拒绝（播不出来不许伪装成播完了）、
+  // 播放结束要收口（"正在播放…"不许卡死）。
+  {
+    name: 'T1_pickVoiceIgnoresPreference', target: SPEAK, expect: 'detected',
+    why: '语音选择不再优先 en-US（谁排前面选谁）：美式示范音的承诺失效，'
+      + '语音列表的顺序（实现细节）悄悄决定用户听到哪种口音',
+    find: `  const exact = voices.find((v) => norm(v) === want);
+  if (exact !== undefined) return exact;`,
+    replace: '',
+  },
+  {
+    name: 'T2_pickVoiceFallsBackToAnyVoice', target: SPEAK, expect: 'detected',
+    why: '"没有英文声"不再返回 null，而是把任意语言的声塞给 utterance：用中文/法文语音'
+      + '念英文单词是跑题的示范音，而界面还以为它在念英语',
+    find: '  return anySameLanguage ?? null;',
+    replace: '  if (anySameLanguage !== undefined) return anySameLanguage;\n  return voices[0] ?? null;',
+  },
+  {
+    name: 'T3_availabilitySkipsCtorCheck', target: SPEAK, expect: 'detected',
+    why: '可用性判定不再要求 SpeechSynthesisUtterance 构造器（K4 的意图在 TTS 上重载）：'
+      + '只给 speechSynthesis 的占位环境判"可用"，用户点「听示范」的那一刻 `new` 抛错',
+    find: `  return typeof win?.speechSynthesis?.speak === 'function'
+    && typeof win?.SpeechSynthesisUtterance === 'function';`,
+    replace: "  return typeof win?.speechSynthesis?.speak === 'function';",
+  },
+  {
+    name: 'T4_playWordSpeaksEmptyWord', target: SPEAK, expect: 'detected',
+    why: '空词不拦：装配层拿不到词时会把空串送进来，合成一个空白 utterance 还报告"播过了"'
+      + '——示范音这条腿的"失败绝不长得像成功"就此破掉',
+    find: `  const text = typeof word === 'string' ? word.trim() : '';
+  if (text === '') {
+    return Promise.reject(new Error(\`playWord: 目标词不是可播的词（收到 \${String(word)}），不播空示范音\`));
+  }`,
+    replace: "  const text = String(word ?? '');",
+  },
+  {
+    name: 'T5_playWordNoLangFallback', target: SPEAK, expect: 'detected',
+    why: '没有英文声时不再兜底 u.lang=en-US：引擎拿到一个没有语言的 utterance，'
+      + '在多语言设备上会用默认（常是系统语言）的声念英文词，示范音跑调且无法归因',
+    find: "    utterance.lang = voice?.lang ?? 'en-US';",
+    replace: "    utterance.lang = voice?.lang ?? '';",
+  },
+  {
+    name: 'T6_playWordErrorResolves', target: SPEAK, expect: 'detected',
+    why: '引擎报错（onerror）照样 resolve：播不出来被伪装成播完了，界面不报错、'
+      + '用户以为听到了示范（全局约束 3 的反面）',
+    find: "    utterance.onerror = (ev) => finish(reject, new Error(`示范音播放失败：${String(ev?.error ?? ev ?? 'unknown')}`));",
+    replace: '    utterance.onerror = () => finish(resolve);',
+  },
+  {
+    name: 'T7_availabilityReadsGlobalThis', target: APP, expect: 'detected',
+    why: '可用性判定改读全局而不是注入点（P14 的意图在 TTS 上重载）：测试注入的 TTS 环境'
+      + '被忽略，浏览器里"示范音可用吗"也只有一种答案——装配层与单元的注入契约就此破掉',
+    find: '  const ttsOk = isTtsAvailable(ttsWin);',
+    replace: '  const ttsOk = isTtsAvailable(globalThis);',
+  },
+  {
+    name: 'T8_demoBusyNeverResets', target: APP, expect: 'detected',
+    why: '播放结束后不释放"正在播"标志：按钮永远停在「正在播放…」且禁用，'
+      + '一次播放之后用户再也无法听第二遍示范',
+    find: `    } finally {
+      demoBusy = false;
+      render(machine.state);
+    }`,
+    replace: `    } finally {
+      demoBusy = true;
+      render(machine.state);
+    }`,
+  },
 ];
 
 // ─────────────────────────────────────────────────────────── 工具
@@ -1907,20 +1946,32 @@ const DIFF_VIEWS = {
   // "等价主张必须由差分核对证明，证明不过就反过来按漏网处理"。
   // 视图取的是这个模块真正承诺的东西：两个函数的返回值，输入域要覆盖空值、大小写、
   // 标点、多词目标词、数字/非 ASCII 转写这些恰好踩在规则边界上的形状。
+  // Task 12B：`speak`（示范音）的差分视图。**目前没有等价变异体用它**（12B 把 K 系列整批
+  // 退役，新的 T 系列全部可抓），留着它是为了让将来任何"等价"主张都能被差分核对证明
+  // ——探针的纪律是"等价主张必须由差分核对证明，证明不过就反过来按漏网处理"。
+  // 视图取这个模块真正承诺的**同步**面：语音选择（优先/回退/归一化）与可用性判定；
+  // `playWord` 是 Promise 面（onend/onerror 驱动），差分视图不覆盖——没有针对它的等价主张。
   [SPEAK]: (mod) => {
-    const words = ['mug', 'MUG', 'mugshot', '', null, undefined, 'notebook computer',
-      'ice-cream', 'mug2', '的', 0, 42];
-    const transcripts = ['I see a Mug.', 'a mug, and a MUG!', 'mugshot', 'two mugs', '',
-      '   ', '  mug  ', 'ice cream', 'I use a notebook computer', 'mug2', 'mug的', '一个 mug',
-      null, undefined, 0, 42, 'MUG'];
-    const wins = [undefined, null, 0, 1, 'x', true, {}, { SpeechRecognition: () => {} },
-      { webkitSpeechRecognition: () => {} }, { SpeechRecognition: {} }, { SpeechRecognition: () => {}, webkitSpeechRecognition: {} }];
+    const voiceSets = [
+      [], [null], [undefined], [{}], [{ lang: 42 }], [{ lang: 'en-US' }],
+      [{ lang: 'en-GB' }, { lang: 'en-US' }], [{ lang: 'en-US' }, { lang: 'en-GB' }],
+      [{ lang: 'fr-FR' }, { lang: 'en-GB' }], [{ lang: 'en' }], [{ lang: 'en_US' }], [{ lang: 'EN-us' }],
+      [{ lang: 'fr-FR' }, { lang: 'zh-CN' }], [{ lang: 'en-US' }, null, {}, { name: 'x' }],
+    ];
+    const wants = ['en-US', 'en-GB', 'en', ''];
+    const wins = [undefined, null, 0, 1, 'x', true, {},
+      { speechSynthesis: { speak() {} } },
+      { SpeechSynthesisUtterance: function U() {} },
+      { speechSynthesis: { speak: 'x' }, SpeechSynthesisUtterance: function U() {} },
+      { speechSynthesis: { speak() {} }, SpeechSynthesisUtterance: function U() {} }];
+    const pickedOf = (voices, want) => {
+      const v = mod.pickVoice(voices, want);
+      return v === null ? null : [String(v.lang)];
+    };
     return JSON.stringify({
-      speech: words.flatMap((w) => transcripts.map((t) => {
-        const r = mod.checkSpeech(w, t);
-        return [r.said, String(r.transcript)];
-      })),
-      avail: wins.map((w) => mod.isSpeechAvailable(w)),
+      picked: voiceSets.flatMap((voices) => wants.map((want) => pickedOf(voices, want))),
+      pickedDefault: voiceSets.map((voices) => pickedOf(voices, undefined)),
+      avail: wins.map((w) => mod.isTtsAvailable(w)),
     });
   },
   // Task 9B：`pending` 的差分视图。**目前由 Q14（调用方冗余去重）这一条等价主张使用**。
