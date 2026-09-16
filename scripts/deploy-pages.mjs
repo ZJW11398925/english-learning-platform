@@ -119,9 +119,25 @@ if (remoteTip === splitTip) {
   process.exit(0);
 }
 if (remoteTip !== '' && !FORCE) {
-  fail(`远端 ${BRANCH}（${remoteTip.slice(0, 12)}…）与本地 split 结果（${splitTip.slice(0, 12)}…）不一致且无法快进。`
-    + '\n  若远端是别人/别的流程写过的旧站点，确认后用 --force 覆盖：node scripts/deploy-pages.mjs --force');
-  process.exit(1);
+  // 「不一致」不等于「不能快进」：split 是确定性的，所以只要远端是本地 split 的祖先，
+  // 这次推送就是一次普通的快进（常见成因：上一次部署之后又有只影响 web/ 的提交——比
+  // 如只改注释——还没发上去）。早先这里只看 SHA 是否相等，会把这种情况误报成
+  // 「无法快进」并要人 --force；而 --force 会**丢掉**远端那个祖先提交，把一次正常
+  // 增量部署变成历史改写。故先问祖先关系，只有真的分叉才拦。
+  const fastForward = (() => {
+    try {
+      git('merge-base', '--is-ancestor', remoteTip, splitTip);
+      return true;
+    } catch {
+      return false; // 非祖先（真分叉）或对象不可达，都按「不能快进」处理
+    }
+  })();
+  if (!fastForward) {
+    fail(`远端 ${BRANCH}（${remoteTip.slice(0, 12)}…）与本地 split 结果（${splitTip.slice(0, 12)}…）已分叉（不是快进）。`
+      + '\n  若远端是别人/别的流程写过的旧站点，确认后用 --force 覆盖：node scripts/deploy-pages.mjs --force');
+    process.exit(1);
+  }
+  say(`远端 ${BRANCH} 是本地结果的祖先（${remoteTip.slice(0, 12)}… → ${splitTip.slice(0, 12)}…），按快进推送。`);
 }
 try {
   git('push', ...(FORCE ? ['--force'] : []), 'origin', `${BRANCH}:${BRANCH}`);
