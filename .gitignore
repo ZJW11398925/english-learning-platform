@@ -57,3 +57,5 @@ tmp/
 
 # ── 插件与工具本地状态 ──────────────────────────────
 .mimosa/
+# playwright-cli 的会话快照/截图/控制台日志（走查用完即弃；正式证据另存 docs/evidence-<日期>/）
+.playwright-cli/

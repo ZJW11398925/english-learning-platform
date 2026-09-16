@@ -4,7 +4,7 @@
 
 手机浏览器可用的学习闭环：拍照识物取词 → 跟读 → 自己造句 → 拿到结构化反馈 → 该词在新场景中复现。路线 **SCENE_FIRST**（契约载体 `DEC-OPI-…19`），产品边界 EVOLUTIONARY_MVP。用来回答：成人愿不愿意为一次取词举起手机拍一下，并愿意付出造句这份主动产出成本。
 
-## 当前状态（2026-09-15 核对）
+## 当前状态（2026-09-17 核对；上一轮 2026-09-15）
 
 - **项目已转向（`DEC-…23`/`DEC-…26`）**：人工契约级验收（验证一/二/三，`VAL-…36/38/42/50`）**挂起不再调度**（保持 pending 如实呈现——它们绑定的旧设计假设已被用户推翻）。下一阶段 = **核心功能重构 + GitHub 公开部署**，三项形态已定：
   1. **部署 = GitHub Pages + 访问者自带 API Key**（localStorage 不入库；前端直连 api.deepseek.com，CORS 已实测放行）；**服务端代理（server/）退役**——Task 12 重构的主项
@@ -12,8 +12,13 @@
   3. **拍照 = 相册导入**（识物链路不变，输入源加相册选图）
   - 部署期契约断言（DEPLOYMENT/RUNTIME）已首次登记在 `DEC-…26` 载体上——runbook：漂移时 readiness 可查
 - 执行层现状：**公测站点已上线**：`https://zjw11398925.github.io/english-learning-platform/`（GitHub Pages，gh-pages 分支根，实测 200）；仓库 `https://github.com/ZJW11398925/english-learning-platform`（公开，gh 已登录）。**Task 12A/12B/12C 全部完成并验收**（`VR-…6/15/20` 三连 PASS，裁决 `DEC-…d5d39b50.8/16/21`）：①浏览器直连 + Key 管理（localStorage `elp.apiKey`）；②相册导入 + TTS 示范替代跟读（SpeechRecognition 退役）；③server/ 整体退役 + `scripts/deploy-pages.mjs` 部署脚本 + README。测试基线 494/494，探针 155/155。
-- **readiness 首诊受阻已登记**（`DEC-…d5d39b50.24`）：`design_readiness` 对 RELEASE 返回 `READINESS_BASIS_INCOMPLETE`——工作区无在册 GATE_REQUIREMENT，16 工具面无显式闸门铸造入口。**下会话第一优先**：查 plan_build 是否为闸门铸造路径，补建后重跑 readiness；若不可达则作为 DMCP 使用反馈正式提出。
-- **公测前清单**（`DEC-…d5d39b50.21` 钉住）：①直连实弹探针跑一轮（probe-recognize-live / probe-feedback-live，自带 Key）并标定 12000/15000ms 超时真机值；②无 Key 线上引导路径人工走查；③改 web/ 后手动 `node scripts/deploy-pages.mjs`（无 CI）；④本机 `.env` 建议手删（已无代码引用）。
+- **readiness 之谜已查清 = 结构性不可达（`DEC-…b3.10`，2026-09-17 会话）**：结论「不是找漏了入口」。证据链（读 `D:\MCP\apps\mcp-server` 源 + 实调）：①闸门行只能按**每个 FINDING 对象恰一行**铸造（`resolveHostGatePolicy`，main.ts:273-302 只遍历 `payload.kind==='FINDING'`），零 FINDING ⇒ 行空数组 ⇒ 域面既有 `READINESS_BASIS_INCOMPLETE`；②FINDING 只能由 `review_submit` 的 `finding_proposals` 物化（callToolDispatcher.ts:1272-1282）；③它要求一个**已存在的 ReviewPacket**，而铸造函数 `createHostReviewBasisPreparer`（review-basis.ts:170）在 src 全库**只有定义、零调用点**，`dmcp.host.review_basis_prepare` 无宿主接线（profile 只给 5 个 `DMCP_*` 变量）；④`review_prepare` 名字有欺骗性——本构建里是 **QUERY 纯读**（callToolDispatcher.ts:1052-1087），只按 id 找已存在的 REVIEW_REQUIREMENT，**不铸造**；实测 `review_prepare(ref=RRQ-OPI-probe-1)` → `OBJECT_NOT_FOUND`；⑤副证：canonical 里零 FINDING、零 REVIEW_REQUIREMENT。**故 `plan_build` 不是闸门铸造路径**（ENABLER 的 `gate_requirement_refs` 只**引用**闸门；真产源是 host 注入的 readiness policy bundle = 第六变量路线）。**处置：不伪造**（拒绝手改 canonical、拒绝拿 ACCEPTANCE/ASSUMPTIONS 冒充闸门）；RELEASE 推进路用等价口径（`DEC-…d5.21` 清单）。**解封路径（择一，需宿主/服务端侧动作）**：(a) 把已实现的 `createHostReviewBasisPreparer` 接到 LOCAL_RUNTIME；(b) 允许 `DMCP_READINESS_POLICY_FILE` 策略模板按**非 FINDING** 来源铸行（如 VAL 的 `REQUIRED_BEFORE_RELEASE` 时序——本工作区已有 12 个 VAL 可立即成行）。
+- **公测前清单**（`DEC-…d5d39b50.21` 钉住）：①直连实弹探针跑一轮并标定超时——**已完成**（见下）；②无 Key 线上引导路径走查——**已完成**（`VAL-…b3.33` → `VR-…b3.35` = **PASS**，5/5 评分项；Playwright + Edge 无头移动仿真 390x844 直打线上，证据 `docs/evidence-2026-09-17/`）；③改 web/ 后手动 `node scripts/deploy-pages.mjs`（无 CI）；④本机 `.env` 建议手删（已无代码引用）——**已核实 `.env` 在 `.gitignore:8`、未被 git 跟踪**，且探针要用它，故保留。
+- **无 Key 走查结论（`VAL-…b3.33` PASS）**：首次访问者**不需要先撞墙**——ready 屏当场就给出完整引导段（为什么需要 Key / `platform.deepseek.com` 去哪拿 / `sk-` 形状 / 只存本机不上传 / 清浏览器数据会连 Key 一起删）；点「拍照」与「从相册选图」都被拦下并指向设置，且**状态保持 ready、未发起相机调用**（守卫先于能力）；设置屏含未配置声明 + 创建指引 + `sk-` 输入框 + 保存/清除/返回三键，可返回 ready。唯一控制台报错是 `favicon.ico` 404（装饰性）。**未覆盖**：桌面 Edge 的移动仿真**非真机**，触屏与软键盘未测。
+- **⚠️ HUMAN_RUBRIC 出不了机读 verdict（`DEC-…b3.36`）**：本运行时 `validation_submit` 对 `criterion.type = HUMAN_RUBRIC` 以 `VALIDATION_REQUIREMENT_INVALID`（「only METRIC_COMPARATOR criteria are evaluable at attestation depth」）诚实拒绝——`validation_define` 会接受、submit 不认。**以后要机读 verdict 的验收一律写成 `METRIC_COMPARATOR`**（把评分表转成 `rubric_items_passed == N`），评分项全文写进 proposition/measurements 保留语义。**未定性为缺陷**（无法区分「刻意信任边界」与「实现缺口」，只登记不报缺陷）。
+- **实弹标定已完成（`DEC-…b3.7`，2026-09-17，5 次真实计费调用全 200、零超时）**：识物腿 `latencyMs=1860.4ms`（返 mug 0.95 / cup 0.4）；造句反馈腿端到端 1718/1291/1681/1683 ms，usage 完整，`validateFeedback` 四条全过；另 1 次零计费空句 `status=pending reason=empty_sentence`（一次请求都没发）。**结论：三条常量原样保留**（`RECOGNIZE_REQUEST_TIMEOUT_MS=12000` / `FEEDBACK_REQUEST_TIMEOUT_MS=24000` / `PLAY_WORD_TIMEOUT_MS=15000`，余量 6.5x/14x/8.9x），不收紧（本机有线≠弱网，假超时比多等更坏）也不抬高（无弱网证据）。**真实瓶颈已定位不在网络而在模型侧 reasoning token 生成**（completion 144-239，其中 reasoning 100-177）。上传腿有界：相机/相册同口径先缩后编（长边 512 / JPEG 0.8），base64 后约 40-80KB，对 32MiB 上限有 3 个数量级余量。**如实登记两处未验**：`uncertain` 一档本轮 4 条语料 **0 次命中**（探针如实报不一致）；`--degenerate` 三条退化语料**未跑**（3 次计费调用，未授权）。
+- **线上与仓库存在「注释级」落后（`VAL-…b3.13` FAIL + `DEC-…b3.19`）**：LF 归一口径下逐一比对线上 19 个文件，16 一致、3 不一致，**全部只在注释文本**（`units/recognize.mjs`/`deepseek.mjs`/`compose.mjs` 线上仍在注释里点名已退役的 `server/*-upstream.mjs`，HEAD 已改为「旧服务端代理（已退役）」）——**可执行代码逐字节一致，功能性漂移 = 0**，线上落后 HEAD 恰 1 个提交（`e476063`）。已决策 `REDEPLOY_TO_SYNC` 但**按用户指令未自动部署**：待点头后跑 `node scripts/deploy-pages.mjs`，然后**必须在同一 LF 归一尺子下重跑 `VAL-…b3.13`**（不接受「应该好了」）。
+- **文档摘要核验必须先归一（`DEC-…b3.24`）**：`DEC-…d5.5` 登记的三份文档摘要**按「工作树 LF 归一后的字节」计算**，**不是**盘上原始字节、也不是 git blob。核验证明：LF 归一口径下三个摘要**逐位相等（零漂移）**；用原始字节算则 CRLF 的两份会假报 DRIFT（spec 是 LF 文件故两种口径同值）。**以后复验一律先 `-replace "`r`n","`n"` 再 sha256**，否则会重踩本轮踩过的假漂移。
 - Task 1–10 + Task 9B：代码资产仍在（551/551 绿，`6758e44`）；分支 `feat/first-value-slice`，master 停在计划提交
 - **Task 11 契约级验收 = 挂起**（`docs/真机验证清单.md` 57 步清单与两份实验方案保留在册，重构后若重启验证可复用）
 - **预验收冒烟轮已完成**（`docs/预验收冒烟报告-2026-09-15.md`，决策 `DEC-OPI-5c134c67-9bdd-46d2-b9bc-7d51bfde8585.10`）：电脑侧步骤（1/2A/27/28）+ 导出链路干跑（54–57 命令格式）全部通过。**本机模拟器不可行**（固件 VT-x 关闭，硬门槛；软件模式 5 组参数全部崩溃）；**真机路线 = USB 真机 + `adb reverse tcp:8787 tcp:8787`**（localhost 即安全上下文，getUserMedia 免证书），android 插件按 serial 驱动可半自动跑清单 4–53 步。JDK 17 + Android SDK 已装在 `D:\android-sdk`，换 VT-x 可用机器即可起模拟器。
@@ -40,11 +45,17 @@ node scripts/mutation-probe.mjs          # 变异探针（跑前先冻住工作�
 ## dmcp 段（跨会话续接第一入口）
 
 - **workspace_id**：`ws-db58afd2-145c-4e81-9a7b-b562d8679071`（**带 `ws-` 前缀**；对象 id 里的 `OPI-ecb3037d-…` 是 project id，拿它当 workspace 用会 `WORKSPACE_NOT_FOUND`）
+- **最新一轮（2026-09-17 会话，rev 43→51）**：
+  - `DEC-OPI-5a247eb9-6816-4e78-b80f-1c5eeff7ceb3.7` —— 实弹探针跑通 + 超时标定（**结论：三条常量原样保留**）
+  - `DEC-OPI-5a247eb9-6816-4e78-b80f-1c5eeff7ceb3.10` —— readiness **结构性不可达**根因 + 两条解封路径（**下会话若要碰 readiness 先读这条**）
+  - `VAL-OPI-5a247eb9-6816-4e78-b80f-1c5eeff7ceb3.13` —— 线上/仓库一致性断言，实跑 `VR-…b3.17` = **FAIL**（3 处注释级落后）；`DEC-…b3.19` 定 `REDEPLOY_TO_SYNC`
+  - `VAL-OPI-5a247eb9-6816-4e78-b80f-1c5eeff7ceb3.33` —— 无 Key 引导路径（`VR-…b3.35` = **PASS**，5/5）；`DEC-…b3.36` 登记 HUMAN_RUBRIC 出不了机读 verdict 这条能力边界
+  - `DEC-OPI-5a247eb9-6816-4e78-b80f-1c5eeff7ceb3.24` —— 文档摘要**零漂移**确认 + 归一约定（防假漂移）
+  - 本轮**未改任何仓库代码文件**（只改本文件 + 加截图证据）：`node --test` 494/494 复跑绿；三个源码漂移项全是注释
 - **契约载体**（GOAL / IN_SCOPE / OUT_OF_SCOPE / 约束 / CORE_JOURNEY）：`DEC-OPI-ecb3037d-1a56-46d3-b931-4d482dcc668f.19`
 - **文档绑定决策**（三份治理文档的 SHA-256 登记在其 ASSUMPTIONS 断言里；文档变更后 digest 不匹配即漂移证据）：`DEC-OPI-5c134c67-9bdd-46d2-b9bc-7d51bfde8585.5`
   - 覆盖：设计 spec（`docs/superpowers/specs/2026-09-14-…-design.md`）、实施计划（`docs/superpowers/plans/2026-09-14-….md`）、真机清单（`docs/真机验证清单.md`），登记于 2026-09-15
-- **最新实施期裁决**：`DEC-OPI-ecb3037d-1a56-46d3-b931-4d482dcc668f.87`（Task 10 四项）
-- **在册对象索引**（决策/任务/判据/验收对照表）：`.superpowers/sdd/progress.md` 的「在册对象索引」表
+  - ⚠️ **复验口径**：登记值 = **工作树 LF 归一后的字节**的 sha256（不是盘上原始字节、不是 git blob）。本机是 CRLF checkout，直接用原始字节算会给 CRLF 的两份**假报 DRIFT**（见 `DEC-…b3.24`）。2026-09-17 复核：三个摘要 LF 归一口径下**逐位相等 = 零漂移**。
 - **续接顺序**：本文件 → `design_status` 刷新基 → `design_get` 契约载体 → 台账对象索引 → `git log --oneline`
 - **宿主主体事实**：本地 stdio 运行时主体是 `HUMAN_USER`，能力族只有 `DESIGN_STATE_READ,DESIGN_STATE_MUTATE`——`finding_adjudicate` / `finding_disposition_apply` 会被诚实拒绝（需 ORGANIZATION_AUTHORITY）。
 - **canonical 落盘**：`D:\DMCP-workspaces\ws-db58afd2-145c-4e81-9a7b-b562d8679071\.design\`（`state.yaml` + `findings/*.yaml`；服务端无响应字段时可直接读盘核验）
