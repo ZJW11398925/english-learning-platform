@@ -28,6 +28,13 @@
 // `playWord` 返回 Promise：`onend`（正常播完）与 `onerror`（引擎报错）两条路都从
 // 这里出去；`speak()` 当场抛错、Utterance 构造器抛错、空词、环境缺 API——同样当场
 // 拒绝。绝不留下一个永远 pending 的 Promise（界面会永远停在"正在播放…"）。
+//
+// 但 onend/onerror **谁都不来**（引擎半死、voice 加载卡死、页面被系统限流）是第三种情形：
+// 12B 上线时它还是个遗留风险，Task 12C 给 `playWord` 装上**墙钟上限**（`PLAY_WORD_TIMEOUT_MS`，
+// 循 `recognize.mjs` 请求上限的同一课：挂住 ≠ 干净失败）。到点先 `synth.cancel()` 让引擎闭嘴
+// （abort），再拒绝收口——错误消息带上限毫秒数，界面能如实转述"等了多久、已中止"。
+// 迟到的 onend/onerror 被 settled 守卫拦下，不会二次收口。时钟是注入点
+// （`timers.setTimer` / `timers.clearTimer`，缺省 setTimeout/clearTimeout），Node 里可测。
 
 /**
  * 从语音列表里挑一个念英文的：优先 `preferredLang`（默认 `en-US`），退任何英文声。
@@ -56,6 +63,18 @@ export function pickVoice(voices, preferredLang = 'en-US') {
 }
 
 /**
+ * `playWord` 的墙钟上限（毫秒）——**首轮设定值**，不是定论：待真机数据标定。
+ *
+ * 为什么必须有它：真实引擎存在"onend 与 onerror 谁都不来"的半死状态（voice 加载卡死、
+ * 后台标签被限流、系统语音服务挂起），Promise 会永久 pending——界面卡在"正在播放…"，
+ * 自评按钮永远出不来。循 `recognize.mjs` 请求上限的同一课：到点先 `synth.cancel()`
+ * （abort），再拒绝收口，绝不把"挂住"留给用户。
+ * 一个词的示范音正常远小于 1s，取 15s 是给慢设备 / 慢音色下载的充裕余量（≥ recognize
+ * 这条腿的 12s：播一个词不该比问一次模型更容易超时）。
+ */
+export const PLAY_WORD_TIMEOUT_MS = 15000;
+
+/**
  * 这个环境能不能播示范音。
  *
  * @param {unknown} win 浏览器里传 `globalThis`（或注入的替身）；**两个零件都必须是函数**：
@@ -69,17 +88,22 @@ export function isTtsAvailable(win) {
 }
 
 /**
- * 播一个词的示范音。**这是播放这条腿唯一的收口点**：`onend`（播完）与 `onerror`
- * （引擎报错）都从这里出去，`speak()` 抛错同样当场拒绝——绝不留下挂住的 Promise。
+ * 播一个词的示范音。**这是播放这条腿唯一的收口点**：`onend`（播完）、`onerror`
+ * （引擎报错）与**墙钟到点**（谁都不来）三条路都从这里出去，`speak()` 抛错同样当场
+ * 拒绝——绝不留下挂住的 Promise（"正在播放…"绝不久挂）。
  *
  * @param {unknown} word 目标词（空 / 纯空白 / 非字符串当场拒绝，不碰引擎）
  * @param {object} deps 注入点
  *   - `win`：提供 `speechSynthesis` 与 `SpeechSynthesisUtterance` 的对象（生产由
  *     `mount()` 的 deps 缺省给 `globalThis`；测试注入假环境）
- * @returns {Promise<void>} 播完（`onend`）resolve；引擎报错（`onerror`）或任何当场失败
- *   reject（错误消息带引擎原样错误码，供界面如实转述）
+ *   - `timeoutMs`：墙钟上限（默认 `PLAY_WORD_TIMEOUT_MS`）；到点先 `synth.cancel()`
+ *     再拒绝。非正的有限数当场拒绝（编程错误，不碰引擎）
+ *   - `timers`：时钟注入点 `{ setTimer(fn, ms) → handle, clearTimer(handle) }`，
+ *     缺省 `setTimeout` / `clearTimeout`（测试用手动时钟，不真等）
+ * @returns {Promise<void>} 播完（`onend`）resolve；引擎报错（`onerror`）、墙钟到点
+ *   或任何当场失败 reject（错误消息带引擎原样错误码 / 上限毫秒数，供界面如实转述）
  */
-export function playWord(word, { win } = {}) {
+export function playWord(word, { win, timeoutMs = PLAY_WORD_TIMEOUT_MS, timers = null } = {}) {
   const synth = win?.speechSynthesis ?? null;
   const Ctor = win?.SpeechSynthesisUtterance ?? null;
   if (typeof synth?.speak !== 'function' || typeof Ctor !== 'function') {
@@ -89,6 +113,15 @@ export function playWord(word, { win } = {}) {
   if (text === '') {
     return Promise.reject(new Error(`playWord: 目标词不是可播的词（收到 ${String(word)}），不播空示范音`));
   }
+  // 墙钟上限的形状在这里判（参数写错是编程错误，不是用户情形）：不给"播出去才发现
+  // 钟是坏的"的机会。消息点名"上限"——它是"正在播放…"绝不久挂的保证。
+  if (typeof timeoutMs !== 'number' || !Number.isFinite(timeoutMs) || timeoutMs <= 0) {
+    return Promise.reject(new TypeError(
+      `playWord: timeoutMs 必须是正的有限数（收到 ${String(timeoutMs)}）——墙钟上限缺了或坏了都不播`,
+    ));
+  }
+  const doSetTimeout = timers?.setTimer ?? ((fn, ms) => setTimeout(fn, ms));
+  const doClearTimeout = timers?.clearTimer ?? ((h) => clearTimeout(h));
 
   return new Promise((resolve, reject) => {
     let utterance;
@@ -104,9 +137,17 @@ export function playWord(word, { win } = {}) {
       try { utterance.voice = voice; } catch { /* 某些替身上赋值失败就只靠 lang */ }
     }
     let settled = false;
+    let timer = null;
+    const stopTimer = () => {
+      if (timer !== null) {
+        doClearTimeout(timer);
+        timer = null;
+      }
+    };
     const finish = (fn, value) => {
       if (settled) return;
       settled = true;
+      stopTimer();
       fn(value);
     };
     utterance.onend = () => finish(resolve);
@@ -115,6 +156,15 @@ export function playWord(word, { win } = {}) {
       synth.speak(utterance);
     } catch (err) {
       finish(reject, err);
+      return;
     }
+    // 墙钟在 speak 成功后才装（speak 抛错走上面的当场拒绝，不需要钟）。
+    // 到点：先 cancel 让引擎闭嘴（abort），再收口——时序红线，tests/speak.test.mjs 钉住。
+    timer = doSetTimeout(() => {
+      try {
+        synth.cancel?.();
+      } catch { /* 引擎连 cancel 都不给时也要收口：收口不依赖引擎配合 */ }
+      finish(reject, new Error(`示范音播放超时（${timeoutMs}ms 未收到播放结束事件，已让引擎 cancel 并收口）`));
+    }, timeoutMs);
   });
 }
