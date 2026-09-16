@@ -51,8 +51,9 @@ import { feedbackEventFor } from './compose.mjs';
  * 自动重试的间隔（毫秒）——**首轮设定值**，不是定论。
  *
  * 出处：设计文档 §5.1「失败后自动重试 3 次（间隔 10s / 30s / 90s）」。
- * 与 `DARK_THRESHOLD` / `BLUR_THRESHOLD` / `FEEDBACK_REQUEST_TIMEOUT_MS` / `SPEECH_LISTEN_TIMEOUT_MS`
+ * 与 `DARK_THRESHOLD` / `BLUR_THRESHOLD` / `FEEDBACK_REQUEST_TIMEOUT_MS`
  * **同一条纪律**：第一周用真实数据标定，每次调整都要记入变更记录。
+ * （12B：`SPEECH_LISTEN_TIMEOUT_MS` 随 SpeechRecognition 判定路径一并退役，从这份清单里移除。）
  *
  * 为什么把三个数都留着（而不是只留"3 次 + 指数退避"）：间隔本身是设计写下来的产品行为
  * （10 → 30 → 90 的手感是"越等越久，但不至于让人等不下去"），不是实现细节。

@@ -41,7 +41,7 @@
 import { createMachine, STATES } from './units/state-machine.mjs';
 import { createRoundCounter } from './units/rounds.mjs';
 import { nextState, dueWords } from './units/scheduler.mjs';
-import { checkSpeech, isSpeechAvailable } from './units/speak.mjs';
+import { isTtsAvailable, playWord } from './units/speak.mjs';
 import { submitSentence as realSubmitSentence, feedbackEventFor } from './units/compose.mjs';
 // Task 12A（项目转向 DEC-…23/26）：模型调用改浏览器直连，Key 由访问者在「设置」里填。
 // keyring 是纯逻辑模块（存储注入），静态 import 在 Node 里安全；本层是 Key 的**读取方**，
@@ -85,19 +85,12 @@ const PENDING_HINT = {
 };
 
 /**
- * 单次转写的墙钟上限（毫秒）——**首轮设定值**，浏览器路径上可用 `speechTimeoutMs` 覆盖，
- * 第一周真机标定后若调整，须记入变更记录（与 `DARK_THRESHOLD` / `RECOGNIZE_REQUEST_TIMEOUT_MS`
- * 同一条纪律）。
- *
- * 为什么必须有它：`onend` 按规范是转写的收口点，但本项目已经三次被"挂住而不是失败"咬过
- * （`fetch` 无超时、上游半开、响应体停滞）。引擎若因为任何原因不回调，界面会永远停在
- * "正在听…"、按钮一直是禁用的——那时用户只剩「跳过跟读」一条路，而且没有任何数据能说明
- * 发生了什么。到点就主动收口（`abort()` 放掉麦克风）并按"没能听清"如实呈现。
+ * 跟读这一格在 12B（转向 DEC-…23/26）换成「听示范 → 自己念 → 自评」：
+ * SpeechRecognition 自动判定整条退役（真机实测该设备自动跟读判定不可用且网页侧无法修复，
+ * `DEC-…21`），`reading_done` / `reading_missed` / `speech_unsupported` 三个事件类型
+ * 保留在 schema 里（历史数据要在诊断页继续渲染），但新流程不再产生它们。
+ * 示范音与播放收口的实现在 `units/speak.mjs`。
  */
-export const SPEECH_LISTEN_TIMEOUT_MS = 15_000;
-
-/** 跟读屏上"开始说"的按钮文案（测试认它，改文案时那边要跟着改）。 */
-const SPEAK_BUTTON_LABEL = '点一下，念出这个词';
 
 /**
  * 场景未知时的两种占位值：`recognize` 给不出场景时的 `'未知'`，与手选档界面上写的 `'手动选择'`。
@@ -191,10 +184,10 @@ const FALLBACK_SCENE_WORDS = Object.freeze(['mug', 'cup', 'book', 'pen', 'bottle
  *   - `compose`：造句链路的注入点，形状 `{ submitSentence }`（缺省用 `units/compose.mjs` 的真实现）。
  *     注入它是为了让"界面与事件对不对"能脱离网络单独测（网络路径由 tests/compose.test.mjs 覆盖），
  *     与 `recognizeWithFallback` 的注入点是同一个理由。
- *   - `speechWin`：转写可用性（`isSpeechAvailable`）与引擎构造的来源，缺省 `globalThis`。
- *     测试注入 `{ SpeechRecognition: 假构造器 }` 即可驱动跟读判定那条路；
- *     **不注入**时 Node/不支持的浏览器会走降级路径（落 `speech_unsupported`）。
- *   - `speechTimeoutMs`：单次转写的墙钟上限，缺省 `SPEECH_LISTEN_TIMEOUT_MS`
+ *   - `ttsWin`：示范音可用性（`isTtsAvailable`）与播放（`playWord`）的来源，缺省 `globalThis`。
+ *     测试注入 `{ speechSynthesis, SpeechSynthesisUtterance }` 假环境即可驱动"听示范"；
+ *     **不注入**时 Node/不支持的浏览器走无示范音那一档（如实提示，只剩跳过）。
+ *     （12B 前这里是 `speechWin`——SpeechRecognition 判定路径随转向退役。）
  * @returns {Promise<{ machine: object, sessionId: string, store: object, grab: () => Promise<{blob: object, stats: object}> }>}
  *   `grab` 就是传给 `recognizeWithFallback({ grab })` 的取帧函数
  * @throws {TypeError} `root` 不是元素
@@ -218,8 +211,7 @@ export async function mount(root, deps = {}) {
     clock = Date.now,
     cameraOptions = {},
     onCompose = null,
-    speechWin = globalThis,
-    speechTimeoutMs = SPEECH_LISTEN_TIMEOUT_MS,
+    ttsWin = globalThis,
     setTimeoutImpl = null,
     clearTimeoutImpl = null,
     keyring: givenKeyring = null,
@@ -368,13 +360,13 @@ export async function mount(root, deps = {}) {
   let feedback = null;
   let opening = false;         // 正在开相机（挡住双击：否则会开出两路流，多出来的那路没人关）
   let lastShotBlob = null;     // 最近一次 `grab()` 拿到的帧（识别链走后，freeze 用的是它）
-  // 跟读这一格的现场：`null` = 还没说过；`{ busy: true }` = 正在听；
-  // `{ busy: false, said: false, transcript }` = 这次没听到（可以重试）；`{ busy: false, error }` = 引擎报错。
-  // **它只在同一格里活着**（重试是同一格里的选择，不新增状态机状态），离开 reading 就作废。
-  let speechAttempt = null;
-  // 跟读能不能做（转写可用性）。**判定来源是注入的那个对象**（`speechWin`，浏览器里默认
-  // `globalThis`），本层与 `units/speak.mjs` 都不自己去读浏览器全局——那样就没法在 Node 里测。
-  const speechOk = isSpeechAvailable(speechWin);
+  // 跟读这一格的现场只剩"示范音正在播"一个标志（12B：判定已退役，没有转写现场了）。
+  // **它只在同一格里活着**，离开 reading 就随重渲染作废（按钮重新可点）。
+  let demoBusy = false;
+  // 示范音能不能播（speechSynthesis 可用性）。**判定来源是注入的那个对象**（`ttsWin`，
+  // 浏览器里默认 `globalThis`），本层与 `units/speak.mjs` 都不自己去读浏览器全局
+  // ——那样就没法在 Node 里测。
+  const ttsOk = isTtsAvailable(ttsWin);
   // 刚发生的这次取词是不是一次"到期复现"（是则记下现场，用于在词卡上如实说明）。
   // `null` = 这一次不是复现（或还没取到词）。
   let recurrenceNote = null;
@@ -571,146 +563,38 @@ export async function mount(root, deps = {}) {
   }
 
   /**
-   * 听一次转写。**这是转写这条腿唯一的收口点**：`onend`（正常读完、出错、被 stop）、
-   * `onerror`（引擎报错）与上限到点三条路都从这里出去，绝不留下一个永远 pending 的 Promise。
-   * 上限到点会先 `abort()` 放掉麦克风再收口（挂住而不是失败，是本项目反复吃过的一种收口）。
-   */
-  function listenOnce() {
-    const Ctor = speechWin?.SpeechRecognition ?? speechWin?.webkitSpeechRecognition;
-    return new Promise((resolve, reject) => {
-      const rec = new Ctor();
-      rec.lang = 'en-US';
-      rec.maxAlternatives = 1;
-      rec.interimResults = false;
-      let transcript = '';
-      let settled = false;
-      let timer = null;
-      const finish = (fn, value) => {
-        if (settled) return;
-        settled = true;
-        if (timer !== null) clearTimeout(timer);
-        fn(value);
-      };
-      timer = setTimeout(() => {
-        try { rec.abort(); } catch { /* 引擎已经自己结束了：放不掉也无妨，收口不能因此被跳过 */ }
-        finish(reject, new Error(`语音识别超时（${speechTimeoutMs}ms 内没有结果，已收口）`));
-      }, speechTimeoutMs);
-      rec.onresult = (ev) => {
-        const said = ev?.results?.[0]?.[0]?.transcript;
-        if (typeof said === 'string') transcript = said;
-      };
-      rec.onerror = (ev) => finish(reject, new Error(`语音识别失败：${String(ev?.error ?? 'unknown')}`));
-      rec.onend = () => finish(resolve, transcript);
-      rec.start();
-    });
-  }
-
-  /**
-   * 跟读：说一遍 → `checkSpeech` 判"有没有说出目标词"。
+   * 「听示范」（Task 12B）：用浏览器本地的 speechSynthesis 把目标词念一遍。
    *
-   * `said === true` → 落 `reading_done` 并推进；否则**留在 reading 态**（重试是同一格里的选择，
-   * 不新增状态机状态），界面如实说"这次没听到 X"。引擎报错与超时同样如实说，绝不改判成"读对了"。
-   */
-  /**
-   * 引擎报错/超时的**每会话首条**落 `speech_unsupported`（DEC-OPI-…15）。
+   * 播放期间按钮置灰成「正在播放…」（`onPlayDemo` 开头的重渲染负责这一点）；
+   * 播放失败在错误区如实说明（**不假装播过**），按钮恢复可点。播放这一腿的收口
+   * （播完 resolve / 引擎报错 reject，绝不挂住）全在 `units/speak.mjs` 的 `playWord`。
    *
-   * 事件契约（`units/event-log.mjs` 头注释）本就预设"转写不可用 / 引擎报错 / 超时 →
-   * `speech_unsupported` 或什么都不落"，此前选了"不落"，于是"跟读判定为什么是 0"
-   * 在诊断页与导出里无从归因——真机实测（2026-09-15：引擎存在、启动即败、
-   * 界面闪一下恢复、事件流零记录）暴露的正是这一段。
-   *
-   * `reason` 与"浏览器无构造器"的 `no_speech_recognition` 分列：
-   * `engine_error:<引擎原样错误码>`（现场归因靠它区分没网/没权限/没服务）与 `timeout`。
-   * 只记首条：同会话重试失败不重复记，"多少会话语音不可用"的计数不许被重试灌水。
+   * 判定已经退役：播没播、念没念，都与任何事件无关——这一格的出口只有
+   * 自评打勾（`readDone`）与跳过（`skipReading`），两者**都不落判定事件**。
    */
-  let speechUnavailableNoted = false;
-  function noteSpeechUnavailable(message) {
-    if (speechUnavailableNoted) return;
-    speechUnavailableNoted = true;
-    const engineCode = /语音识别失败：(.+)$/.exec(message)?.[1];
-    record(store, 'speech_unsupported', {
-      sessionId,
-      roundIndex: lastRoundIndex,
-      wordId: null,
-      word: shownWord?.word ?? null,
-      scene: shownWord?.scene ?? null,
-      reason: engineCode != null ? `engine_error:${engineCode}` : 'timeout',
-    }, clock);
-  }
-
-  async function onSpeak() {
-    setError('');
-    speechAttempt = { busy: true, said: null, error: null, transcript: null };
+  async function onPlayDemo() {
+    if (demoBusy) return;                     // 播放中再点无效（按钮已是禁用态，这是脚本层的同款防线）
+    demoBusy = true;
     render(machine.state);
-    let transcript;
     try {
-      transcript = await listenOnce();
+      await playWord(shownWord?.word ?? '', { win: ttsWin });
     } catch (err) {
-      const message = String(err?.message ?? err);
-      speechAttempt = { busy: false, said: null, error: message, transcript: null };
-      noteSpeechUnavailable(message);
+      setError(`示范音没能播出来：${String(err?.message ?? err)}`);
+    } finally {
+      demoBusy = false;
       render(machine.state);
-      return;
     }
-    const verdict = checkSpeech(shownWord?.word ?? '', transcript);
-    if (verdict.said) {
-      speechAttempt = null;
-      record(store, 'reading_done', {
-        sessionId,
-        roundIndex: lastRoundIndex,
-        wordId: null,
-        word: shownWord?.word ?? null,
-        scene: shownWord?.scene ?? null,
-        transcript: verdict.transcript,
-      }, clock);
-      machine.send('readDone');
-      return;
-    }
-    // 判定**没通过**（Task 9B / `DEC-OPI-…73` 授权的契约变更）。落一条 `reading_missed`：
-    // "用户念了却被判没说"的失败率此前在事件流里完全看不见（`reading_done` 只在通过时落），
-    // 而它正是引擎听错、词表配错、口音问题唯一的共同出口。
-    //
-    // 三个边界（每一条都有用例钉住）：
-    //   · 与 `reading_done` **互斥**：上面那条分支已 return，一次判定只落一条；
-    //   · **跳过跟读不算 missed**（那是 `skipped_reading` 另一档，用户的选择，不是判定失败）：
-    //     这个函数只在用户真的点了「念出这个词」并拿到转写之后才会走到这里；
-    //   · **转写不可用不算 missed**：那种情况根本进不到本函数（`speechOk` 为假时走的是
-    //     手动打勾那条路，连引擎都不构造）——系统没判过，就不能记成"用户念错了"。
-    //   · 引擎报错 / 超时也**不算**：那两条在上面 `catch` 里 return 了，它们没产出任何判定。
-    // payload 带**目标词**与**原样转写**：转写是"用户到底说了什么"的唯一证据，
-    // 复核"引擎是不是听错了"只能靠它。
-    record(store, 'reading_missed', {
-      sessionId,
-      roundIndex: lastRoundIndex,
-      wordId: null,
-      word: shownWord?.word ?? null,
-      scene: shownWord?.scene ?? null,
-      transcript: verdict.transcript,
-      reason: 'word_not_found_in_transcript',
-    }, clock);
-    speechAttempt = { busy: false, said: false, error: null, transcript: verdict.transcript };
-    render(machine.state);
   }
 
   /**
-   * 「我会读了（开始跟读）」：进跟读那一格，并在**转写不可用**时如实落一条 `speech_unsupported`。
+   * 「我会读了（开始跟读）」：进跟读那一格（12B 起这一格是「听示范 → 自己念 → 自评」）。
    *
-   * 记在"进入这一格"这个时机（`onEnter` 只对每个状态各调一次），不是记在渲染里——
-   * 渲染会被调用很多次，挂在那里会让一条会话刷出好几条降级标签，"多少人的浏览器不支持"
-   * 这个数直接失真。降级路径**不落 `reading_done`**：手动打勾只表示"我读了"，
-   * 不是"系统听到我说出了目标词"，混记会让跟读判定的通过率变成假的。
+   * 旧版在这里落 `speech_unsupported`（转写不可用的降级标签）——那条判定路径已随
+   * SpeechRecognition 退役，本函数只剩状态推进。两个出口的语义与旧降级路径完全一致：
+   * 自评打勾只表示"我读了"，不是"系统听到我说出了目标词"，**不落 `reading_done`**。
    */
   function onWordReady() {
     if (!machine.send('wordReady')) return;   // 按钮只长在 word 那一屏；返回 false 时什么都不做
-    if (speechOk) return;
-    record(store, 'speech_unsupported', {
-      sessionId,
-      roundIndex: lastRoundIndex,
-      wordId: null,
-      word: shownWord?.word ?? null,
-      scene: shownWord?.scene ?? null,
-      reason: 'no_speech_recognition',
-    }, clock);
   }
 
   function onManualPick(word) {
@@ -929,34 +813,21 @@ export async function mount(root, deps = {}) {
       }
       case 'reading': {
         view.push(title('跟读一遍'));
-        if (speechOk) {
-          // 转写可用：判定那条路（设计文档 §4.3）。
-          view.push(hint(`念出这个词：${shownWord?.word ?? ''}。点下面的按钮开始，说完会自动停；`
-            + '只判有没有说出这个词，不打音准分。'));
-          if (speechAttempt?.said === false) {
-            view.push(hint(`这次没听到 ${shownWord?.word ?? '这个词'}。再说一遍，或者跳过跟读。`));
-          }
-          if (speechAttempt?.error != null) {
-            // 引擎报错与上限到点都走这里：如实说"这次没能听清"，并把引擎给的话摊出来（诊断要用）。
-            // 不用 hint()：muted 灰字在真机上等于看不见（2026-09-15 实机缺陷的直接成因，
-            // DEC-OPI-…15），失败提示必须是全色文本。
-            const failLine = doc.createElement('p');
-            failLine.textContent = `这次没能听清（${speechAttempt.error}）。可以再试一次，或者跳过跟读。`;
-            view.push(failLine);
-          }
-          action(
-            speechAttempt?.busy === true ? '正在听…' : SPEAK_BUTTON_LABEL,
-            onSpeak,
-            speechAttempt?.busy === true,
-          );
+        if (ttsOk) {
+          // 12B（转向 DEC-…26）：示范音替代自动判定。界面把三步说清楚：听示范 → 自己念 → 自评。
+          // 两个出口的语义与旧降级路径完全一致——**都不落判定事件**：手动打勾只是"我读了"，
+          // 不是"系统听到我说出了目标词"（既有裁决原样沿用），跳过是用户的选择。
+          view.push(hint(`先点「听示范」听 ${shownWord?.word ?? '这个词'} 怎么读；然后自己出声念一遍，念完自己打勾。`));
+          view.push(hint('系统不判断你念得准不准（自动判定已退役）；念没念由你自己确认。'));
+          action(demoBusy ? '正在播放…' : '听示范', onPlayDemo, demoBusy);
+          action('我读过了（自评打勾）', () => machine.send('readDone'));
           action('跳过跟读', () => machine.send('skipReading'));
           break;
         }
-        // 转写不可用：**降级路径不许伪装成"读对了"**——只给手动打勾与跳过，
-        // 并明说系统判断不了（真机走查要能一眼看到这句与那个标签）。
-        view.push(hint(`这个浏览器不支持语音识别（会记 speech_unsupported），没法自动判断你有没有念出 `
-          + `${shownWord?.word ?? '这个词'}。请自己出声念一遍，然后手动打勾；也可以跳过跟读。`));
-        action('我读过了', () => machine.send('readDone'));
+        // 浏览器没有 speechSynthesis：如实说播不了示范音，这一格只剩跳过（12B 转向裁决）。
+        // 不假装存在"听示范"，也不给一个按下去必然失败的按钮。
+        view.push(hint(`这个浏览器没有语音合成（speechSynthesis），播不了示范音。`
+          + `请对照 ${shownWord?.word ?? '这个词'} 自己出声念一遍；这一步只能先跳过。`));
         action('跳过跟读', () => machine.send('skipReading'));
         break;
       }

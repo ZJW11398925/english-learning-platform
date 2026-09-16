@@ -25,7 +25,7 @@ import { createKeyring, API_KEY_STORAGE_KEY } from '../web/units/keyring.mjs';
 import { fakeLocalStorage } from './helpers/fakes.mjs';
 import {
   harness, openCameraAndShoot, withFetch, makeBlob, OK_STATS, okFetch, realRecognizeWithFallback,
-  settleFeedback,
+  settleFeedback, fakeTts,
   disposeAllHarnesses,
 } from './helpers/mount-harness.mjs';
 
@@ -306,11 +306,13 @@ test('走完一整轮：rewrite 回环、跳过跟读、各态停留时长都进
 test('完成页：零改写的会话不许说发生过改写（提交 1 次 ≠ 改写 1 次）', async () => {
   // `rewriteCount` 的口径是**提交次数**：第一次提交后它就已经是 1，而这位学习者一次都没回改。
   // 直接把它渲染成"改写 1 次"是在界面上说一句假话，并会误导后续关于"改写行为"的统计。
-  const h = await withFetch({ fetchImpl: okFetch, recognize: realRecognizeWithFallback });
+  const h = await withFetch({
+    fetchImpl: okFetch, recognize: realRecognizeWithFallback, ttsWin: fakeTts().win,
+  });
   await btn(h.root, '拍照').click();
   await btn(h.root, '快门').click();
   await btn(h.root, '我会读了（开始跟读）').click();
-  await btn(h.root, '我读过了').click();      // 转写不可用那条路的手动打勾（reading → composing）
+  await btn(h.root, '我读过了').click();      // 自评打勾那条路（reading → composing，不落判定事件）
   byTag(h.root, 'textarea')[0].value = 'This is my mug.';
   await btn(h.root, '提交造句').click();
   await settleFeedback(h);
@@ -331,6 +333,7 @@ test('完成页：被退回一次、没跳过跟读的会话 → 指标各自如
   const h = await withFetch({
     fetchImpl: okFetch,
     recognize: realRecognizeWithFallback,
+    ttsWin: fakeTts().win,
     grabResult: () => (shot++ === 0
       ? { blob: makeBlob(9), stats: { brightness: 10, laplacianVar: 10 } }
       : { blob: makeBlob(9), stats: OK_STATS }),
@@ -339,7 +342,7 @@ test('完成页：被退回一次、没跳过跟读的会话 → 指标各自如
   await btn(h.root, '拍照').click();
   await btn(h.root, '快门').click();           // 第 2 帧通过
   await btn(h.root, '我会读了（开始跟读）').click();
-  await btn(h.root, '我读过了').click();       // 不是跳过跟读（转写不可用 → 手动打勾）
+  await btn(h.root, '我读过了').click();       // 不是跳过跟读（示范音可用 → 自评打勾）
   byTag(h.root, 'textarea')[0].value = 'I put the mug on the desk.';
   await btn(h.root, '提交造句').click();
   await settleFeedback(h);

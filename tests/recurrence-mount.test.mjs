@@ -16,7 +16,7 @@ import assert from 'node:assert/strict';
 
 import {
   harness, openCameraAndShoot, reachComposing, submitCompose, settleFeedback,
-  manualRecognize, okRecognize,
+  manualRecognize, okRecognize, fakeTts,
   disposeAllHarnesses,
 } from './helpers/mount-harness.mjs';
 
@@ -353,7 +353,7 @@ test('回环第二次提交：submitCount=2 / revisions=1，dwellMs 是**这一�
   // 而"这一句到底花了多久"这个数就永远拿不到了——§3.2 要的正是后者。
   let t = T0;
   const compose = fakeCompose(okResult());
-  const h = await reachComposing({ compose, clock: () => t }, { skipReading: false });
+  const h = await reachComposing({ compose, clock: () => t, ttsWin: fakeTts().win }, { skipReading: false });
   t += 4_000;
   await submitCompose(h, 'I use a cup.');
   await settleFeedback(h);
@@ -417,7 +417,7 @@ test('跟读被跳过这件事随 compose_submitted 一起落盘（不另开事�
   assert.equal(skipped.events.find((e) => e.type === 'compose_submitted').payload.skippedReading, true);
 
   const compose2 = fakeCompose(okResult());
-  const read = await reachComposing({ compose: compose2, clock: () => T0 }, { skipReading: false });
+  const read = await reachComposing({ compose: compose2, clock: () => T0, ttsWin: fakeTts().win }, { skipReading: false });
   await submitCompose(read, 'I use a cup.');
   await settleFeedback(read);
   assert.equal(read.events.find((e) => e.type === 'compose_submitted').payload.skippedReading, false);

@@ -124,42 +124,61 @@ export const failingFetch = (status = 502) => async (url) => {
 export { realRecognizeWithFallback };
 
 /**
- * 造一个假的 `SpeechRecognition` 构造器（Task 9 的跟读接线要用）。
+ * 造一个假的 TTS 环境（Task 12B 的跟读接线要用）：`{ win, spoken, utterances }`。
  *
- * 形状照浏览器给的那一个：`start()` 之后由引擎回调 `onresult`（转写）与 `onend`（收口），
- * 出错时回调 `onerror`。测试用 `say()` / `fail()` 驱动它——**不在夹具里替应用做判定**，
- * 夹具只负责"把引擎会发生的事按顺序发生一遍"。
+ * 形状照浏览器给的那一套：`win.speechSynthesis.getVoices()` 回语音列表（默认没有英文声），
+ * `speak(u)` 收下 utterance 并记录；`win.SpeechSynthesisUtterance` 是可 `new` 的构造器。
+ * 测试从返回的 `utterances` 里取实例、调 `onend()` / `onerror()` 驱动收口——
+ * **不在夹具里替应用做任何事**，夹具只负责"把合成引擎会发生的事按顺序发生一遍"。
+ * （旧版这一格是 `fakeRecognition`——SpeechRecognition 判定路径随 12B 退役，一并删除。）
  *
- * @returns {{ FakeRecognition: Function, calls: object, instances: object[] }}
+ * @returns {{ win: object, spoken: object[], utterances: object[] }}
  */
-export function fakeRecognition() {
-  const calls = { constructed: 0, started: 0, stopped: 0, aborted: 0 };
-  const instances = [];
-  class FakeRecognition {
-    constructor() {
-      calls.constructed += 1;
-      instances.push(this);
-    }
-
-    start() { calls.started += 1; }
-
-    stop() { calls.stopped += 1; }
-
-    abort() { calls.aborted += 1; }
-
-    /** 引擎识别完成：先给结果，再收口（顺序与真实引擎一致）。 */
-    say(transcript) {
-      this.onresult?.({ results: [[{ transcript }]] });
-      this.onend?.({});
-    }
-
-    /** 引擎报错（no-speech / not-allowed / network…），随后同样收口。 */
-    fail(error = 'no-speech') {
-      this.onerror?.({ error });
-      this.onend?.({});
+export function fakeTts({ voices = [] } = {}) {
+  const spoken = [];
+  const utterances = [];
+  class FakeUtterance {
+    constructor(text) {
+      this.text = text;
+      this.lang = '';
+      utterances.push(this);
     }
   }
-  return { FakeRecognition, calls, instances };
+  const win = {
+    speechSynthesis: {
+      getVoices: () => voices,
+      speak(u) { spoken.push(u); },
+    },
+    SpeechSynthesisUtterance: FakeUtterance,
+  };
+  return { win, spoken, utterances };
+}
+
+/**
+ * 造一个假的相册导入单元（Task 12B）：`{ module, calls }`。
+ *
+ * `module` 与真 `units/album.mjs` 同形状（`IMAGE_NOT_READABLE` 常量 + `frameFromImageFile`），
+ * 默认产出一帧"质检能过"的 `{ blob, stats }`；`over.stats` / `over.error` 可注入
+ * 太暗帧与解码失败。装配层测试用它把真解码挡在门外（真解码的契约由 tests/album.test.mjs 钉）。
+ *
+ * @returns {{ module: object, calls: object[] }}
+ */
+export function fakeAlbum(over = {}) {
+  const calls = [];
+  const module = {
+    IMAGE_NOT_READABLE: 'IMAGE_NOT_READABLE',
+    async frameFromImageFile(file, canvas, opts) {
+      calls.push({ file, canvas, opts });
+      const err = typeof over.error === 'function' ? over.error() : over.error;
+      if (err) throw err;
+      const blob = new Blob([new Uint8Array(9)], { type: 'image/jpeg' });
+      return {
+        blob,
+        stats: over.stats ?? { brightness: 128, laplacianVar: 200 },
+      };
+    },
+  };
+  return { module, calls };
 }
 
 /**
@@ -189,10 +208,11 @@ export function defaultKeyring() {
  *   - `compose`：造句链路的注入点（`{ submitSentence }`，形状同 `units/compose.mjs`）。
  *     缺省不注入 = 走真模块；`tests/compose-mount.test.mjs` 用它把网络那一层换掉，
  *     于是"界面与事件对不对"能单独测。
- *   - `speechWin`：转写可用性的来源（`mount` 的注入点）。缺省不注入 = `mount` 取 `globalThis`，
- *     而 Node 里没有 `SpeechRecognition`，于是跟读走**降级路径**（`speech_unsupported`）。
- *     要测判定那条路就传 `{ SpeechRecognition: fakeRecognition().FakeRecognition }`。
- *   - `speechTimeoutMs`：单次转写的墙钟上限（默认是生产常量；测试用小值驱动"引擎不回调"那条路）
+ *   - `ttsWin`：示范音可用性的来源（`mount` 的注入点，12B）。缺省不注入 = `mount` 取
+ *     `globalThis`，而 Node 里没有 `speechSynthesis`，于是跟读走**无示范音**那一档
+ *     （如实提示，只剩跳过）。要测「听示范」那条路就传 `fakeTts().win`。
+ *   - `album`：相册导入单元的注入点（12B）。缺省不注入 = `mount` 懒加载真模块；
+ *     装配层测试注入 `fakeAlbum()`（本文件下方）即可不碰真解码。
  *   - `words`：预置的词记录（模拟"上一次会话学完、现在到期了"）
  *   - `priorEvents`：预置的历史事件（模拟"上一次会话留下的记录"）。它同时是
  *     `store.readEvents()` 的返回值——待补反馈队列**从事件流派生**，所以"重开页面后
@@ -216,8 +236,8 @@ export async function harness({
   keyring = null,
   sceneWords = null,
   compose = null,
-  speechWin = null,
-  speechTimeoutMs = undefined,
+  ttsWin = null,
+  album = null,
   words = null,
   priorEvents = [],
   failAppendAfter = null,
@@ -327,8 +347,8 @@ export async function harness({
     recognizeWithFallback,
     ...(compose === null ? {} : { compose }),
     ...(sceneWords === null ? {} : { manualSceneWords: sceneWords }),
-    ...(speechWin === null ? {} : { speechWin }),
-    ...(speechTimeoutMs === undefined ? {} : { speechTimeoutMs }),
+    ...(ttsWin === null ? {} : { ttsWin }),
+    ...(album === null ? {} : { album }),
     ...(setTimeoutImpl === null ? {} : { setTimeoutImpl }),
     ...(clearTimeoutImpl === null ? {} : { clearTimeoutImpl }),
   });
@@ -362,14 +382,15 @@ export async function reachReading(over = {}) {
 /**
  * 走到 `composing` 态（跟读那一格之后）。
  *
- * `skipReading: false` 时改点「我读过了」——那个按钮只在**转写不可用**的降级屏上出现，
- * 所以它要求不注入 `speechWin`（Node 里没有转写引擎，正是那条降级路径）。
+ * `skipReading: false` 时改点「我读过了（自评打勾）」——那个按钮只在**示范音可用**
+ * 的跟读屏上出现（12B），所以它要求 `over.ttsWin` 里有一个可用的 TTS 环境
+ * （`fakeTts().win`）；不注入时 Node 里没有 speechSynthesis，跟读屏只剩「跳过跟读」。
  */
 export async function reachComposing(over = {}, { skipReading = true } = {}) {
   const h = await reachReading(over);
   const label = skipReading ? '跳过跟读' : '我读过了';
   const button = btn(h.root, label);
-  assert.ok(button, `跟读屏上必须有「${label}」`);
+  assert.ok(button, `跟读屏上必须有「${label}」（选 false 时 over 里要带可用的 ttsWin）`);
   await button.click();
   assert.equal(h.machine.state, 'composing', '夹具必须停在造句这一格');
   return h;

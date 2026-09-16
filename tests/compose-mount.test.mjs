@@ -15,6 +15,7 @@ import assert from 'node:assert/strict';
 
 import {
   reachComposing as reachComposingShared,
+  fakeTts,
   disposeAllHarnesses,
 } from './helpers/mount-harness.mjs';
 
@@ -28,15 +29,15 @@ import { FEEDBACK_FAIL_REASONS, feedbackEventFor } from '../web/units/compose.mj
 const FLAWED = { verdict: 'flawed', error_type: 'word_choice', rewrite: 'I use a mug.', note: '词选得更准' };
 
 /**
- * 走完整条闭环，停在 composing：拍照 → 快门 → 我会读了 → **我读过了**。
+ * 走完整条闭环，停在 composing：拍照 → 快门 → 我会读了 → **我读过了（自评打勾）**。
  *
- * Task 9 起跟读那一格有两副样子（转写可用 → 判定；不可用 → 手动打勾），
- * 而这里注入的世界里没有转写引擎，所以走的是**手动打勾**那条路（`skipReading: false`，
+ * 12B 起跟读那一格的两副样子是（示范音可用 → 听示范/自评/跳过；不可用 → 只剩跳过），
+ * 而这里注入一个可用的 TTS 环境走**自评打勾**那条路（`skipReading: false`，
  * 为的是让 `skippedReading` 保持 false——本文件的用例不测跳过跟读）。
  * 路径本身与夹具同源（`tests/helpers/mount-harness.mjs`），免得两份夹具各自漂移。
  */
 async function reachComposing(over = {}) {
-  return reachComposingShared(over, { skipReading: false });
+  return reachComposingShared({ ttsWin: fakeTts().win, ...over }, { skipReading: false });
 }
 
 /** 在 composing 里写下 `sentence` 并提交（返回 click 的 Promise）。 */
