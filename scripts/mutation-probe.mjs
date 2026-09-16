@@ -1588,19 +1588,20 @@ const MUTANTS = [
   // ── Task 10 收口：`recognize` 带出服务端自报的耗时（判据 A 的 p95 的唯一数据来源）──
   // 这两条与 X12–X14 同属 Task 10，但目标模块是 `recognize.mjs`，沿用该模块既有的
   // R 系列编号（R1–R15 已用），故为 R16/R17。
-  {
-    name: 'R16_latencyZeroFallback', target: REC, expect: 'detected',
-    why: '服务端没回 `latency_ms` 时兜底成 **0** 而不是 `null`：0 是"合法且极好"的读数，'
-      + '用它代替"不知道"会让 p95 看起来完美——判据 A 的 p95 不能建立在编造的数据上',
-    find: 'const serverLatencyOr = (data) => (Number.isFinite(data?.latency_ms) ? data.latency_ms : null);',
-    replace: 'const serverLatencyOr = (data) => (Number.isFinite(data?.latency_ms) ? data.latency_ms : 0);',
-  },
+  //
+  // ⚠️ 这一批里**不再有 R16_latencyZeroFallback**（Task 12A 退役，先例见 P3 / Q14）：
+  // 它原来的目标是 `serverLatencyOr`（服务端自报 latency_ms 的兜底），直连改造把那一行
+  // 整个重写后 find 逐字失配。它的**变异意图**（"拿不到耗时就如实 null，绝不兜底 0"）
+  // 在直连实现里由 `latencyMs: Number.isFinite(elapsed) ? elapsed : null` 这一行承重，
+  // 对应的变异体是本表末尾的 **D9_latencyZeroFallback**——同一行、同一个坏法，留着两条
+  // 只会得到同一个证据的两份拷贝。R16 于此退役，证据责任移交 D9。
   {
     name: 'R17_latencyAcceptsNonFinite', target: REC, expect: 'detected',
-    why: '耗时不做有限性校验（原样带出 `data.latency_ms`）：服务端回一个字符串/`null`/`NaN` '
-      + '会被下游当成耗时读数，p95 算出 `NaN` 或参与字符串比较，而**看起来仍是"算过了"**',
-    find: '  return { candidates: data.candidates, latencyMs: serverLatencyOr(data) };',
-    replace: '  return { candidates: data.candidates, latencyMs: data.latency_ms ?? null };',
+    why: '耗时读数不做有限性校验（`?? null` 只兜 undefined/null）：时钟异常给出的 NaN 会原样'
+      + '变成耗时读数，p95 算出 `NaN` 或参与字符串比较，而**看起来仍是"算过了"**'
+      + '（12A 同步：直连后耗时是 now() 实测差，find/replace 随实现更新，变异意图不变）',
+    find: '    latencyMs: Number.isFinite(elapsed) ? elapsed : null,',
+    replace: '    latencyMs: elapsed ?? null,',
   },
 
   // ── Task 12A：浏览器直连 + Key 管理（D1–D14）────────────────────────────────
