@@ -9,7 +9,9 @@
  * + Task 9B 的 13 个（待补反馈队列 Q1–Q8、storage_full Q9–Q11、reading_missed Q12–Q13）
  * + Task 10 的 17 个（导出统计口径 X1–X14 + 耗时落盘的 R16–R17；
  *   X12 的目标是 `web/app.mjs`，R16–R17 的目标是 `web/units/recognize.mjs`）
- * 固化成仓库内可复跑的证据——逐个"把实现改坏"，跑 `tests/` 下被登记的那 15 个测试文件，报告每个
+ * + Task 12A 的 14 个（浏览器直连 + Key 管理：keyring D1–D3、deepseek D4–D5、
+ *   识物直连 D6–D10 与 D14、造句直连 D11–D13）
+ * 固化成仓库内可复跑的证据——逐个"把实现改坏"，跑 `tests/` 下被登记的那 17 个测试文件，报告每个
  * 变异体是被测试抓到（DETECTED）还是溜过去了（MISSED），只要有该抓没抓到的就以非零码退出。
  *
  * 用法（在仓库根）：
@@ -135,6 +137,12 @@ const MODULE_FILES = {
   // 正好指向临时树里的 `rounds`（同在上述 MODULE_FILES 里），故临时树 import 得到。
   // 它承载的是"判据 B 与各口径的数到底怎么算"——数算错了没有任何东西会报错，只会得出错的结论。
   export: 'scripts/export.mjs',
+  // Task 12A 接入：访问者自带 Key 的存取（存/取/清 + 轻校验）。零 import 的纯逻辑模块，
+  // 存储注入（生产代码不自己摸全局），承的是"Key 怎么存、形状不对算不算配置过"的契约。
+  keyring: 'web/units/keyring.mjs',
+  // Task 12A 接入：浏览器直连 DeepSeek 的共享契约（地址/模型/信封解析）。零 import 纯逻辑，
+  // 识物与造句两条链路共用——改坏它两条链路一起歪，所以单独钉。
+  deepseek: 'web/units/deepseek.mjs',
 };
 const TEST_FILES = [
   'tests/scheduler.test.mjs',
@@ -174,6 +182,11 @@ const TEST_FILES = [
   // 它进得来：只 import `scripts/export.mjs` 与 `node:fs/os/path/child_process/url`，
   // 不起服务、不 import `server/index.mjs`（那条纪律见下面的长注释）。
   'tests/export.test.mjs',
+  // Task 12A 接入：Key 存取的单元契约（D1–D3 靠它抓）与直连共享契约（D4–D5）。
+  // 两份都只 import 纯逻辑模块（keyring / deepseek / recognize + server 原版做 parity），
+  // 不起服务、不写死绝对路径，进得了临时树。
+  'tests/keyring.test.mjs',
+  'tests/deepseek.test.mjs',
 ];
 // `tests/index-html.test.mjs` **有意不进这张表**：它读 `web/index.html` 这个真实文件，
 // 而临时树只复制模块与测试，进来会因缺文件而假红。它由 `node --test` 全量套件守着。
@@ -242,6 +255,9 @@ const PENDING = MODULE_FILES.pending;
 const STORE = MODULE_FILES.store;
 // Task 10 的新目标（唯一一个在 scripts/ 下的）
 const EXPORT = MODULE_FILES.export;
+// Task 12A 的新目标（直连 + Key 管理）
+const KEYRING = MODULE_FILES.keyring;
+const DEEPSEEK = MODULE_FILES.deepseek;
 
 const PICK_ORIGINAL = `export function pickWord({ candidates, acceptableSets, exclude = [] }) {
   const accepted = new Set();
@@ -1583,6 +1599,110 @@ const MUTANTS = [
       + '会被下游当成耗时读数，p95 算出 `NaN` 或参与字符串比较，而**看起来仍是"算过了"**',
     find: '  return { candidates: data.candidates, latencyMs: serverLatencyOr(data) };',
     replace: '  return { candidates: data.candidates, latencyMs: data.latency_ms ?? null };',
+  },
+
+  // ── Task 12A：浏览器直连 + Key 管理（D1–D14）────────────────────────────────
+  // 项目转向（DEC-…23/26）后服务端代理退役，识物/造句改浏览器直连，Key 由访问者自带。
+  // 这一批钉的是新形态的承重墙：Key 的存取与轻校验、直连地址与信封解析、
+  // Bearer 头、移植自 server 的候选校验/截断、401/429 的独立分档、
+  // "没 Key 不烧 attempts/不发请求"、直连请求体里的原句与耗时口径。
+  {
+    name: 'D1_saveSkipsPrefixCheck', target: KEYRING, expect: 'detected',
+    why: 'saveKey 不再要求 sk- 前缀（只查非空）：粘贴不全的 Key 被照单全收，'
+      + '用户要等到模型服务 401 才知道 Key 没复制完整——轻校验这一档整个失效',
+    find: "      if (!key.startsWith('sk-')) {",
+    replace: '      if (false) {',
+  },
+  {
+    name: 'D2_loadSkipsShapeCheck', target: KEYRING, expect: 'detected',
+    why: 'loadKey 不再做形状校验（是字符串就算配置过）：存储里一个历史垃圾值会被当成'
+      + '可用的 Key 发出去，"配置过了吗"从此有两种答案',
+    find: '      return isValidKeyShape(raw) ? raw.trim() : null;',
+    replace: "      return typeof raw === 'string' && raw.trim() !== '' ? raw.trim() : null;",
+  },
+  {
+    name: 'D3_clearNoop', target: KEYRING, expect: 'detected',
+    why: 'clearKey 不删存储：「清除」按钮看起来成功了、Key 还在本机——用户以为换掉了 Key，'
+      + '请求却还带着旧的（静默失败 = 全局约束 3 的反面）',
+    find: '        s.removeItem(API_KEY_STORAGE_KEY);\n        return true;',
+    replace: '        return true;',
+  },
+  {
+    name: 'D4_chatUrlKeepsTrailingSlash', target: DEEPSEEK, expect: 'detected',
+    why: '拼 URL 不剥 base 尾部斜杠：注入带 / 的 base 时请求打到 `//chat/completions`，'
+      + '有些网关当两个路径处理——两条链路（识物/造句）一起打到错误的地址',
+    find: "  return `${String(apiBase).replace(/\\/+$/, '')}/chat/completions`;",
+    replace: '  return `${String(apiBase)}/chat/completions`;',
+  },
+  {
+    name: 'D5_extractContentAcceptsBlank', target: DEEPSEEK, expect: 'detected',
+    why: '信封解析放行空白 content：模型回一个空白串会被当成"有内容"继续 JSON.parse，'
+      + '把信封不合法（该 response_invalid）悄悄变成另一档，移植口径就此漂移',
+    find: "  return typeof content === 'string' && content.trim() !== '' ? content : null;",
+    replace: "  return typeof content === 'string' ? content : null;",
+  },
+  {
+    name: 'D6_noBearerHeader', target: REC, expect: 'detected',
+    why: '直连识物请求不带 Bearer Key：必然 401，而表现是"识物失败"，'
+      + '排查的人会去怀疑网络与模型，想不到是凭据丢了（与 server 时代 U5 同一课）',
+    find: '        authorization: `Bearer ${apiKey}`,',
+    replace: "        authorization: 'Bearer ',",
+  },
+  {
+    name: 'D7_noCandidateTruncation', target: REC, expect: 'detected',
+    why: '候选不再截到 3 条（设计 §4.1「三候选 + 人工重拍」，移植口径）：上游多吐几条就'
+      + '全部进界面与事件流，多出来的静默改变手选词包与统计口径',
+    find: '    candidates: normalized.slice(0, MAX_CANDIDATES),',
+    replace: '    candidates: normalized,',
+  },
+  {
+    name: 'D8_emptyLabelAccepted', target: REC, expect: 'detected',
+    why: '空 label 候选放行（移植自 server U1 的同一规则）：模型吐一条没有词的候选也能过校验，'
+      + '"模型吐了垃圾"被伪装成"模型很确定地给了几条"',
+    find: "  if (label === '') return null;",
+    replace: '  // 变异体：空 label 也当合法',
+  },
+  {
+    name: 'D9_latencyZeroFallback', target: REC, expect: 'detected',
+    why: '时钟异常时耗时兜底成 0（口径是"实测不到就如实 null"）：0 是"合法且极好"的读数，'
+      + 'latency_p95 会看起来完美，而"时钟坏了"这个真凶被漂亮数字盖住（R16 的直连版）',
+    find: '    latencyMs: Number.isFinite(elapsed) ? elapsed : null,',
+    replace: '    latencyMs: Number.isFinite(elapsed) ? elapsed : 0,',
+  },
+  {
+    name: 'D10_authLooksGeneric', target: REC, expect: 'detected',
+    why: '401 不再单独归 auth_failed（落回 request_failed）：Key 无效与"断网/超时"混成一档，'
+      + '用户只看到"识物服务这次没能返回结果"，不知道去设置里换 Key 就能修',
+    find: "      const err = new Error('识物请求失败 HTTP 401：API Key 无效或没有权限。请到「设置（API Key）」检查或重新粘贴。');\n      err.code = RECOGNIZE_FAIL_REASONS.AUTH_FAILED;",
+    replace: "      const err = new Error('识物请求失败 HTTP 401：API Key 无效或没有权限。请到「设置（API Key）」检查或重新粘贴。');\n      err.code = RECOGNIZE_FAIL_REASONS.REQUEST_FAILED;",
+  },
+  {
+    name: 'D11_missingKeyStillHitsNetwork', target: COMPOSE, expect: 'detected',
+    why: '没配 Key 照样把句子发出去：一个必然 401 的请求白花一次往返，'
+      + '且"没配 Key"（可当场行动）被记成"模型服务拒绝"（要去翻 401 诊断才知道）',
+    find: "  if (typeof apiKey !== 'string' || apiKey.trim() === '') {",
+    replace: '  if (false) {',
+  },
+  {
+    name: 'D12_authLooksGeneric', target: COMPOSE, expect: 'detected',
+    why: '造句的 401 不再单独归 auth_failed（落回 http_error）：反馈提示从"到设置里检查 Key"'
+      + '退化成"模型服务这次没能返回结果"，用户修不了也等不好',
+    find: '          ? FEEDBACK_FAIL_REASONS.AUTH_FAILED',
+    replace: '          ? FEEDBACK_FAIL_REASONS.HTTP_ERROR',
+  },
+  {
+    name: 'D13_userMessageDropsSentence', target: COMPOSE, expect: 'detected',
+    why: '用户消息里丢掉原句（只剩词与场景）：模型判定的是一句它没见过的句子，'
+      + '"原句原样上行"的契约在直连请求体这一层断了，判定与语料都对不上',
+    find: '          `Target word: ${word}`,\n          `Scene: ${scene}`,\n          `Learner\'s sentence: ${sentence}`,',
+    replace: '          `Target word: ${word}`,\n          `Scene: ${scene}`,',
+  },
+  {
+    name: 'D14_missingKeyBurnsAttempts', target: REC, expect: 'detected',
+    why: '无 Key 的降级虚记 attempts=2（口径是"真的问过模型几次"，这里一个请求都没发）：'
+      + 'attempts 与调用成本、retry_rate 的口径从这件事上开始失真',
+    find: "      mode: 'manual', word: null, candidates: [], attempts: 0,",
+    replace: "      mode: 'manual', word: null, candidates: [], attempts: 2,",
   },
 ];
 
