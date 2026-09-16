@@ -175,7 +175,7 @@ test('空词 / 纯空白 / 非字符串 → 拒绝且不碰引擎（不播一个
         () => 'resolved',
         (err) => ({ rejected: String(err?.message ?? err) }),
       ),
-      new Promise((r) => setTimeout(r, 50).then(() => 'hung')),
+      new Promise((resolve) => setTimeout(() => resolve('hung'), 50)),
     ]);
     assert.notEqual(outcome, 'hung', `playWord(${String(bad)}) 必须当场收口（挂住是最坏的收口）`);
     assert.equal(typeof outcome, 'object', `playWord(${String(bad)}) 必须是拒绝，不是照常 resolve`);
