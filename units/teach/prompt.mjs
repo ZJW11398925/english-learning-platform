@@ -50,6 +50,14 @@
 //      把下一步锁死在签名外面。
 //   ⑥ `focus.kind` 的中文名只是一张**显示映射**，不是枚举的第二权威：表里没有的 kind 原样退回，
 //      绝不会因为标签表缺一项就炸（枚举权威在 `focus.mjs`）。
+//   ⑦ `retryHint`（可选，Task 9 授权追加的跨任务改动，计划第 1628–1630 行自己写明）：
+//      非空时在末尾追加一段「上次的问题」。**`null` / `undefined` / 空数组时输出与追加前逐字相同**
+//      ——六槽位顺序与内容一个字都不许动（`SLOTS` 是既定契约，"六槽缺一不发调用"不许放宽）。
+//      代价如实记：它回灌的是**违规码**（`focus_leak` / `over_length` / `scoring_language` /
+//      `generate_failed`），模型并不知道这些标识符是什么意思——真正起作用的是那句中文引导
+//      （"这次务必避开"）+ 模型自己上一轮的输出。**没有为它发明人话映射**（那会是提示词工程里的
+//      又一次猜测，且没有实测依据）。类型守卫是**响亮抛错**而不是静默 `String()`：
+//      `retryHint: 0` 走 truthiness 会**静默不追加**，让"回灌失败"看起来像"模型没照做"。
 
 import { bandRules, BAND_LABELS } from './difficulty.mjs';
 import { METHOD_LABELS } from './method.mjs';
@@ -154,13 +162,48 @@ function bandTeaching(band, focus) {
 }
 
 /**
+ * `retryHint` 的规范化（可选参数，Task 9 追加）。
+ *
+ * 接受**非空字符串**或**非空字符串数组**（数组按 `' / '` 连接，与计划第 1629 行同口径）；
+ * `null` / `undefined` / `''` / 空数组 = "没有要回灌的" ⇒ 返回 `null`（**输出一字节不变**）。
+ *
+ * `0` / `false` / `{}` 这类**不是"没有"、也不是合法内容**的输入一律响亮抛 TypeError：
+ * `0` 走 truthiness 会静默不追加，于是"回灌根本没生效"看起来像"模型没照做同一个错"——
+ * 那是本仓修过两次的同一族失效（静默给出一个看起来正常的结果）。
+ *
+ * @returns {string[] | null} 已就绪、可直接拼进提示词的行数组（调用方不再做类型判断）
+ * @throws {TypeError} 不是字符串 / 字符串数组，或数组里混进非字符串
+ */
+function retryLines(retryHint) {
+  if (retryHint === null || retryHint === undefined) return null;
+  const parts = typeof retryHint === 'string'
+    ? (retryHint === '' ? [] : [retryHint])
+    : (Array.isArray(retryHint) ? retryHint : null);
+  if (parts === null) {
+    throw new TypeError(`assemblePrompt: retryHint 必须是字符串或字符串数组（null / 空数组表示没有），收到 ${JSON.stringify(retryHint) ?? String(retryHint)}`);
+  }
+  for (const p of parts) {
+    if (typeof p !== 'string' || p.trim() === '') {
+      throw new TypeError(`assemblePrompt: retryHint 的每一项都必须是非空字符串，收到 ${JSON.stringify(p) ?? String(p)}`);
+    }
+  }
+  // 纯空白与空串同罪（留一段空白提示等于没有回灌）——与 `assertNonEmptyString` 同口径。
+  return parts.length > 0 ? parts : null;
+}
+
+/**
  * 组装这一次的提示词。
  *
- * @param {{ phase: string, method: string, band: number, focus: object, learnerState: string, scene: string }} input
+ * @param {{
+ *   phase: string, method: string, band: number, focus: object, learnerState: string, scene: string,
+ *   retryHint?: string | string[] | null,
+ * }} input
+ *   - `retryHint`：可选（Task 9 的回灌，见文件头代价 ⑦）。为 `null` / 空时**输出与不传时逐字相同**。
  * @returns {string}
- * @throws {TypeError} 任一槽位缺失 / 空串 / 类型不对，方法名不认识，档位非法（契约违约一律响亮失败）
+ * @throws {TypeError} 任一槽位缺失 / 空串 / 类型不对，方法名不认识，档位非法，`retryHint` 类型不对
+ *   （契约违约一律响亮失败）
  */
-export function assemblePrompt({ phase, method, band, focus, learnerState, scene } = {}) {
+export function assemblePrompt({ phase, method, band, focus, learnerState, scene, retryHint = null } = {}) {
   const given = { phase, method, band, focus, learnerState, scene };
   for (const slot of SLOTS) {
     const value = given[slot];
@@ -197,6 +240,8 @@ export function assemblePrompt({ phase, method, band, focus, learnerState, scene
     ? '必要时可以给一句示例（但只限一句，且不许替他写出他这段内容的成稿）'
     : '不许给示例句';
   const stepBudget = `最多 ${rules.minHelpSteps} 步帮助，之后必须换方法`;
+  // 回灌放在**最后**：六槽位与四类行为约束的相对顺序一个字都不许动（见文件头代价 ⑦）。
+  const retry = retryLines(retryHint);
 
   return [
     '【角色】你是这个应用里的英语学习引导者。你的职责不是讲解，是**让他自己说出来**。',
@@ -212,5 +257,6 @@ export function assemblePrompt({ phase, method, band, focus, learnerState, scene
     `【帮助尺度】${helpScale}；${allowSample}；${stepBudget}。`,
     '【卡住时】先降一档难度，仍不行再换方法——**不要直接把答案给他**。',
     `【本档怎么教】${bandTeaching(band, focus)}`,
+    ...(retry === null ? [] : ['', `【上次的问题】${retry.join(' / ')}——这次务必避开。`]),
   ].join('\n');
 }
