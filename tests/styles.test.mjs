@@ -489,3 +489,86 @@ test('深色分支的 --bg 只声明一次（唯一一行死代码曾被下一�
   // 8 位十六进制在这里必然意味着"带 alpha"，而深色底色不能透（会露出浏览器白底）
   assert.equal(/#[0-9a-fA-F]{8}\b/.test(dark[1]), false, '深色分支里不许出现 8 位十六进制颜色（带 alpha 会让底色透明）');
 });
+
+// ═══════════════════ 阶段 B（进度面）：DOM 标记 ↔ 样式规则的接线 ═══════════════════
+//
+// 这一组测的是**同一件事的两半**：`app.mjs` 造的标记（`.site` / `.word-name` / `.word-meta` /
+// `.word-meta-due` / `.word-meta-gap` / `.word-due` / `.due-badge`）与 `styles.css` 里
+// 给它们画的规则。只查样式侧的话，"CSS 写对了、app.mjs 忘了标记"这一类坏法**不会报错**
+// ——首页会静默变回一排没有进度的药丸（阶段 B 要修的就是它）。
+// 反过来只查 app.mjs 也一样：标记打对了、规则被删了，界面同样静默降级。
+// 所以两边必须**在同一个文件里对账**（与上面 `word-title` / `primary` 那两条同一种做法）。
+//
+// 机制：全部走 `cssBlock`（那条助手要求"整条选择器列表精确相等"，所以它抓到的规则体
+// 一定属于这个选择器，不会被合写块或前缀相同的另一条骗到）。
+
+test('阶段 B 的进度面：标记与规则成对存在（少任何一半都是静默降级）', () => {
+  // ── ① 生产者那一半：app.mjs 必须真的打出这几个标记 ─────────────────────────────
+  // `bodyEl.className = 'site'`（页签视图的容器）——样式侧那几条 `.site > .word-list`
+  // 全靠它；少了它，整列词会退回"一屏流式小药丸"，**没有任何测试会报错**。
+  assert.match(app, /bodyEl\.className = 'site';/, 'app.mjs 必须给视图容器打上 site 类');
+  assert.match(app, /name\.className = 'word-name';/, '词名那一格必须带 word-name');
+  assert.match(app, /meta\.className = 'word-meta';/, '进度那一格必须带 word-meta');
+  // 两种形态是**追加**在 word-meta 之后的（下面那条顺序断言也依赖这个写法）
+  assert.match(app, /meta\.className \+= ' word-meta-due';/, '到期那一档的类名必须追加 word-meta-due');
+  assert.match(app, /meta\.className \+= ' word-meta-gap';/, '夹缝那一档的类名必须追加 word-meta-gap');
+  assert.match(app, /chip\.className = states\.includes\('due'\) \? 'word-chip word-due' : 'word-chip';/,
+    '到期那一行的整行标记是 word-chip word-due');
+  assert.match(app, /badge\.className = 'due-badge';/, '到期徽标必须带 due-badge');
+  // ⚠️ 反面守卫：这一列的词**不是按钮**——用户点一个词不该发生任何事
+  //（"点某个词直接进 word 屏"要动被冻结的状态机转移表，那是用户明确排除的范围）。
+  // 判据取"这一族函数里有没有 createElement('button')"：加了一颗按钮就会 RED。
+  const chipFn = /function wordChip\([\s\S]*?\n  \}/.exec(app);
+  assert.ok(chipFn, 'app.mjs 里找不到 wordChip 函数（进度行的唯一生产者）');
+  assert.equal(/createElement\('button'\)/.test(chipFn[0]), false,
+    '进度行里不许造按钮（点词直接进 word 屏要动冻结的转移表，超出本阶段范围）');
+
+  // ── ② 消费者那一半：每条标记都要有自己的规则，而且值走令牌 ────────────────────
+  // 一列（不是一屏流式小药丸）：纵向 + 令牌间距
+  const list = cssBlock('\\.site\\s*>\\s*\\.word-list');
+  assert.match(list, /flex-direction:\s*column/, '.site > .word-list 必须是竖排一列（一行一个词）');
+  assert.match(list, /gap:\s*var\(--s-2\)/, '.site > .word-list 的间距必须走令牌');
+  // 一行：可换行 + 满宽 + 44px 触控/读行高
+  const chip = cssBlock('\\.site\\s*>\\s*\\.word-list\\s*>\\s*\\.word-chip');
+  assert.match(chip, /display:\s*flex/, '一条词行必须是 flex（词名与进度要能分列）');
+  assert.match(chip, /flex-wrap:\s*wrap/, '一条词行必须允许换行（窄屏上词名+进度放不下时要折行）');
+  assert.match(chip, /width:\s*100%/, '一条词行要占满整宽（它是一行，不是一颗药丸）');
+  assert.match(chip, /min-height:\s*44px/, '一条词行的最小高度是 44px');
+  // 词名：**衬线**（要学的英文词）+ 不小的一号
+  const name = cssBlock('\\.site\\s*>\\s*\\.word-list\\s+\\.word-name');
+  assert.match(name, /font-family:\s*var\(--font-word\)/, '词名必须用衬线字族（要学的英文词）');
+  assert.match(name, /font-size:\s*1\.125rem/, '词名要比正文大一档（1.125rem）');
+  assert.match(name, /min-width:\s*0/, '词名必须 min-width: 0（否则长词会把这一行顶宽）');
+  // 进度：次级色 + 等宽数字位
+  const meta = cssBlock('\\.site\\s*>\\s*\\.word-list\\s+\\.word-meta');
+  assert.match(meta, /color:\s*var\(--ink-soft\)/, '进度那一段用次级文字色令牌');
+  assert.match(meta, /font-variant-numeric:\s*tabular-nums/, '进度里的数字要等宽（上下几行才对得齐）');
+  assert.match(meta, /font-size:\s*0\.8125rem/, '进度的字号比词名小一档');
+  // 到期：整行重音 + 那一格重音字
+  const dueRow = cssBlock('\\.site\\s*>\\s*\\.word-list\\s*>\\s*\\.word-chip\\.word-due');
+  assert.match(dueRow, /background:\s*var\(--accent-wash\)/, '到期那一行要有浅青底（"需要你处理"的既有语汇）');
+  assert.match(dueRow, /border-color:\s*var\(--accent\)/, '到期那一行要有重音描边');
+  const dueMeta = cssBlock('\\.site\\s*>\\s*\\.word-list\\s+\\.word-meta-due');
+  assert.match(dueMeta, /color:\s*var\(--accent\)/, '到期那一行的进度文字要走重音色');
+  // 夹缝：告警色（它是"你自己的记录坏了"，不是"还没到期"）
+  const gapMeta = cssBlock('\\.site\\s*>\\s*\\.word-list\\s+\\.word-meta-gap');
+  assert.match(gapMeta, /color:\s*var\(--danger\)/, '夹缝记录要走告警色（那是一件需要处理的事）');
+  // 徽标
+  const badge = cssBlock('\\.due-badge');
+  assert.match(badge, /background:\s*var\(--accent-wash\)/, '徽标要有浅青底');
+  assert.match(badge, /color:\s*var\(--accent\)/, '徽标文字走重音色');
+  assert.match(badge, /white-space:\s*nowrap/, '徽标不许被折成两行（三个字要在一格里）');
+
+  // ── ③ 顺序：那两条覆写必须写在 `.word-meta` **之后** ──────────────────────────
+  // 三者前缀相同、各多一个类 ⇒ **同权重**（0,3,0）⇒ 靠书写顺序分胜负。
+  // 本文件的惯例是"权重分胜负"（见 `button:disabled` 那一大段），这里是有意破例的
+  // 一处形态变体族——破例就要有断言兜着：把顺序改反，到期/夹缝两档会静默退回次级色
+  //（界面不报错，只是"该复习"不再显眼）。
+  const iMeta = cssBody.indexOf('.site > .word-list .word-meta {');
+  const iDue = cssBody.indexOf('.site > .word-list .word-meta-due {');
+  const iGap = cssBody.indexOf('.site > .word-list .word-meta-gap {');
+  assert.ok(iMeta > -1 && iDue > -1 && iGap > -1,
+    'styles.css 缺少 .word-meta / .word-meta-due / .word-meta-gap 三条规则之一');
+  assert.ok(iDue > iMeta && iGap > iMeta,
+    '.word-meta-due / .word-meta-gap 必须写在 .word-meta 之后（同权重，靠顺序取胜）');
+});

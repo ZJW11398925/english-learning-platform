@@ -40,7 +40,12 @@
 //     带着它落盘就是把一个错的字段名交到下游（progress 必办 1）。
 import { createMachine, STATES } from './units/state-machine.mjs';
 import { createRoundCounter } from './units/rounds.mjs';
-import { nextState, dueWords } from './units/scheduler.mjs';
+// 阶段 B：进度面除了 `nextState` / `dueWords`，还要读"这个词是不是已经维护了"。
+// `isMaintained` 是 `units/scheduler.mjs` 里**唯一**认这件事的地方（`maintained` 标志与
+// `dueAt === null` 两种写法由它统一判定）——界面不自己写 `word.maintained === true`：
+// 那就是同一件事的第二个出处，而这两种写法一旦哪天只有一个被更新，界面就会把
+// "不再催"的词说成"该复习"（或反过来）。
+import { nextState, dueWords, isMaintained } from './units/scheduler.mjs';
 import { isTtsAvailable, playWord } from './units/speak.mjs';
 import { submitSentence as realSubmitSentence, feedbackEventFor } from './units/compose.mjs';
 // Task 12A（项目转向 DEC-…23/26）：模型调用改浏览器直连，Key 由访问者在「设置」里填。
@@ -175,6 +180,87 @@ const FALLBACK_SCENE_WORDS = Object.freeze(['mug', 'cup', 'book', 'pen', 'bottle
  * 12 是"一屏能扫完"的量级（390×844 下三行左右），不是从别处抄来的阈值。
  */
 const LEARNED_PREVIEW_MAX = 12;
+
+/**
+ * 一条词记录在列表里的两句话：**排期档位**与**下次复习时间**。两条读数各自的来源是死的：
+ *
+ * 1. **档位直接读 `stage` 原值，不平移、不重算。** 这个字段的含义在 `units/scheduler.mjs`
+ *    的文件头里写着"进出含义不同"，而记录里存的那一份是 `nextState` **返回**值透传下来的
+ *    （`enqueueWord` → `store.putWord`），也就是"已排上的那一档序号"，取值为 1 / 2 / 3，
+ *    4 是 `maintained` 哨兵。界面只说「第 N 档」——**不**把它归约成"已完成 N 档"或
+ *    "N/3"：`units/scheduler.mjs` 是为这一屏提供读数的权威单元，在界面里再算一遍它的语义
+ *    （+1 或 -1）等于给同一件事造第二个出处，而这两处一旦哪天不一致，界面就会**静默地**
+ *    谎报学习进度。诊断页（`web/diagnostics.html` 的 `wordTable`）用同一个口径显示原始档位，
+ *    两屏对得上。
+ * 2. **下次复习时间直接读 `word.dueAt`，绝不拿 `stage` 去推算日期。** `dueAt` 是权威值
+ *    （`nextState` 产出、`units/scheduler.mjs` 的模块头把它定为写记录的契约）；手算一遍
+ *    `now + INTERVALS_DAYS[stage - 1]` 就多一个能算错的地方，而"下次什么时候复习"正是本屏
+ *    最核心的那个读数。
+ * 3. **`dueAt` 不是有限数、也不是 `null`**（缺失 / `NaN` / 字符串）时说着实情：这种记录
+ *    正是 `units/scheduler.mjs` 里那个"既不算已维护、又永远不到期"的无声夹缝，`dueWords`
+ *    会**静默略过**它。界面**不补一个默认值**（红线 4：缺键不写 0——0 是"合法且极好"的读数，
+ *    会盖住真凶），只把"这条记录缺下次复习时间"照实说出来。
+ *    ⚠️ 它读 `dueAt` 而**不看** `Number.isFinite(word.dueAt) === false` 之外的东西：
+ *    这一档在界面上是三档里颜色最重的一档（`.word-meta-gap` 走 `--danger`），
+ *    因为"你自己的词表里有一条记坏了"是**需要处理**的一件事，而不只是"还没到期"。
+ *    亮色下 `--danger` 对 `--surface` 的对比度实测 ≈6.4:1（达 AA），见 `docs/ui-redesign/after/phase-b-*.png`
+ *    那一轮的走查读数。
+ * 4. **词记录一个都不隐藏**：列表铺的是 `store.readWords()` 的全集，包括上面那种夹缝记录。
+ *    只铺到期的词、把其余藏起来，等于让用户永远看不见自己学过的词里有一条坏了。
+ */
+function stageLabelOf(word) {
+  if (isMaintained(word)) return '已维护';
+  const stage = word?.stage;
+  // `Number.isInteger` 而不是 `?? 0`：缺失不是 0。缺键时写着实情，不冒充一个档位。
+  return Number.isInteger(stage) ? `第 ${stage} 档` : '档位未知';
+}
+
+/** 天数：按 24 小时算，与 `units/scheduler.mjs` 的间隔口径（`INTERVALS_DAYS[i] * DAY_MS`）同源。 */
+const DAY_MS = 86400000;
+
+/**
+ * 相对当前时刻的人话（"3 天前"/"今天"/"5 天后"）。
+ *
+ * 口径：**少于整整一天一律说"今天"**——两侧对称、都向下取整。所以"5 小时后"是"今天"
+ * （它确实就在今天），"25 小时后"才是"1 天后"；同理"5 小时前"是"今天"，"25 小时前"是
+ * "1 天前"。既不许把话说得比数据更满（23 小时不说成"1 天"），也不许说反方向。
+ *
+ * ⚠️ 这条是本轮**实测踩过两次**的地方，两种错法都不会让别的断言变红，只有专门盯"今天"
+ * 那一档的用例才发现：
+ *   ① 先写成"对差值直接 `Math.floor`，按符号给前/后"——`now - at` 是负数时，
+ *      `Math.floor(-0.2) = -1` ⇒ 界面把"还差 5 小时"报成「1 天后」（用**负偏移**
+ *      造夹具时刻时最容易遇到）；
+ *   ② 修的时候又想成"未来那一侧向上取整"——那同样把"5 小时后"报成「1 天后」。
+ * 现在的写法是 `Math.trunc` + 一侧取绝对值：两侧都是"整整几天"，方向由符号单独给。
+ *
+ * @param {number} at 目标时刻（ms）
+ * @param {number} now 当前时刻（ms）
+ * @returns {string} '3 天前' / '今天' / '5 天后'
+ */
+function daysRelationText(at, now) {
+  const sign = at > now ? 1 : -1;
+  const days = Math.trunc(Math.abs(at - now) / DAY_MS);
+  if (days === 0) return '今天';
+  return sign > 0 ? `${days} 天后` : `${days} 天前`;
+}
+
+/**
+ * 一条词记录"该不该催、什么时候"的一句话（**只读 `dueAt` 与 `isMaintained`**，见上面第 2/3 条）。
+ *
+ * 到期那一档的话是"到期 2 天"（**不作前缀**）：调用方把它拼进一整行里（
+ * `… · 上次「厨房」场景 · 到期 2 天`），所以这里给的是一个能直接嵌进去的片段，
+ * 而不是自带"已到期（…）"外壳的一整句。
+ */
+function reviewTimingText(word, now) {
+  if (isMaintained(word)) {
+    // `maintained` 标志与 `dueAt === null` 是同一件事的两种写法（`units/scheduler.mjs` 明文）。
+    return '不再催复习';
+  }
+  const dueAt = word?.dueAt;
+  if (!Number.isFinite(dueAt)) return '缺下次复习时间';
+  const rel = daysRelationText(dueAt, now);
+  return dueAt <= now ? `到期 ${rel}` : `下次复习：${rel}`;
+}
 
 /**
  * id 的**码位序**比较（同刻兜底用）。
@@ -400,6 +486,13 @@ export async function mount(root, deps = {}) {
   const errorEl = doc.createElement('p');
   errorEl.className = 'error';
   const bodyEl = doc.createElement('div');
+  // `site` = "这里渲染的是页签自己那一屏"（首页 / 学习 / 复习 / 设置四个视图函数的产物都进它，
+  // 待补抽屉也进它）。它存在的理由是**样式侧的一条作用域**：`.word-list` 是一列词，
+  // 在首页/复习页上它该是"一行一个词、带进度"，而这条外观不该外溢到别处去
+  // （`.chip` 那套流式小药丸在别的地方仍然是对的）。不给 bodyEl 加类名的话，
+  // 样式侧只能靠 `#app > div > .word-list` 这种位次判据，而本仓在位次判据上踩过四次
+  // （见 `button.primary` 那一大段注释、`tests/styles.test.mjs` 明文禁止回流）。
+  bodyEl.className = 'site';
   // 应用栏与底部页签是**壳**：它们不属于任何一个视图，所以放在 `bodyEl` **之外**
   // ——`bodyEl.replaceChildren(...)` 换视图时不会连它们一起换掉（页签上的高亮由 `renderNav` 现算）。
   const appBarEl = doc.createElement('header');
@@ -845,6 +938,54 @@ export async function mount(root, deps = {}) {
     return { view, row, title, hint, action };
   }
 
+  /**
+   * 一条词的列表行（`<span>` + 词名 span + "档位 · 时间" span + 到期时的 `该复习` 徽标）。
+   *
+   * 为什么是一整行而不是一颗只写词名的小药丸（阶段 B 之前的样子）：那一版报不出进度——
+   * 用户看得见"学过 mug"，看不见"mug 排在第几档、下次什么时候该复习"，而后者才是他回来
+   * 打开这一页想知道的事。
+   *
+   * 词名走 `span.word-name` 而不是裸文本：`.word-chip` 的字族（衬线）属于**英文词**，
+   * 而这一行里还夹着中文（"第 1 档"），中文必须是界面无衬线（`styles.css` 文件头的排版口径）。
+   * 同一个类名两屏复用：`homeView` 的已学词列与 `reviewView` 的到期清单。
+   *
+   * ⚠️ 它是 `mount()` 的**内部**函数（`stageLabelOf` / `reviewTimingText` 那两个读数助手
+   * 才是模块级的）：它要用 `doc` ——那是 `mount(root, deps)` 的注入点，模块级没有它。
+   * 挪出去的症状是 `ReferenceError: doc is not defined`，而且**只在"这一屏真的有词"时才炸**
+   * （空词表走的是空状态那一支，碰不到这里），是一条很隐蔽的路径——本轮实测踩过一次。
+   *
+   * @param {object} word 词记录
+   * @param {string} metaText 进度那一段的文字（由调用方拼，两个视图各有自己的说法）
+   * @param {string[]} states `'due'`（已到期）/ `'gap'`（`dueAt` 坏掉那种夹缝记录）
+   */
+  function wordChip(word, metaText, states) {
+    const chip = doc.createElement('span');
+    chip.className = states.includes('due') ? 'word-chip word-due' : 'word-chip';
+    const name = doc.createElement('span');
+    name.className = 'word-name';
+    // 词名取 `word`（本应用写记录时用的键），退回 `label`（诊断/导出里的老键）再退回 id。
+    name.textContent = String(word?.word ?? word?.label ?? word?.id ?? '');
+    const meta = doc.createElement('span');
+    // ⚠️ `word-meta-due` 这一条与 `hint()` 的 `.muted` 同权重（一个类 = 0,1,0），
+    // 靠 `styles.css` 里的书写顺序分胜负——类名拼在 `.word-meta` 之后是有意的，
+    // 别改成"先判 due 再拼 meta"。
+    meta.className = 'word-meta';
+    if (states.includes('due')) meta.className += ' word-meta-due';
+    if (states.includes('gap')) meta.className += ' word-meta-gap';
+    meta.textContent = metaText;
+    chip.append(name, meta);
+    // 到期徽标：一个词**此刻**要不要复习，是这一屏最该被一眼看见的区别。
+    // 它只标"该复习了"这件事，**不报数**——个数在卡片那一行总数里（同一屏两个同一来源的
+    // 数迟早会不一致，而这一屏的每个数都只有一处起源）。
+    if (states.includes('due')) {
+      const badge = doc.createElement('span');
+      badge.className = 'due-badge';
+      badge.textContent = '该复习';
+      chip.append(badge);
+    }
+    return chip;
+  }
+
   // ── 视图：每个页签一个函数，壳只调其中一个 ────────────────────────────────────
 
   /**
@@ -930,19 +1071,34 @@ export async function mount(root, deps = {}) {
   }
 
   /**
-   * 「首页」（阶段 A 的默认页）：一句话说明 + 今天该复习 N 个词 + 「开始学习」入口 + 已学词概览。
+   * 「首页」（阶段 A 的默认页；**阶段 B 起它是真进度面**）。
    *
-   * 四条口径：
+   * 这一屏回答三个问题，顺序就是用户关心的顺序：**今天有活儿吗 → 从哪儿开始 → 我学到了哪**。
+   *
+   * 六条口径（阶段 B 新增的后三条是这一轮的核心读数）：
    *   · **到期词数只有一处起源**：`dueList()`（`store.readWords()` + `units/scheduler.mjs`
    *     的 `dueWords`）。**没有到期词就不显示那一行**——不写"今天该复习 0 个词"：
    *     0 在那个位置不是一条信息，而是一句噪音（红线 4：没给的数不发明）。
    *   · 已学词数同样来自 `store.readWords()`；词表为空时给**像样的空状态**
-   *     （说清"下一步做什么"），不是一片空白。
+   *     （说清"下一步做什么"），不是一片空白。阶段 B 把空状态分了两档：**没配 Key**
+   *     的人下一步是去设置（不是去拍照——那一步会被拦下，空状态里给一个会被拦下的指引
+   *     等于让他白跑一趟），配了 Key 的人下一步才是拍照。
+   *   · **每个词都带进度**：词名 + 「第 N 档 / 已维护」+ 下次什么时候复习。读数全部来自
+   *     `store.readWords()` 的记录本身（档位读 `stage`、时间读 `dueAt`，口径与那两条读数的
+   *     完整理由见 `stageLabelOf` 的注释）；**到期的那几个词单独标出来**（`该复习` 徽标），
+   *     于是"今天该复习哪几个"不用用户自己去比对日期。
+   *   · **到期那一段自带出口**（「去学习」= 复用同一条识物链路的那一条路），但它**不是**
+   *     这一屏唯一的出口：大字入口「开始学习」永远在，且在有到期词时是同一件事
+   *     （`goTab('learn')`，两者点下去落在同一屏）。
+   *   · **词记录一条都不隐藏**：列表铺的是 `store.readWords()` 的全集（包括 `dueAt` 坏掉、
+   *     被 `dueWords` 静默略过的那种夹缝记录，它照样显示，只是如实说"缺下次复习时间"）。
+   *     只铺到期的词会让用户永远看不见自己学过的词里有一条坏了。
    *   · 「开始学习」是这一屏的**大字入口**，但它**不是** `.primary`：重音只给"学习流程里
    *     那一颗推进按钮"是 `DEC-OPI-968b804d-…db.6` 的人裁决（六屏表由
    *     `tests/styles.test.mjs` 逐文案钉住、并断言"全站被标成主操作的调用点恰好那六颗"）。
    *     首页入口靠**尺寸**（56px / 1.125rem）与位置区分。要把它改成实心重音，需要一条新裁决
-   *     + 把那六屏表扩成七屏——那是裁决不是实现细节，本阶段不擅自改。
+   *     + 把那六屏表扩成七屏——那是裁决不是实现细节，本阶段不擅自改。同理，阶段 B 新增的
+   *     那两条出口（「去学习」）也**不带** `.primary`。
    *   · 到期那一行与**应用栏的状态行**同时出现是有意的：应用栏是"全局一行状态"（每个页签都在），
    *     首页这一条是**可行动的那一条**（带上"上次在哪儿学的、要换个地方重拍"）。
    */
@@ -951,21 +1107,39 @@ export async function mount(root, deps = {}) {
     s.view.push(s.title('拍一下，学一个词'));
     s.view.push(s.hint('对准身边的一件东西拍一张，认出一个词，再用它写一句你自己的话——'
       + '这是这个应用的完整闭环。'));
+    const now = clock();
     const due = dueList();
+    const dueIds = new Set(due.map((w) => w.id));
     if (due.length > 0) {
-      const dueEl = doc.createElement('p');
-      dueEl.className = 'due';
+      // 到期那一段整体装进 `.due`（左侧重音条 + 浅青底，本文件里"需要你处理的一件事"
+      // 的既有写法）：一行总数 + 一句场景提示 + 一条出口。**总数与下面每个词的徽标同一个起源**
+      // （`dueList()` / `dueIds`），所以它们不可能互相矛盾。
+      const dueCard = doc.createElement('div');
+      dueCard.className = 'due';
+      const dueLine = doc.createElement('p');
+      dueLine.textContent = `今天该复习 ${due.length} 个词`;
+      dueCard.append(dueLine);
       // 场景提示是**建议**不是判定（系统不知道用户此刻站在哪儿），与 `ready` 屏同一口径。
-      dueEl.textContent = `今天该复习 ${due.length} 个词`;
-      s.view.push(dueEl);
-      s.view.push(s.hint(`最先到期的是「${due[0].lastScene ?? '未知'}」场景学的那个词——`
+      dueCard.append(s.hint(`最先到期的是「${due[0].lastScene ?? '未知'}」场景学的那个词——`
         + `复习走的是同一条识物链路：换个地方重新拍一张（例如 ${RECURRENCE_SCENE_EXAMPLES}）。`));
+      const dueRow = doc.createElement('div');
+      dueRow.className = 'row';
+      const goBtn = doc.createElement('button');
+      // 文案与复习页那条出口**逐字相同**（「去学习」）：两处指的是同一件事
+      // （复现 = 去学习页重新拍一张、取到那个词），不同的文案会让用户以为是两条路。
+      goBtn.textContent = '去学习';
+      goBtn.addEventListener('click', () => goTab('learn'));
+      dueRow.append(goBtn);
+      dueCard.append(dueRow);
+      s.view.push(dueCard);
+      // 场景提示原本是独立的一行 `hint`，现在进了卡片：它描述的是卡片里那个总数，
+      // 分开摆会让"这句话在说哪一件事"变得含糊。
     }
     const startBtn = s.action('开始学习', () => goTab('learn'));
     startBtn.className = 'start';     // 大字入口：靠尺寸区分（不是 `.primary`，理由见函数头）
     s.view.push(s.row);
 
-    // ── 已学词概览（词数 + 一列词）──────────────────────────────────────────────
+    // ── 已学词概览（词数 + 一列**带进度**的词）──────────────────────────────────
     const words = Object.values(store.readWords()).sort((a, b) => (
       ((b?.createdAt ?? 0) - (a?.createdAt ?? 0)) || compareIds(a?.id, b?.id)
     ));
@@ -976,21 +1150,33 @@ export async function mount(root, deps = {}) {
     s.view.push(head);
     if (total === 0) {
       // 空状态：告诉用户下一步做什么，而不是留白（"没有内容"与"没有设计"是两件事）。
+      // 阶段 B 把它分成两档，因为**下一步是两件不同的事**：没配 Key 的人点「开始学习」
+      // 是走不通的（`onCapture` 会把他拦下并指回设置），照旧让他"点上面的「开始学习」"
+      // 就是让他白跑一趟；而空状态的全部职责恰恰是"告诉他下一步做什么"。
+      // 这一档的用户是**首次访问者**（词表空 + 没 Key），所以他还没读过 ready 屏的引导，
+      // 这里必须自带"为什么 / 去哪拿 / 存哪"三件事（口径与 `NO_KEY_GUIDANCE` 同源，只是更短）。
       const empty = doc.createElement('p');
       empty.className = 'empty';
-      empty.textContent = '学过的词会在这里排成一列，并标出下次什么时候该复习。'
-        + '点上面的「开始学习」，拍下身边的一件东西，第一个词就会出现。';
+      empty.textContent = hasKey()
+        ? '学过的词会在这里排成一列，每个词都标出排到第几档、下次什么时候该复习。'
+          + '点上面的「开始学习」，拍下身边的一件东西，第一个词就会出现。'
+        : '还没有配置 API Key，所以现在点「开始学习」会被拦下——识物和造句都要用你自己的 Key'
+          + '（在 platform.deepseek.com 创建一串以 sk- 开头的密钥，只保存在这台手机的浏览器里）。'
+          + '先点下面的「设置（API Key）」粘贴保存，配好之后回来拍下身边的一件东西，'
+          + '第一个词就会出现在这里。';
       s.view.push(empty);
     } else {
       const shown = words.slice(0, LEARNED_PREVIEW_MAX);
       const list = doc.createElement('div');
       list.className = 'word-list';
       for (const w of shown) {
-        const chip = doc.createElement('span');
-        chip.className = 'word-chip';
-        // 词名取 `word`（本应用写记录时用的键），退回 `label`（诊断/导出里的老键）再退回 id。
-        chip.textContent = String(w?.word ?? w?.label ?? w?.id ?? '');
-        list.append(chip);
+        const isDue = dueIds.has(w?.id);
+        // 到期／夹缝记录各有自己的形态（颜色 + 徽标），未到期的就是一行安静的进度。
+        const states = [
+          ...(isDue ? ['due'] : []),
+          ...(!isDue && !isMaintained(w) && !Number.isFinite(w?.dueAt) ? ['gap'] : []),
+        ];
+        list.append(wordChip(w, `${stageLabelOf(w)} · ${reviewTimingText(w, now)}`, states));
       }
       s.view.push(list);
       if (total > shown.length) {
@@ -1001,25 +1187,59 @@ export async function mount(root, deps = {}) {
   }
 
   /**
-   * 「复习」页（阶段 A：**只做最小可用**，完整版是阶段 B）。
+   * 「复习」页（阶段 A：最小可用；**阶段 B 起是「清单 + 出口」**）。
    *
-   * 两条口径：
-   *   · 数据只有两个来源，**一个新数都不造**——`dueList()`（到期词数）与 `openPending()`
-   *     （还没补上的待补反馈条数，来自事件流派生的队列，`units/pending.mjs`）；
-   *   · 出口两条：进**既有**待补抽屉（真有欠账时）、去学习页（复现走的是同一条识物链路）。
+   * 页的语义**已由用户明确裁决**：复现就是**去学习页重新拍一张、取到那个词**——本页
+   * 只做清单与出口，**不**做"点某个词直接进 word 屏"（那要动被冻结的状态机转移表）。
+   * 所以这一屏的每个词都是一行**读数**（不是按钮）。
+   *
+   * 三条口径：
+   *   · 数据只有两个来源，**一个新数都不造**——`dueList()`（到期词，已按到期时间从早到晚
+   *     排好序）与 `openPending()`（还没补上的待补反馈条数，来自事件流派生的队列，
+   *     `units/pending.mjs`）；
+   *   · 清单每行给三样：**词名**、**排到第几档**、**到期多久了**（以及上次是在哪个场景学的）。
+   *     到期多久是这页唯一"现在几点"相关的读数，它读的同样是记录里的 `dueAt`；
+   *   · 出口三条，**每条都在没有到期词时也成立**：进**既有**待补抽屉（真有欠账时）、
+   *     去学习页（复现走的是同一条识物链路）、以及底部的设置/诊断入口（`appendTail`）。
+   *     **没有到期词时不是死路**：照旧给「去学习」，并在空状态里说清"现在不欠复习、
+   *     想多学一个词就走这条路"。
    */
   function reviewView() {
     const s = screen();
     s.view.push(s.title('复习'));
+    const now = clock();
     const due = dueList();
     s.view.push(s.hint(due.length > 0
       ? `今天该复习 ${due.length} 个词。换个地方重新拍一张、取到那个词，就算一次复现。`
       : '今天没有到期的词。学完一个词之后，它会在 1 天 / 3 天 / 7 天后各催你一次。'));
+    if (due.length > 0) {
+      const list = doc.createElement('div');
+      list.className = 'word-list';
+      for (const w of due) {
+        // 这一行报的是"上次在哪儿学的 + 该复习多久了"：前者让用户知道要换个地方，
+        // 后者让他知道这笔欠账有多旧（`dueAt` 已经过去多久，读的还是权威那个字段）。
+        list.append(wordChip(
+          w,
+          `${stageLabelOf(w)} · 上次「${w.lastScene ?? '未知'}」场景 · ${reviewTimingText(w, now)}`,
+          ['due'],
+        ));
+      }
+      s.view.push(list);
+    } else {
+      // 空状态：**不是死路**。说清"现在确实不欠复习"，并把唯一那条出路指出来。
+      const empty = doc.createElement('p');
+      empty.className = 'empty';
+      empty.textContent = '现在没有到期的词，所以这一页是空的——这是正常的。'
+        + '想多学一个词就点下面的「去学习」拍一张；学完的词会自动排上 1 天 / 3 天 / 7 天，'
+        + '到点了就会回到这一页。';
+      s.view.push(empty);
+    }
     const open = openPending().length;
     s.view.push(s.hint(open > 0
       ? `待补反馈 ${open} 条：那几句当时没拿到判定，原句一直留着，一条都不会丢。`
       : '待补反馈 0 条：没有欠着的判定。'));
     if (open > 0) s.action('去补交这几句', () => { abandonCapture(); viewingPending = true; render(machine.state); });
+    // 「去学习」**永远在**（有到期词时它是复现的出口，没到期词时它是"再学一个"的出口）。
     s.action('去学习', () => goTab('learn'));
     s.view.push(s.row);
     return appendTail(s);

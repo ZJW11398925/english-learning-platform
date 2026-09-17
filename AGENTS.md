@@ -9,8 +9,12 @@
 - **⏭ 正在进行：向「可推广应用形式」转向（`DEC-OPI-968b804d-…db.21`）**——分四阶段，**每阶段一块任务书 → 委派子代理 → 总控独立复核 → 用户决定上线**：
   - **A 应用骨架**（`TASK-OPI-968b804d-…db.19`）—— **✅ 已完成**：应用栏 + 底部四页签（首页/学习/复习/设置），`viewFor` 的 338 行 switch 拆成「壳 + 视图」，**默认落在首页**。裸 `node --test` **528/0**。已提交 `f1624f3` 并推送（`gh-pages = c29a382`）。
   - **A+ 取词退出路径**（`TASK-OPI-968b804d-…db.23`，`DEC-…db.25`）—— **✅ 已完成**：总控复核时发现阶段 A 引入一个真陷阱（取词屏无退出口 + 切页签不关流 ⇒ 切回来面对死画面、无路可走）。已修：状态机加 `cancelCapture`（与 `frameBad` **严格分开**，不计数不记理由）、取景屏加「返回」= 主动放弃（**事件流一条不增**）、离开学习页 = 这次取词结束。**变异校验**：`cancelCapture`→`frameBad` 让新用例 RED。
-  - **A 上线核验**：远端 `gh-pages = c29a382`，`git show origin/gh-pages:app.mjs` 实测含 `cancelCapture` / `tabbar` / `开始学习` ✓。⚠️ **HTTP 层未验**——本轮本机到 `github.com` / `*.github.io` 全部超时（`api.github.com` 与 `git ls-remote` 正常），故"Pages 正在服务新版"这一截**待网络恢复补跑**（见红线 11）。
-  - **B 进度面**（待做，这阶段才真「像个应用」）：我的词 / 待复习 / 空状态——数据层早已很厚，缺的是**界面出口**
+  - **A 上线核验**——**✅ 已闭合（本轮补跑）**：上一轮因本机到 `github.com` / `*.github.io` 全部超时，只做了 git 侧核验（`DEC-…db.27` 如实登记"HTTP 层未验"）。本轮网络恢复，跑 `VAL-…db.32` → **`VR-…db.36` = PASS**：线上 22 个文件对 `origin/gh-pages` 树 **`mismatched_files = 0` / `http_failed_files = 0`**（口径 = HTTP 原始字节 → CRLF 归一为 LF → git blob SHA-1 → 与 `git ls-tree -r origin/gh-pages` 逐条比对；**不是** `.Content` 字符串比对，见红线 5）。**"Pages 正在服务新版"这一截现已为真。**
+  - **B 进度面**（`TASK-OPI-968b804d-…db.38`；开工口径 `DEC-…db.42`；收尾裁决 `DEC-…db.49`）—— **✅ 已完成并核验**：首页从「一行 `已学 N 个词` + 一排**只有词名**的 chips」变成真进度面；复习页从「只报数」变成「清单 + 出口」。裸 `node --test` **543/0**（528 → +15）。接受 `VAL-…db.45` → **`VR-…db.47` = PASS**（7 项逐条）。
+    - **读数口径（本阶段最容易说谎的地方，复核过）**：①档位直接读记录里的 `stage` **原值**，界面显示「第 N 档」——**不**重算成"已完成 N 档"或 N/3（`units/scheduler.mjs` 是唯一权威；在界面里再算一遍等于给同一件事造第二个出处，两处一旦不一致就**静默谎报学习进度**；且与诊断页同口径）；②下次复习时间**直接读 `dueAt`**，绝不拿 `stage` 手推日期；③`dueAt` 缺失/`NaN` 的记录**不补默认值、不隐藏**，如实报「缺下次复习时间」并用告警色标出（那种记录正是 `scheduler.dueWords` 会静默略过的"无声夹缝"）；④首页到期卡与复习页清单**同一起源**（`dueList()` / `dueIds`），故总数与每行徽标不可能互相矛盾。
+    - **用户当场裁决三条**（`DEC-…db.49`）：①首页大字入口**保留现状、不加 `.primary`**（理由：`primary` 的语义是"流程里推进那一步"，首页入口是**导航**，语义不同）；②首页「去学习」与「开始学习」**两颗都保留**（位置与时机不同：前者紧跟"今天该复习 N 个词"，后者是永远在的通用入口）；③**提交后上线**。
+    - **登记但未改**：「第 N 档」的代价是"新词学完第一次显示第 1 档、而已完成 0 档"（要改成 N/3 需新裁决，且要连带改诊断页）；`--ink-faint` 2.93:1 仍未修。
+    - **本阶段新增的核验工具**（`tmp/probes/`，名字不含 `test`）：`phase-b-review-check.mjs`（红线机械比对：文案字面量 / `primary` 调用点 / 事件类型 / `web/units/**` / 内联 style / 外部资源）、`phase-b-controller-browser-check.mjs`（真实浏览器 DOM 计数，**专证"非活动视图卸载"**）、`phase-b-mutation-check.mjs`（19 条变异）。三个都由总控**独立**跑过，不采信子代理报告数字。
   - **C 视觉再升级**（待做）：页签过渡、卡片入场、掌握度可视化、骨架加载态
   - **D 传播面**（**建议延后单独裁决**）：落地/引导页。⚠️ 与已定的「自带 Key」形态有真实张力——陌生人点进来第一件事是「你得自己弄个 DeepSeek API Key」，落地页能让它不难堪但改不了这个事实
   - **本次升级最关键的 recon 事实**：所有 mount 类测试用 `btn(root,'精确文案')` **按按钮文案匹配**，全仓 `querySelector` **0 次** ⇒ **DOM 结构可自由重组，但改任何按钮文案会弄红测试**。这条既是自由度也是护栏。
@@ -71,6 +75,8 @@ node scripts/mutation-probe.mjs          # 变异探针（跑前先冻住工作�
 9. **改带过渡的属性后量 computed 值，必须等过渡结束**（`transition-property` 实测为 `background, border-color, color, transform`，`transitionDuration` 0.18s）；量完顺手确认 `transitionProperty` 里有没有你要量的那个属性——本轮就是因为没看这一条，把动画起点当成了终值。
 10. **部署前必须先 commit**（本轮新踩）：`scripts/deploy-pages.mjs` 用 `git subtree split`，它**只切已提交历史**。web/ 改动留在工作区未提交时，它会报「远端已是 …——无需推送（幂等重跑，什么都没发生）」——**看起来像成功，其实一个字节都没发**。正确顺序：`git add -A && git commit` → `node scripts/deploy-pages.mjs`。与红线 7 同一族：**"工具报的成功"不等于"事情发生了"**。
 11. **本机到 github 的边缘路径会不通，别把它误判成部署失败**（本轮实测）：某一时段 `https://github.com` 与 `https://*.github.io` **全部超时**，而 `https://api.github.com`、`https://www.bing.com` 正常、`git ls-remote` 也通。此时**上线核验降级为 git 侧**：用 `git ls-remote` 确认 `origin/gh-pages` 的 SHA、用 `git show origin/gh-pages:<file>` 直接查远端树内容——这两条不依赖 HTTP，足以证明"推送与内容为真"，但**证明不了"Pages 正在服务新版"**（那一截要 HTTP）。核验口径要如实分开写。
+12. **解析 JS 调用点别用朴素正则**（阶段 B 总控复核时新踩）：我写的复核探针用正则解析 `action(...)` 的第 4 个实参，被 `action('拍照', onCapture, storageFull(), true)` 打败——第 3 个实参 `storageFull()` **自带括号与逗号**，正则把它当成了参数结尾 ⇒ 探针报「只有 5 个 primary」，而真实的六屏表是 6 个。**这是探针 bug，不是仓库缺陷**（红线 8 的又一次应验：先问有没有更朴素的解释）。正确做法 = 逐字符扫描、**只按顶层逗号切分**（`tests/styles.test.mjs` 的 `actionCallSites()` 就是范本，照抄它）。同类陷阱：`tmp/` 下自己写的探针也会被自己误信，**探针本身也要有自检**（如"命中必须恰好 1 次"）。
+13. **探针的断言要和方法的作用域对齐**（阶段 B 同轮）：同一个浏览器探针在 `home-due` 档全绿，拿到 `pending` 档却报 5 条 FAIL——因为 `pending` 是**浮在页签之上的抽屉**，此时 `#app` 里根本没有首页那一屏，而我的断言是按主页写的。**判据是"探针用错了档位"，不是"实现坏了"**。写跨档位探针时要么参数化断言，要么先确认该档位下 DOM 的预期形状。顺带：那一跑仍产出了有效结论（抽屉内 `.word-list`/`.word-chip` 均为 0 ⇒ `.site` 作用域对抽屉零影响）。
 
 ## dmcp 段（跨会话续接第一入口）
 
@@ -90,6 +96,14 @@ node scripts/mutation-probe.mjs          # 变异探针（跑前先冻住工作�
   - `VAL-OPI-968b804d-af33-437d-be9b-277ecead51db.8` —— 上述修复的验收（`VR-…db.10` = **PASS**，511/0，六屏各恰一颗 primary、pending/feedback 零点亮）
   - `VAL-OPI-968b804d-af33-437d-be9b-277ecead51db.14` —— **上线核验**（`VR-…db.16` = **PASS**，线上 22 文件 0 不一致，`button.primary` / `word-title` / `overflow-wrap` 实测在线）
   - 本轮代码改动：`scripts/deploy-pages.mjs`（修快进误拦）+ `web/styles.css` / `web/app.mjs`（界面重做，**第一轮 DOM 零改动；第二轮按人裁决加了 `word-title` / `primary` 两个类名**）/ `web/gallery.html` / `web/favicon.svg` / `web/index.html` / `tests/styles.test.mjs`
+- **最新一轮（2026-09-17 续会话，rev 57→72）——「可推广应用形式」四阶段里的 A/ A+/ B**：
+  - `TASK-OPI-968b804d-…db.19` / `…db.23` —— 阶段 A（骨架）与 A+（取词退出路径）任务书；`DEC-…db.25` 定 `FIX_TRAP_NOW`
+  - `VAL-OPI-968b804d-…db.32` → **`VR-…db.36` = PASS** —— **A 的线上核验补跑**（22 文件 `mismatched_files=0`），把 `DEC-…db.27` 里如实登记的"HTTP 层未验"这一截**闭合**
+  - `TASK-OPI-968b804d-…db.38` —— **阶段 B（进度面）任务书**（goal/why/scope/forbidden_changes/acceptance 齐全，委派给新上下文子代理）
+  - `DEC-OPI-968b804d-…db.42` —— 阶段 B 开工口径：复习页 = **清单 + 出口**（`LIST_AND_EXIT_ONLY`，复用同一条识物链路，不动冻结的转移表）
+  - `VAL-OPI-968b804d-…db.45` → **`VR-…db.47` = PASS** —— **阶段 B 验收**（7 项逐条：543/0、文案未删、primary 仍 6、事件类型/units 未动、无内联 style、浏览器证卸载、19 条变异独立复现）
+  - **`DEC-OPI-968b804d-…db.49` —— 阶段 B 收尾三条人裁决**（①首页入口不加 `.primary`；②两颗出口都保留；③提交后上线）
+  - `VAL-OPI-968b804d-…db.32/45` 的**方法**都写进了 `measurements`（口径可复算，不只存结论）
 - **契约载体**（GOAL / IN_SCOPE / OUT_OF_SCOPE / 约束 / CORE_JOURNEY）：`DEC-OPI-ecb3037d-1a56-46d3-b931-4d482dcc668f.19`
 - **文档绑定决策**（三份治理文档的 SHA-256 登记在其 ASSUMPTIONS 断言里；文档变更后 digest 不匹配即漂移证据）：`DEC-OPI-5c134c67-9bdd-46d2-b9bc-7d51bfde8585.5`
   - 覆盖：设计 spec（`docs/superpowers/specs/2026-09-14-…-design.md`）、实施计划（`docs/superpowers/plans/2026-09-14-….md`）、真机清单（`docs/真机验证清单.md`），登记于 2026-09-15

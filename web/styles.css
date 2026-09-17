@@ -706,27 +706,96 @@ textarea:focus {
   text-wrap: pretty;
 }
 
-/* 已学词：一列小圆角块，**用衬线**——它们是"要学的英文词"，
- * 与 `.choices` / `.word-title` / `.pending-item > p:first-child` 同一条排版口径。 */
-.word-list {
-  display: flex;
-  flex-wrap: wrap;
+/* 已学词：**一列**（阶段 B 起一行一个词、带进度），用衬线显示词名——它们是"要学的英文词"，
+ * 与 `.choices` / `.word-title` / `.pending-item > p:first-child` 同一条排版口径。
+ *
+ * ⚠️ 为什么作用域是 `.site > …` 而不是裸 `.word-list`：这一列在首页与复习页上是**清单**
+ * （一行一个词，每行报档位与下次复习时间），所以它走纵向；而 `.site` 是页签视图的容器
+ * （`app.mjs` 的 `bodyEl`）。写死成裸 `.word-list` 也能work，但那等于宣布"任何地方铺
+ * `.word-list` 都是竖排"——而它本来只是一个"一组词"的容器。作用域写在容器上，
+ * 判据是**结构**（谁是这一列的父），不是位次（`:nth-child` 那一类判据本文件踩过四次）。 */
+.site > .word-list {
+  flex-direction: column;
   gap: var(--s-2);
-  margin: 0 0 var(--s-3);
 }
 
-.word-chip {
-  display: inline-flex;
-  align-items: center;
-  min-height: 32px;
-  padding: 0 var(--s-3);
-  border: 1px solid var(--line);
-  border-radius: var(--r-xl);
-  background: var(--surface);
-  color: var(--ink);
+/* 一个词一行：词名 + 「第 N 档 · 下次复习：…」 + （到期时）一个 `该复习` 徽标。
+ * 44px 的最小高度与按钮同一档——不是为了可点（这一行**不是**按钮：复习的出路是
+ * 「去学习」，见 `reviewView` 的裁决口径），而是让"一屏能扫完一列词"这件事在手机上
+ * 真的成立（32px 的行会挤成一团，读起来像一段文字而不是一份清单）。 */
+.site > .word-list > .word-chip {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: var(--s-1) var(--s-2);
+  width: 100%;
+  min-height: 44px;
+  padding: var(--s-2) var(--s-4);
+  border-radius: var(--r);
+}
+
+/* 词名：**衬线**（要学的英文词），字号与 `.choices` 一样比正文大一档。
+ * `flex: 1 1 auto` + `min-width: 0`：词名先占掉能占的宽度，进度那一段被挤到下一行时才换行
+ * （`min-width: 0` 是必需的——flex 项默认 `min-width: auto`，长词会把这一行顶宽）。 */
+.site > .word-list .word-name {
+  flex: 1 1 auto;
+  min-width: 0;
   font-family: var(--font-word);
-  font-size: 1rem;
-  line-height: 1;
+  font-size: 1.125rem;
+  line-height: 1.3;
+  color: var(--ink);
+}
+
+/* 进度那一段：比词名退后一档（它是读数，不是主角），等宽数字位让上下几行对得齐。
+ * 颜色走 `--ink-soft`（全站次级文字的既有令牌，对 `--surface` 实测 5.28:1）。 */
+.site > .word-list .word-meta {
+  flex: 0 1 auto;
+  color: var(--ink-soft);
+  font-family: var(--font-ui);
+  font-size: 0.8125rem;
+  font-variant-numeric: tabular-nums;
+  text-wrap: pretty;
+}
+
+/* 到期的那几个词：整行抬成重音（浅青底 + 重音描边），与上面 `.due` 卡片同一个视觉语汇
+ * ——"需要你处理的一件事"。**它不报数**：个数在卡片那一行总数里，同一屏两个同一来源的数
+ * 迟早会不一致。 */
+.site > .word-list > .word-chip.word-due {
+  border-color: var(--accent);
+  background: var(--accent-wash);
+}
+
+/* ⚠️ 这一族覆写规则（`.word-meta-due` / `.word-meta-gap`）必须写在 `.word-meta` **之后**：
+ * 三者前缀相同、各多一个类，**同权重**（都是 0,3,0）⇒ 靠书写顺序分胜负。
+ * 本文件的惯例是"权重分胜负、与书写顺序无关"（见 `button:disabled` 那一大段），所以这里
+ * **破例**了一次，理由是这三条本来就是同一族的形态变体（基础 / 到期 / 夹缝），
+ * 拆成靠权重取胜反而更难读。破例就要有断言兜着：`tests/styles.test.mjs` 里有一条
+ * 按"规则在文件里的先后"比较这两个选择器，把顺序改反会当场 RED。 */
+.site > .word-list .word-meta-due {
+  color: var(--accent);
+  font-weight: 620;
+}
+
+/* 夹缝记录（`dueAt` 不是有限数、也不是 `null`：既不算已维护，又永远不到期，
+ * `units/scheduler.mjs` 的模块头点名的那种无声状态）：用告警色，但**只说事实**
+ * （"缺下次复习时间"），不编一个档位也不编一个日期。 */
+.site > .word-list .word-meta-gap {
+  color: var(--danger);
+}
+
+/* 「该复习」徽标。它是这一行里唯一"喊一声"的东西，所以给它自己的形态（浅青底 + 重音字），
+ * 而不是再写一遍文字颜色。 */
+.due-badge {
+  align-self: center;
+  padding: 0 var(--s-2);
+  border-radius: var(--r-sm);
+  background: var(--accent-wash);
+  color: var(--accent);
+  font-family: var(--font-ui);
+  font-size: 0.75rem;
+  font-weight: 640;
+  letter-spacing: 0.02em;
+  white-space: nowrap;
 }
 
 /* ═══ 媒体 ═══════════════════════════════════════════════════════════════════ */

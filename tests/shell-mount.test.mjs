@@ -198,15 +198,29 @@ test('首页：词表为空时给**像样的空状态**（不是一片空白）�
   const some = await harness({
     clock: () => 100_000,
     words: {
-      mug: dueWord({ createdAt: 100_000 - 8 * DAY }),
-      kettle: dueWord({ id: 'kettle', word: 'kettle', lastScene: 'kitchen', createdAt: 100_000 - DAY }),
+      // 两个词的到期时刻都在测试时钟的过去，但**深浅不同**（mug 早 1 天多、kettle 只早 1 小时）：
+      // 下面那两条断言要靠这个差别才能证明"每一行的时间取自这一行自己的 dueAt"。
+      mug: dueWord({ createdAt: 100_000 - 8 * DAY, dueAt: 100_000 - 30 * HOUR }),
+      kettle: dueWord({ id: 'kettle', word: 'kettle', lastScene: 'kitchen', createdAt: 100_000 - DAY, dueAt: 100_000 - HOUR }),
     },
   });
   const someText = text(some.root);
   assert.match(someText, /已学 2 个词/, '词数要如实报出来');
   assert.equal(btn(some.root, '开始学习') !== undefined, true, '空状态之外，大字入口当然也还在');
-  const chips = byTag(some.root, 'SPAN').filter((e) => e.className === 'word-chip');
-  assert.deepEqual(chips.map((c) => c.textContent), ['kettle', 'mug'], '最近学的排前面（createdAt 降序）');
+  // ⚠️ 阶段 B 改了这条的读法（旧断言读的是 `.word-chip` 自己的 `textContent`，那时一行只有词名）。
+  // 现在一行是「词名 + 档位 · 下次复习时间」，所以**读词名那一格**（`.word-name`）拿词名，
+  // 顺带把整行的进度也钉住 —— 旧断言只防"词名丢了/顺序乱了"，新断言外加防"进度读数丢了"。
+  const chips = byTag(some.root, 'SPAN').filter((e) => e.className.startsWith('word-chip'));
+  assert.deepEqual(
+    chips.map((c) => byTag(c, 'SPAN').find((e) => e.className === 'word-name')?.textContent),
+    ['kettle', 'mug'],
+    '最近学的排前面（createdAt 降序）',
+  );
+  // 每个词都带进度：档位 + 下次什么时候复习。两个词的 dueAt 都在测试时钟的过去 ⇒ 都显示"到期"，
+  // 且**各自的天数不同**（mug 早 1 天多、kettle 只早 1 小时）——这条同时钉住"每行的时间取自
+  // 这一行自己的 `dueAt`"，而不是把第一行的时间抄给所有行。
+  assert.match(someText, /第 0 档 · 到期 1 天/, 'mug 那一行要给出档位与到期多久（读 dueAt，不拿 stage 推日期）');
+  assert.match(someText, /第 0 档 · 到期 今天/, 'kettle 那一行的时间来自它自己的 dueAt（不到 1 天 → 今天）');
 });
 
 // ─────────────────────────── 复习页（阶段 A 最小可用）───────────────────────────
@@ -249,6 +263,49 @@ test('复习页：显示待补反馈条数与到期词数，出口能回到**既
   assert.equal(currentTab(h.root)?.textContent, '复习', '从抽屉返回要回到打开它的那一页');
 
   // 另一条出口：去学习页
+  await btn(h.root, '去学习').click();
+  assert.ok(btn(h.root, '拍照'), '「去学习」把人送到取词那一屏');
+  assert.equal(currentTab(h.root)?.textContent, '学习');
+});
+
+test('复习页：到期词列成清单——词名 + 第几档 + 上次场景 + 到期多久（阶段 B）', async () => {
+  // 阶段 B 之前这一页**只报数**（"今天该复习 N 个词"）：用户知道有几个词欠着，但不知道
+  // 是哪些、上次在哪儿学的、这笔欠账有多旧——而那三样正是他决定"现在复哪一个"的依据。
+  const h = await harness({
+    clock: () => 100_000,
+    words: {
+      // dueWords 按到期时间从早到晚排：mug 先到期
+      mug: dueWord({ stage: 1, dueAt: 100_000 - 2 * DAY, lastScene: 'kitchen' }),
+      book: dueWord({ id: 'book', word: 'book', stage: 2, dueAt: 100_000 - HOUR, lastScene: 'desk' }),
+    },
+  });
+  await tab(h.root, '复习').click();
+  const shown = text(h.root);
+  // ① 每个到期词都在清单里（不是只报个数）
+  assert.match(shown, /mug/, '到期词要列出来');
+  assert.match(shown, /book/, '两个到期词都要列出来');
+  // ② 三样读数逐条钉住：档位（读原值 stage）、上次场景、到期多久（读 dueAt）
+  assert.match(shown, /第 1 档 · 上次「kitchen」场景 · 到期 2 天/, 'mug 那一行要给出档位 / 上次场景 / 到期多久');
+  assert.match(shown, /第 2 档 · 上次「desk」场景 · 到期 今天/, 'book 那一行的时间与场景都来自它自己的记录');
+  // ③ 顺序 = dueWords 的顺序（最旧的那笔欠账排最前）：旧版只报数，顺序无从谈起
+  const chips = byTag(h.root, 'SPAN').filter((e) => e.className.startsWith('word-chip'));
+  assert.deepEqual(
+    chips.map((c) => byTag(c, 'SPAN').find((e) => e.className === 'word-name')?.textContent),
+    ['mug', 'book'],
+    '清单按到期时间从早到晚（dueWords 已排好序，界面不重排）',
+  );
+});
+
+test('复习页：没有到期词时**不是死路**——给空状态 + 「去学习」这条出口照旧在', async () => {
+  // 阶段 B 之前这一档是一屏"今天没有到期的词"，出口只有一行「去学习」，没有任何说明。
+  // 现在它要同时满足两件事：说清"这一页空着是正常的"，以及**出路仍然在**（不是一屏死路）。
+  const h = await harness();
+  await tab(h.root, '复习').click();
+  const shown = text(h.root);
+  assert.match(shown, /现在没有到期的词/, '空状态要说清这一页为什么是空的');
+  assert.match(shown, /1 天 \/ 3 天 \/ 7 天/, '空状态要交代这个词会按什么节奏回来');
+  assert.ok(btn(h.root, '去学习'), '没有到期词时「去学习」这条出口必须照旧在（它同时是"再学一个"的出口）');
+  // 「去学习」真的能走通（不是一颗挂着不动的按钮）
   await btn(h.root, '去学习').click();
   assert.ok(btn(h.root, '拍照'), '「去学习」把人送到取词那一屏');
   assert.equal(currentTab(h.root)?.textContent, '学习');

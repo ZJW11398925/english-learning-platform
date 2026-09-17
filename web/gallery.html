@@ -34,8 +34,21 @@
 
     用法：`gallery.html?scenario=<名>&key=set|unset`
       home | home-due | review                        ← 阶段 A 新增（首页 / 首页+到期词 / 复习页）
+      home-many | home-maintained | home-gap | home-nokey | review-empty
+                                                     ← 阶段 B 新增（进度面的五档现场）
       ready | ready-due | pending | pending-empty | settings | capturing |
       capturing-manual | word | reading | composing | feedback | done
+
+    ── 阶段 B：首页与复习页是**真进度面**（每个词带档位与下次复习时间）────────────
+    新增的五档都是"只摆数据现场"的档位（不驱动链路），但每一档都对应一条**真实的读数口径**：
+      · `home-many`       —— 词多到要折叠（12 行 + 「另有 N 个词」那一句）
+      · `home-maintained` —— 有已维护的词（跑完 7 天档，不再催）
+      · `home-gap`        —— `dueAt` 缺失 / `NaN` 那种"无声夹缝"记录（既不到期也不算已维护）
+      · `home-nokey`      —— 没配 Key 的空词表（空状态要说"下一步是去设置"）
+      · `review-empty`    —— 有学过但**没有**到期词的复习页（空状态 + 出口，不是死路）
+    假数据的形状逐字对齐 `units/scheduler.mjs`：`stage` 写的是**已排上的那一档序号**
+    （1/2/3；4 是 maintained 哨兵），`dueAt` 写绝对值。**写错形状这一屏会静默变空**
+    ——于是走查台自己先失真。
 
     ── 阶段 A：应用有了底部页签（默认落在「首页」）──────────────────────────────
     取词那一条线性流程搬进了「学习」页签，所以**渲染学习页那一屏的档位都要先导航**
@@ -55,6 +68,8 @@
     const DAY = 86400000;
     const now = Date.now();
     const SESSION = 'gallery-session-1';
+    /** 相对走查台启动时刻的一个时刻：**负偏移 = 过去，正偏移 = 将来**（与生产读数的方向一致）。 */
+    const at = (offsetMs) => now + offsetMs;
 
     /** 需要"走完半条真实链路"的档位（下面按它决定注入哪套假依赖、点哪些按钮）。 */
     const DRIVEN = new Set([
@@ -84,17 +99,74 @@
 
     if (DUE_SCENARIOS.has(scenario)) {
       // 三个词到期，最早的一个在 2 天前——复现提示要显示"上次是在「厨房」场景学的"。
+      // ⚠️ `stage` 写的是 `units/scheduler.mjs` 的**记录侧含义**（已排上的那一档序号）：
+      // mug 是第 1 档、kettle / umbrella 是第 2 档（复现过一次）。
       words.mug = {
-        id: 'mug', label: 'mug', scene: 'kitchen', stage: 0,
-        dueAt: now - 2 * DAY, lastScene: 'kitchen', createdAt: now - 3 * DAY,
+        id: 'mug', word: 'mug', label: 'mug', scene: 'kitchen', stage: 1,
+        dueAt: at(-2 * DAY), lastScene: 'kitchen', createdAt: at(-3 * DAY),
       };
       words.kettle = {
-        id: 'kettle', label: 'kettle', scene: 'kitchen', stage: 1,
-        dueAt: now - 6 * HOUR, lastScene: 'kitchen', createdAt: now - 5 * DAY,
+        id: 'kettle', word: 'kettle', label: 'kettle', scene: 'kitchen', stage: 2,
+        dueAt: at(-6 * HOUR), lastScene: 'kitchen', createdAt: at(-5 * DAY),
       };
       words.umbrella = {
-        id: 'umbrella', label: 'umbrella', scene: 'street', stage: 1,
-        dueAt: now - 1 * HOUR, lastScene: 'street', createdAt: now - 4 * DAY,
+        id: 'umbrella', word: 'umbrella', label: 'umbrella', scene: 'street', stage: 2,
+        dueAt: at(-1 * HOUR), lastScene: 'street', createdAt: at(-4 * DAY),
+      };
+    }
+
+    // ── 阶段 B 新增档位的数据现场（每一档对应一条真实读数口径）─────────────────────
+    if (scenario === 'home-many') {
+      // 15 个词 → 首页只铺 12 行 + 一句「另有 3 个词」（折叠那一档的现场）。
+      // 到期与否与这一档无关（这里故意都排到将来：要看的是"长列表会不会把首屏撑坏"）。
+      for (let i = 1; i <= 15; i += 1) {
+        const id = `w${String(i).padStart(2, '0')}`;
+        words[id] = {
+          id, word: id, label: id, scene: 'kitchen', stage: (i % 2) + 1,
+          dueAt: at(i * DAY), lastScene: i % 3 === 0 ? 'street' : 'kitchen', createdAt: at(-i * DAY),
+        };
+      }
+    }
+
+    if (scenario === 'home-maintained') {
+      // 跑完 7 天档的词：`stage: 4`（哨兵）+ `dueAt: null`（两种写法各一个，界面上是同一句话）。
+      words.done = {
+        id: 'done', word: 'done', label: 'done', stage: 4, dueAt: null,
+        maintained: true, lastScene: 'desk', createdAt: at(-30 * DAY),
+      };
+      words.done2 = {
+        id: 'done2', word: 'done2', label: 'done2', stage: 4, dueAt: null,
+        lastScene: 'kitchen', createdAt: at(-20 * DAY),
+      };
+      // 还有一个正在跑的正常词（进度面必须同时容得下"在跑"与"跑完"两种）
+      words.mug = {
+        id: 'mug', word: 'mug', label: 'mug', stage: 2, dueAt: at(3 * DAY),
+        lastScene: 'kitchen', createdAt: at(-2 * DAY),
+      };
+    }
+
+    if (scenario === 'home-gap') {
+      // `units/scheduler.mjs` 模块头点名的"无声夹缝"：`dueAt` 既非有限数也非 `null`
+      // ⇒ `dueWords` 静默略过它（既不到期、也不算已维护）。界面必须照实说出来。
+      words.missing = {
+        id: 'missing', word: 'missing', label: 'missing', stage: 1,
+        lastScene: 'kitchen', createdAt: at(-DAY),
+      };
+      words.broken = {
+        id: 'broken', word: 'broken', label: 'broken', stage: 2, dueAt: Number.NaN,
+        lastScene: 'desk', createdAt: at(-2 * DAY),
+      };
+    }
+
+    if (scenario === 'review-empty') {
+      // 有学过的词，但**没有**一个到期（复现都排到了将来）⇒ 复习页走空状态那一支。
+      words.mug = {
+        id: 'mug', word: 'mug', label: 'mug', stage: 1, dueAt: at(2 * HOUR),
+        lastScene: 'kitchen', createdAt: at(-DAY),
+      };
+      words.book = {
+        id: 'book', word: 'book', label: 'book', stage: 2, dueAt: at(3 * DAY),
+        lastScene: 'desk', createdAt: at(-2 * DAY),
       };
     }
 
@@ -359,8 +431,11 @@
       // 这一档走**设置页签**那条路（它同时仍能从每屏都挂的「设置（API Key）」入口打开，
       // 两条路进入的是同一屏；页签那条路的「返回」回到进来时待着的那一页）。
       await gotoSettings();
-    } else if (scenario === 'review') {
+    } else if (scenario === 'review' || scenario === 'review-empty') {
       // 复习页是第三枚页签（阶段 A 新增档位）：点真实页签过去，判据是它独有的出口按钮。
+      // ⚠️ 阶段 B 的 `review-empty` 与 `review` **走同一条导航**（同一屏的两个数据现场），
+      // 所以这里一并列出——忘了它的话，下面那条 `settle('去学习')` 会在**首页**上找那个按钮
+      // （首页也有「去学习」，于是这一档会静默地截出一张首页图）。
       tabButton('复习').click();
       await settle('去学习');
     } else if (ON_LEARN.has(scenario)) {
@@ -391,7 +466,20 @@
     const ARRIVED = {
       home: '拍一下，学一个词',              // 阶段 A 新增：首页那一屏（空词表 → 空状态）
       'home-due': '最先到期的是',            // 阶段 A 新增：首页 + 有到期词（到期卡片 + 已学词概览）
-      review: '去学习',                     // 阶段 A 新增：复习页独有的出口按钮（别的屏没有这三个字）
+      // ⚠️ 阶段 B：首页现在**也有**「去学习」（到期那一段的出口），所以复习页的判据不能再
+      // 用那颗按钮——两屏都有它，判据就分不出自己落在哪一屏（实测：那一档会"到达"首页）。
+      // 换成复习页独有的那句正文：「该复习 N 个词」只在复习页的提示里出现（首页说的是
+      // 「今天该复习 N 个词」，多两个字，所以这一串不会误命中首页）。
+      review: '个词。换个地方重新拍一张',
+      // ── 阶段 B 新增的五档（判据全部是**那一档独有的用户可见文字**）──────────────
+      // 取舍：词数是各档之间最容易混的一处（home / home-due 也都有词），所以这里挑的是
+      // **只有这一档才会出现的字**：折叠那一句、已维护那一句、夹缝那一句、未配 Key 那一句、
+      // 复习页空状态那一句。挑"差不多就行"的判据会让截图脚本截到过渡态而自己不知道。
+      'home-many': '另有 3 个词',           // 15 个词 → 铺 12 行 + 这一句
+      'home-maintained': '不再催复习',       // 跑完 7 天档的词
+      'home-gap': '缺下次复习时间',          // `dueAt` 坏了那种夹缝记录（界面照实说）
+      'home-nokey': '还没有配置 API Key',    // 空词表 + 没配 Key → 空状态指向设置
+      'review-empty': '现在没有到期的词',     // 复习页的空状态（有词、没到期）
       ready: '拍一件你身边的东西',
       'ready-due': '该复习了',
       // 判据取抽屉里的**正文**而不是入口按钮上的「待补反馈」（后者在抽屉没打开时也成立，
