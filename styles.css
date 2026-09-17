@@ -820,3 +820,60 @@ video:not([src]) {
     animation-duration: 0.01ms !important;
   }
 }
+
+/* ═══ 对话视图（新形态，Task 11 追加）═════════════════════════════════════════
+ *
+ * 只服务 `web/dialogue.mjs` 产出的那**五个**类名（`dialogue-log` / `say-system` /
+ * `say-learner` / `row` / `primary`）。前三个是本次新增的，后两个复用上面已有的规则
+ * ——**不改任何既有规则**，本段是纯追加（`styles.test.mjs` 有"恰好一处按钮重音"之类的
+ * 计数断言，动既有规则会连带移动那些结论）。
+ *
+ * ── 三条口径（都不是排版偏好）────────────────────────────────────────────────
+ * 1. **颜色只走令牌**。本段一个写死的色值都没有（十六进制 / rgb / 颜色关键字都没有），
+ *    于是深色模式自动跟着 `:root` 的暗色分支走，不需要在这里再声明第二套。
+ *    `tests/dialogue-html.test.mjs` 把这一条钉住了——⚠️ 计划 Task 11 原来的写法
+ *    （`slice(indexOf('.dialogue-log'))`）在整段被删掉时会取到**最后一个字符**，
+ *    于是"没写样式"与"写了样式"在断言下无法区分，那条守卫等于不存在。
+ * 2. **气泡靠对齐区分说话人，不靠颜色深浅**：系统靠左、学习者靠右（`align-self`），
+ *    底色差异只是辅助。理由：色觉差异、深色模式、以及截图压暗之后，位置比色差可靠。
+ * 3. **长串不许撑宽页面**：`overflow-wrap: anywhere` 是硬要求——学习者打的是英文，
+ *    长单词与整段没有空格的粘贴都是常态（口径同 `textarea` 与 `.pending-item` 那两条）。
+ *
+ * ── 有意**不**给输入框与发送键另写规则 ────────────────────────────────────────
+ * 它们拿到的是既有的 `textarea` / `button.primary` / `.row` 三条规则。理由：对话页的
+ * 输入框与造句屏的输入框是同一件事，另写一套等于给同一件事造第二个出处，两处一旦
+ * 不一致就静默漂移（`d.ts` 上没写，但这是本项目反复登记过的那类坏法）。
+ * 代价如实记：**没有为"手机上软键盘弹出时输入框会不会被遮住"写任何东西**——
+ * 那需要真机（本任务未验，已登记在报告里）。
+ */
+.dialogue-log {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-3);
+  margin-bottom: var(--s-5);
+}
+/* 气泡的公共部分：宽度上限 + 圆角 + 断行。两条 `p` 规则用 `p.` 提权重，
+ * 压过上面通用的 `p { margin: 0 0 var(--s-3) }`（通用规则不能动）。 */
+p.say-system,
+p.say-learner {
+  max-width: 85%;
+  margin: 0;
+  padding: var(--s-3) var(--s-4);
+  border-radius: var(--r-lg);
+  line-height: 1.6;
+  overflow-wrap: anywhere;
+}
+/* 系统（教学）一方：靠左，沉底灰底——它是"台子"，不是主角 */
+p.say-system {
+  align-self: flex-start;
+  background: var(--surface-sunken);
+  color: var(--ink);
+}
+/* 学习者一方：靠右，极淡的重音底——**这是他自己说的东西**，是这一页真正的主角。
+ * 用 `--accent-wash` 而不是实心重音：实心块会把"学习者说的"变成视线焦点上的命令，
+ * 而它其实只是记录。（实心重音在本项目里只有一个含义：主操作。） */
+p.say-learner {
+  align-self: flex-end;
+  background: var(--accent-wash);
+  color: var(--ink);
+}

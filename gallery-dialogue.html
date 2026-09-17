@@ -1,0 +1,144 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <title>界面走查台 · 英语学习 说说你的生活</title>
+  <!-- 内联 data URI 图标：只为消掉浏览器那次 favicon 404（零外部资源，与 gallery.html 同口径） -->
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Crect width='16' height='16' rx='4' fill='%230f766e'/%3E%3C/svg%3E">
+  <link rel="stylesheet" href="./styles.css">
+</head>
+<body class="gallery">
+  <!--
+    ⚠️ 这是**开发用的界面走查台**，不是产品页面（产品页是 dialogue.html）。
+
+    做法照 `gallery.html`：**注入假依赖 + 把生产那份模块挂起来**（`web/dialogue.mjs`），
+    所以走查台上看到的界面与线上的界面**不会漂移**——不是另画一套假界面。
+
+    ── 与 `gallery.html` 的关键区别（两份走查台别互相串）────────────────────────
+    `gallery.html` 走查的是**旧形态**（index.html / app.mjs）。本文件一个字都不碰它，
+    也不 import 它的任何东西。两份并存，各自演各自的形态。
+
+    ── 结构上不可能花钱（三层，缺一层都不够）──────────────────────────────────
+    1. **假 generate**：下面那个 `generate` 是 async 函数字面量，回**本地写死的字符串**
+       ——不看 prompt、不读任何 Key、不发任何请求；
+    2. **不 import `units/deepseek.mjs`**：整个文件里没有端点常量（`api.deepseek.com`
+       一次都不出现）。于是就算有人手滑把 `generate` 接了真调用，也没有 URL 可接；
+    3. **假 storage 内存 Map**：`elp.apiKey` 是一串明显的假 Key；
+       学习者画象写在内存里，**连真 localStorage 都不碰**。
+    ⚠️ 这三层是**结构**保证，不是自觉。计划 Task 11 原来那条 `assert.match(gallery, /generate/)`
+    **空实现也过**（只要文件里出现过这个词），所以 `tests/dialogue-html.test.mjs` 已改成
+    真判据：`generate` 必须绑到函数字面量、`mountDialogue` 的实参里必须真的有 `generate:`。
+
+    ── 数据：与生产**逐字同一条**装载链（这才叫走查台）──────────────────────────
+    `fetch('./data/words.json')` + `JSON.parse` + `units/teach/knowledge.mjs` 的
+    `validateWords` / `validateScenes`，连失败文案的形状都一样。
+    ⇒ 生产那份装配代码在这里被**真跑一遍**，而不是"读一遍，看着对"。
+    坏数据 / 404 这两个档由**探针**（Playwright 的 route 拦截）现场喂进来，
+    本文件不为此写第二套 fetch——**"数据坏了会怎样"必须是同一段代码的答案**。
+
+    ── 就位判据（截图脚本按它等，**不按固定时长**）──────────────────────────────
+      `document.body.dataset.galleryReady === 'true'` —— 装载 + 校验 + 挂载全部落地；
+      `document.body.dataset.galleryError` —— 落在"打开失败"那一屏时，值是那句人话；
+      `document.body.dataset.galleryArrived` —— 正常挂起来时是 `dialogue`。
+  -->
+  <main id="app"></main>
+  <script type="module">
+    import { mountDialogue } from './dialogue.mjs';
+    import { createKeyring } from './units/keyring.mjs';
+    import { createProfile } from './units/teach/profile.mjs';
+    import { validateWords, validateScenes } from './units/teach/knowledge.mjs';
+
+    const app = document.getElementById('app');
+
+    // ── 假存储：内存 Map（连真 localStorage 都不碰）────────────────────────────
+    // 键名与生产一致（`elp.apiKey` / `elp.teach.profile`），所以"从存储里读画象"这条
+    // 生产路径在这里也真的被走一遍。⚠️ 这里连**读**都只读内存，所以就算真放一把 Key，
+    // 也没有任何东西会把它发出去。
+    const store = new Map([
+      ['elp.apiKey', 'sk-gallery-dialogue-not-a-real-key-000000'],
+    ]);
+    const fakeStorage = {
+      getItem: (k) => (store.has(k) ? store.get(k) : null),
+      setItem: (k, v) => { store.set(k, String(v)); },
+      removeItem: (k) => { store.delete(k); },
+    };
+
+    // ── 假 generate：async 函数字面量，回本地字符串 ─────────────────────────────
+    // 按段数换一句，好让"发第二句还能拿到回复"这件事在界面上一眼看得出来。
+    // ⚠️ 它**必须回非空字符串**：回 null / '' / 非字符串的话 `runTurn` 会走
+    // "失败尝试 → 降级"那条路（那是生产行为，不是缺陷），走查台上就永远看不到
+    // 一条真的教学回复——那叫走查台自己失真。
+    let turns = 0;
+    const FAKE_REPLIES = [
+      '你用中文说就行，我听着——今天有什么事想说？',
+      '嗯，那你试着用一句英文说说看，想到多少说多少。',
+    ];
+    const generate = async () => {
+      const reply = FAKE_REPLIES[turns % FAKE_REPLIES.length];
+      turns += 1;
+      return reply;
+    };
+
+    // ── 装载（与生产逐字同一条代码路径）────────────────────────────────────────
+    /** @throws {Error} 取不到 / 不是 JSON / 不是数组 / 过不了 knowledge.mjs 的校验 */
+    async function loadChecked(path, label, validate) {
+      let res;
+      try {
+        res = await fetch(path);
+      } catch (err) {
+        throw new Error(`${label}没能取到（${path}）：${String(err?.message ?? err)}`);
+      }
+      if (!res.ok) throw new Error(`${label}没能取到（${path} 返回 ${res.status}）`);
+      let json;
+      try {
+        json = JSON.parse(await res.text());
+      } catch (err) {
+        throw new Error(`${label}不是合法的 JSON（${path}）：${String(err?.message ?? err)}`);
+      }
+      if (!Array.isArray(json)) throw new Error(`${label}的形状不对（${path} 的顶层不是数组）`);
+      const errors = validate(json);
+      if (errors.length > 0) {
+        const head = errors.slice(0, 3).join('；');
+        throw new Error(`${label}没通过格式校验（共 ${errors.length} 处）：${head}${errors.length > 3 ? ' …' : ''}`);
+      }
+      return json;
+    }
+
+    /** 一句看得懂的话落到页面上（失败路径的唯一出口：**绝不允许白屏或静默**）。 */
+    const showMessage = (text) => {
+      app.textContent = '';
+      app.classList.add('error');
+      app.append(text);
+      document.body.dataset.galleryError = text;
+    };
+
+    try {
+      const [words, scenes] = await Promise.all([
+        loadChecked('./data/words.json', '重点词库', validateWords),
+        loadChecked('./data/scenes.json', '情境库', validateScenes),
+      ]);
+
+      // 走查台也把 keyring / profile 真的建起来（生产路径真跑一遍）——两者都只碰内存 Map。
+      // 建了却不用它们发请求：假 generate 是独立的函数字面量，且本文件没有端点常量。
+      const keyring = createKeyring({ storage: fakeStorage });
+      const profile = createProfile({ storage: fakeStorage });
+      void [keyring.hasKey(), profile.band()];
+
+      await mountDialogue(app, {
+        doc: document,
+        storage: fakeStorage,
+        generate,
+        candidates: words.map((w) => ({ kind: 'word', ref: w.headword, meaning: w.meaning })),
+        scenes,
+      });
+      document.body.dataset.galleryArrived = 'dialogue';
+    } catch (err) {
+      showMessage(`页面没能打开：${String(err?.message ?? err)}`);
+      console.error('走查台装载失败：', err);
+    }
+
+    document.body.dataset.galleryReady = 'true';
+  </script>
+</body>
+</html>

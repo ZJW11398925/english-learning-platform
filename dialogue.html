@@ -1,0 +1,208 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <title>英语学习 · 说说你的生活</title>
+  <meta name="description" content="把你今天的事说成英文，系统按回忆叙述 / 角色扮演 / 情境猜词 / 扩展与升格四种方法陪你一层层说好。">
+  <meta name="theme-color" content="#faf8f5" media="(prefers-color-scheme: light)">
+  <meta name="theme-color" content="#161513" media="(prefers-color-scheme: dark)">
+  <meta name="mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <!-- 内联 data URI 图标：只为消掉浏览器那次 favicon 404（零外部资源，与 index.html 的口径一致） -->
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Crect width='16' height='16' rx='4' fill='%230f766e'/%3E%3C/svg%3E">
+  <link rel="stylesheet" href="./styles.css">
+</head>
+<body>
+  <!--
+    新形态的**入口页**（Task 11）。形态：手机浏览器打开一个公开网址，把今天的事说成英文。
+
+    ── 与旧形态（index.html + app.mjs）的关系 ─────────────────────────────────────
+    `index.html` **一行未改**：换首页是 Task 12 之后**单独铸的任务**（用户已裁决），
+    本任务只新增两个页面。两者并存，互不引用。
+
+    ── 页面自己只做四件事（其余的都在别处，这里不抄第二份）────────────────────────
+    1. **拿 Key**（`units/keyring.mjs`）——没有 Key 就给一屏看得懂的话 + 一个能存 Key 的入口；
+    2. **载数据**（`fetch('./data/*.json')` + `JSON.parse`）——**不用 `import ... with { type: 'json' }`**：
+       那个语法要 Chrome 123+ / Firefox 127+ / Safari 17.5+（均 2024 年），更旧的浏览器在
+       **解析期**就抛 SyntaxError ⇒ 整个 module 一行都不执行 = 白屏。而本产品的形态就是
+       "手机浏览器打开一个公开网址"。⚠️ **这类失败测试结构上抓不到**（HTML 当文本读），
+       所以另有真实浏览器验收（`tmp/probes/task-11-browser-check.mjs`）兜着。
+    3. **校验数据**（`units/teach/knowledge.mjs` 的 `validateWords` / `validateScenes`）——
+       **唯一个格式出处**，页面里不许再写一份字段检查。数据坏了就在这里停住，
+       在页面上说一句中文人话（**绝不许白屏，也绝不静默什么都不发生**）。
+    4. **挂对话**（`dialogue.mjs` 的 `mountDialogue`）——教学判断全在那个模块与
+       `units/teach/**` 的纯模块里，本页一行都不做教学决策。
+
+    ── 唯一碰网络的地方 ─────────────────────────────────────────────────────────
+    下面那个 `generate` 是**全页唯一**的 `fetch`。Key 来自学习者自己的 localStorage
+    （`units/keyring.mjs` 是唯一存取口），只随请求头发给 `api.deepseek.com`。
+    它返回 `extractContent(await res.json())`——形状异常时那是 **`null`**，
+    **原样**交给 `runTurn`（它把坏返回值当失败尝试，走重试/降档/模板话术）。
+    ⚠️ **不许 `String(...)` 它**：`String(null)` = `'null'`，那会被当成一条教学回复印到界面上
+    （本仓追过整轮的 [阻塞] 级缺陷）。
+  -->
+  <main id="app"></main>
+  <script type="module">
+    import { mountDialogue } from './dialogue.mjs';
+    import { createKeyring } from './units/keyring.mjs';
+    import { DEEPSEEK_API_BASE, DEEPSEEK_MODEL, chatUrl, extractContent } from './units/deepseek.mjs';
+    import { validateWords, validateScenes } from './units/teach/knowledge.mjs';
+
+    const keyring = createKeyring();     // 存储的解析由 keyring 自己负责（隐私模式下抛错也归它处理）
+    const app = document.getElementById('app');
+
+    // ═══ 1. 没有 Key 这一屏（第四节 4）══════════════════════════════════════════
+    // 为什么需要自己带 Key / 去哪拿 / 只存在本机 / 清浏览器数据会连它一起删——
+    // 四件事缺一件，学习者就会卡在"为什么用不了"上。参考 app.mjs 的 NO_KEY_GUIDANCE，
+    // 但**不复制它的 DOM 契约**（那是旧形态的屏幕结构，本页只有一屏）。
+    // ⚠️ 「设置（API Key）」这五个字必须**看得见**：只在 aria-label 里出现等于"读屏有、眼睛没有"，
+    // 而这条要求（第四节 4）的原话是"**要点到设置入口**"——看不见的东西点不到。
+    // 本页只有一屏，所以那句话就是这一屏本身（旧形态是另一个页签，措辞沿用它的用户语汇）。
+    const SETTINGS_HINT = '设置（API Key）';
+    const WHY_KEY = '还没有配置 API Key：模型调用要从你的手机浏览器直接发给 DeepSeek（按用量计费），'
+      + '所以需要你自己的一把 Key。到 platform.deepseek.com 注册后，在 API Keys 页面创建一串'
+      + '以 sk- 开头的密钥，粘贴到下面保存。';
+    const WHERE_KEY = '这把 Key 只保存在这台手机的浏览器里（本机存储），不会上传给任何人；'
+      + '它只随你的对话请求发给模型服务。清掉浏览器数据会连同 Key 一起删掉。'
+      + `这就是「${SETTINGS_HINT}」——保存之后会直接回到对话。`;
+
+    /** 一句看得懂的话落到页面上（**失败路径的唯一出口**：绝不允许"什么都不发生"就是出口）。 */
+    const showMessage = (text) => {
+      app.textContent = '';
+      app.classList.add('error');
+      app.append(text);
+    };
+    /** 把界面清回"可以重新画"的状态（#app 上的 error 类是失败态的标记，画正常内容前必须摘掉）。 */
+    const resetApp = () => { app.textContent = ''; app.classList.remove('error'); };
+
+    /** Key 设置入口：为什么/去哪拿/只存本机 三句话 + 一个真的能存 Key 的表单。 */
+    const showSettings = (alert) => {
+      resetApp();
+      app.append(Object.assign(document.createElement('p'), { className: 'muted', textContent: WHY_KEY }));
+      app.append(Object.assign(document.createElement('p'), { className: 'muted', textContent: WHERE_KEY }));
+      if (alert !== undefined) app.append(Object.assign(document.createElement('p'), { className: 'error', textContent: alert }));
+      const input = document.createElement('input');
+      input.type = 'password';
+      input.placeholder = 'sk-...';
+      input.autocomplete = 'off';
+      input.setAttribute('aria-label', SETTINGS_HINT);   // 输入框没有可见 <label>，读屏要有个名字
+      const save = document.createElement('button');
+      save.className = 'primary';
+      save.textContent = '保存 Key';
+      save.addEventListener('click', () => {
+        const r = keyring.saveKey(input.value);
+        if (!r.ok) {
+          // 存不了/形状不对：把 keyring 给的那句话原样显示（**不在本页另写一套校验文案**）
+          if (alert === undefined) { showSettings(r.error); return; }
+          app.append(Object.assign(document.createElement('p'), { className: 'error', textContent: r.error }));
+          return;
+        }
+        location.reload();   // 配好了：重来一遍，这次直接进对话（状态只有"有没有 Key"两种）
+      });
+      const row = document.createElement('div');
+      row.className = 'row';
+      row.append(input, save);
+      app.append(row);
+      input.focus();
+    };
+
+    // ═══ 2. 载数据 + 校验（第四节 2 与 5）═══════════════════════════════════════
+    /**
+     * 载入并校验一份数据。**任何一步出问题都抛**，由下面统一落成页面上的一句话——
+     * 绝不"返回一个空数组继续跑"：那会让界面看起来正常、实际什么都没装载（最坏的一种静默）。
+     * @throws {Error} 取不到 / 不是 JSON / 不是数组 / 过不了 knowledge.mjs 的校验
+     */
+    async function loadChecked(path, label, validate) {
+      let res;
+      try {
+        res = await fetch(path);
+      } catch (err) {
+        throw new Error(`${label}没能取到（${path}）：${String(err?.message ?? err)}`);
+      }
+      if (!res.ok) throw new Error(`${label}没能取到（${path} 返回 ${res.status}）`);
+      let json;
+      try {
+        json = JSON.parse(await res.text());
+      } catch (err) {
+        throw new Error(`${label}不是合法的 JSON（${path}）：${String(err?.message ?? err)}`);
+      }
+      if (!Array.isArray(json)) throw new Error(`${label}的形状不对（${path} 的顶层不是数组）`);
+      const errors = validate(json);
+      if (errors.length > 0) {
+        const head = errors.slice(0, 3).join('；');
+        throw new Error(`${label}没通过格式校验（共 ${errors.length} 处）：${head}${errors.length > 3 ? ' …' : ''}`);
+      }
+      return json;
+    }
+
+    /** 词库 → 候选焦点（形状取自 `units/teach/focus.mjs` 的 candidates：`{ kind, ref, meaning }`）。 */
+    const toCandidates = (words) => words.map((w) => ({ kind: 'word', ref: w.headword, meaning: w.meaning }));
+
+    // ═══ 3. 唯一的网络出口（第四节 5）══════════════════════════════════════════
+    /**
+     * 真的模型调用。**只有这一处碰网络。**
+     *
+     * 返回 `extractContent(...)` 的结果，**不做任何加工**：它是字符串，或信封不合法时的 `null`。
+     * `null` 不是一个 bug，是一个**必须被如实传下去的信号**——`runTurn` 会把它当失败尝试
+     * （重试 → 降档 → 模板话术），所以学习者在界面看到的永远是一句真话，而不是 `"null"`。
+     *
+     * @throws {Error} 没有 Key（视图在发送前已拦一次，这里是第二道；消息里带 NO_KEY 便于机读）
+     * @throws {Error} HTTP 非 2xx（带上状态码——401 与 429 的处置不同，人一眼要能分清）
+     */
+    async function generate({ prompt }) {
+      const key = keyring.loadKey();
+      if (!key) throw new Error('NO_KEY：还没有配置 API Key，先到「设置（API Key）」粘贴保存。');
+      const res = await fetch(chatUrl(DEEPSEEK_API_BASE), {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', authorization: `Bearer ${key}` },
+        body: JSON.stringify({
+          model: DEEPSEEK_MODEL,
+          messages: [{ role: 'user', content: prompt }],
+          temperature: 0.7,
+        }),
+      });
+      if (!res.ok) throw new Error(`模型服务返回 ${res.status}（Key 无效或额度用尽时也会是这样）`);
+      // ⚠️ 不许写成 `return String(extractContent(...))`——理由见本函数与文件头的说明
+      return extractContent(await res.json());
+    }
+
+    // ═══ 4. 开屏 ═══════════════════════════════════════════════════════════════
+    try {
+      if (!keyring.hasKey()) {
+        showSettings();
+      } else {
+        const [words, scenes] = await Promise.all([
+          loadChecked('./data/words.json', '重点词库', validateWords),
+          loadChecked('./data/scenes.json', '情境库', validateScenes),
+        ]);
+        resetApp();
+        // `candidates` / `scenes` 都是数组；**为空时不在本页另写降级**——
+        // `dialogue.mjs` 自己有条路（挑不出焦点时发一句"换一件今天的事说说？"）。
+        await mountDialogue(app, {
+          doc: document,
+          storage: localStorage,
+          generate,
+          candidates: toCandidates(words),
+          scenes,
+        });
+        // 发送前的第二道守卫（第四节 4：**不是"提交后静默失败"**）。
+        // 为什么要有它：`generate` 抛 NO_KEY 时 `runTurn` 会把它当一次失败尝试，两次之后
+        // 落到模板话术"说说看，今天有什么想讲的？"——那句话**看不出 Key 没了**，
+        // 学习者会以为系统坏了。这里当面说清楚，并把人送到能解决问题的那一屏。
+        const box = app.querySelector('textarea');
+        const sendBtn = app.querySelector('button.primary');
+        if (box !== null && sendBtn !== null) {
+          sendBtn.addEventListener('click', () => {
+            if (!keyring.hasKey() && box.value.trim() !== '') showSettings('先配置 API Key 再开始：点下面的「设置（API Key）」粘贴保存（platform.deepseek.com 可以创建）。');
+          });
+        }
+      }
+    } catch (err) {
+      // 数据缺失 / 损坏 / 挂载失败：**在页面上说一句看得懂的话**（白屏与静默都在这里被挡住）
+      showMessage(`页面没能打开：${String(err?.message ?? err)}`);
+      console.error('dialogue 打开失败：', err);
+    }
+  </script>
+</body>
+</html>
