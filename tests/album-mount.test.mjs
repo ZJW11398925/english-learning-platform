@@ -21,7 +21,7 @@ import assert from 'node:assert/strict';
 
 import {
   harness, withFetch, okFetch, realRecognizeWithFallback,
-  fakeAlbum, disposeAllHarnesses,
+  fakeAlbum, gotoLearn, disposeAllHarnesses,
 } from './helpers/mount-harness.mjs';
 import { createKeyring } from '../web/units/keyring.mjs';
 import { fakeLocalStorage } from './helpers/fakes.mjs';
@@ -61,6 +61,7 @@ const makeFile = (size = 40_000) => new File([new Uint8Array(size)], 'photo.jpg'
 
 test('ready 屏：「拍照」与「从相册选图」并列，文件选择器限定 image/*', async () => {
   const h = await harness();
+  await gotoLearn(h.root);   // 阶段 A：相册入口长在**学习页的 ready 屏**上（默认页是首页）
   assert.ok(btn(h.root, '拍照'), '拍照按钮保留');
   assert.ok(btn(h.root, '从相册选图'), '并列的相册入口');
   const input = albumInputOf(h);
@@ -71,6 +72,7 @@ test('ready 屏：「拍照」与「从相册选图」并列，文件选择器�
 test('无 Key 选图：不开解码、不落事件、留在 ready，错误区指到设置（与「拍照」同一条守卫）', async () => {
   const { module: albumModule, calls } = fakeAlbum();
   const h = await harness({ album: albumModule, keyring: emptyKeyring() });
+  await gotoLearn(h.root);
   await pickImage(h, makeFile());
 
   assert.equal(h.machine.state, 'ready');
@@ -82,6 +84,7 @@ test('无 Key 选图：不开解码、不落事件、留在 ready，错误区指
 test('存储写满：选图不派发新任务（与「拍照」同一条闸）', async () => {
   const { module: albumModule, calls } = fakeAlbum();
   const h = await harness({ album: albumModule });
+  await gotoLearn(h.root);
   h.store.markStoreFull();                    // 直接置起"写满"现场（幂等，不抛）
   await pickImage(h, makeFile());
 
@@ -92,6 +95,7 @@ test('存储写满：选图不派发新任务（与「拍照」同一条闸）',
 test('用户取消选择（没有文件）→ 什么都不发生：不解码、不落事件、无报错', async () => {
   const { module: albumModule, calls } = fakeAlbum();
   const h = await harness({ album: albumModule });
+  await gotoLearn(h.root);
   await pickImageNoFile(h);
 
   assert.equal(calls.length, 0);
@@ -108,6 +112,7 @@ test('选图（质检过 + 识物命中）→ 进 word、落 recognize_ok（带 
     recognize: realRecognizeWithFallback,
     album: albumModule,
   });
+  await gotoLearn(h.root);
   await pickImage(h, makeFile());
 
   assert.equal(h.machine.state, 'word');
@@ -142,6 +147,7 @@ test('相册选图与拍照在同一条轮次序列里：拒帧第 1 轮 → 选
     album: albumModule,
   });
 
+  await gotoLearn(h.root);
   await pickImage(h, makeFile());              // 第 1 轮：太暗 → 退回 ready
   assert.equal(h.machine.state, 'ready');
   await pickImage(h, makeFile());              // 第 2 轮：通过 → word
@@ -169,6 +175,7 @@ test('相册图太暗 → 真质检退回：落 frame_rejected（带 reason）�
     recognize: realRecognizeWithFallback,
     album: albumModule,
   });
+  await gotoLearn(h.root);
   await pickImage(h, makeFile());
 
   assert.equal(h.machine.state, 'ready', '被拒的帧要退回重拍（与快门同一格语义）');
@@ -188,6 +195,7 @@ test('相册图太糊 → 落 too_blurry（理由不许串档）', async () => {
     recognize: realRecognizeWithFallback,
     album: albumModule,
   });
+  await gotoLearn(h.root);
   await pickImage(h, makeFile());
   assert.equal(h.machine.state, 'ready');
   assert.deepEqual(h.events.filter((e) => e.type === 'frame_rejected')[0].payload, { reason: 'too_blurry' });
@@ -202,6 +210,7 @@ test('拒帧退回后「拍照」与「从相册选图」都还在（两条输�
     recognize: realRecognizeWithFallback,
     album: albumModule,
   });
+  await gotoLearn(h.root);
   await pickImage(h, makeFile());
   assert.equal(h.machine.state, 'ready');
   assert.ok(btn(h.root, '拍照'), '退回后相机入口照旧');
@@ -215,6 +224,7 @@ test('图片打不开（IMAGE_NOT_READABLE）→ 如实提示、不抛、不落�
   const boom = Object.assign(new Error('这张图片打不开（解码失败）：broken'), { code: 'IMAGE_NOT_READABLE' });
   const { module: albumModule, calls } = fakeAlbum({ error: boom });
   const h = await harness({ album: albumModule });
+  await gotoLearn(h.root);
   await pickImage(h, makeFile());
 
   assert.equal(h.machine.state, 'ready', '这不是一次识物，状态机不许动');
@@ -228,6 +238,7 @@ test('解码单元抛出的其它错误（未知故障）照旧响亮重抛，�
   const boom = new Error('编码失败：toBlob 收到 null');
   const { module: albumModule } = fakeAlbum({ error: boom });
   const h = await harness({ album: albumModule });
+  await gotoLearn(h.root);
   await assert.rejects(() => pickImage(h, makeFile()), /编码失败/);
   assert.equal(h.events.length, 0, '没有 frame_rejected、没有任何事件——未知错误不许被记成用户情形');
 });

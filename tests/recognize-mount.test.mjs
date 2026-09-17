@@ -16,7 +16,7 @@ import assert from 'node:assert/strict';
 
 import {
   harness, withFetch, openCameraAndShoot, makeBlob, okFetch, failingFetch, realRecognizeWithFallback,
-  okRecognize, disposeAllHarnesses,
+  okRecognize, gotoLearn, disposeAllHarnesses,
 } from './helpers/mount-harness.mjs';
 
 // 每条用例之后拆掉 mount 挂的定时器（待补反馈的自动重试会挂 10 秒的 setTimeout，
@@ -35,8 +35,12 @@ const OK = { brightness: 128, laplacianVar: 200 };
 /**
  * 连按 `times` 次快门：被拦下的帧会退回 ready，所以每次都要重新点一次「拍照」。
  * 这也是"一次快门 = 一轮"的前提在**代码路径**上的体现（每次快门恰好取一帧）。
+ *
+ * ⚠️ 阶段 A：先切到「学习」页（应用默认落在首页，而「拍照」只长在学习页上，见 `gotoLearn`）。
+ * 这一句只换视图、不动状态机，所以"按了 N 次快门 = N 轮"这条断言的口径一字未变。
  */
 async function pressShutter(h, times) {
+  await gotoLearn(h.root);
   for (let i = 0; i < times; i += 1) {
     if (h.machine.state === 'ready') await btn(h.root, '拍照').click();
     await btn(h.root, '快门').click();
@@ -230,6 +234,7 @@ test('界面上说"重拍不消耗识物调用"，且这句与 attempts=0 的口
     recognize: realRecognizeWithFallback,
     grabResult: { blob: makeBlob(9), stats: { brightness: 10, laplacianVar: 10 } },
   });
+  await gotoLearn(h.root);
   assert.match(text(h.root), /不消耗识物调用/, '首屏承诺');
   await openCameraAndShoot(h);
   assert.equal(calls, 0, '承诺必须兑现：被拒的帧一次调用都不发');

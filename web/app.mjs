@@ -171,6 +171,23 @@ function sceneOf(word, candidates) {
 const FALLBACK_SCENE_WORDS = Object.freeze(['mug', 'cup', 'book', 'pen', 'bottle']);
 
 /**
+ * 首页「已学词概览」最多铺几个词。再多就只是一面墙——剩下的用一句话交代（见 `homeView`）。
+ * 12 是"一屏能扫完"的量级（390×844 下三行左右），不是从别处抄来的阈值。
+ */
+const LEARNED_PREVIEW_MAX = 12;
+
+/**
+ * id 的**码位序**比较（同刻兜底用）。
+ * 与 `units/scheduler.mjs` 里那个同名函数同一个理由：不用 `localeCompare`
+ * ——那取决于 ICU 与运行环境语言，会让"同样一份词表"在不同机器上排出不同顺序。
+ */
+function compareIds(x, y) {
+  const a = String(x);
+  const b = String(y);
+  return a < b ? -1 : a > b ? 1 : 0;
+}
+
+/**
  * 把应用挂到一个容器元素上（浏览器路径）。
  *
  * @param {HTMLElement} root 容器（`web/index.html` 里的 `#app`）
@@ -265,11 +282,47 @@ export async function mount(root, deps = {}) {
   // **队列本身没有任何状态**：它是 `store.readEvents()` 每次现算出来的视图
   // （`units/pending.mjs` 的文件头写了"权威是事件流"这条裁决）。
   // 这里的三个变量全是**界面与调度**的现场，不是真相：
-  let viewingPending = false;      // 正在看"待补反馈"那一屏
-  let viewingSettings = false;     // 正在看"设置（API Key）"那一屏（12A：Key 的填/清/看状态）
+  let viewingPending = false;      // 正在看"待补反馈"那一屏（抽屉：任一屏都能开）
   let retryPendingId = null;       // 这一次提交是不是在补某一条待补条目（补交时的 pendingId）
   let retrying = null;             // `{ pendingId, busy }`：手动补交进行中的界面状态
   let retryTimer = null;           // 自动重试的定时器句柄（同一时刻只挂一个）
+
+  // ── 阶段 A：应用骨架（应用栏 + 底部页签）──────────────────────────────────────
+  //
+  // `tab` 是**唯一**决定 `bodyEl` 里渲染哪一个视图的变量。四条口径（每条都有一条红线垫底）：
+  //   1. **默认落在「首页」**（人裁决；接受为此改 mount 类测试——它们原先一挂载就找「拍照」，
+  //      现在要先导航到「学习」页）；
+  //   2. **只渲染当前视图**：切页签时非活动视图由 `bodyEl.replaceChildren` **从 DOM 卸载**，
+  //      **不许**用 `display:none` 藏——藏着会让 `btn(root,'拍照')` 在首页也找得到，
+  //      测试会以最令人困惑的方式变红，而且屏幕阅读器会把四份内容都念出来；
+  //   3. 页签与状态机**正交**：切页签只换视图，不动 `machine`（学到第几步就停在第几步）。
+  //      **唯一例外是 `capturing` 这一格**（下面的 ⚠️）；
+  //   4. 「设置」既是**页签**也是**抽屉**：入口按钮在任何一屏都能开它（12A 的底线：
+  //      Key 可能在任何一屏失效），点了就切到这个页签；`tabBeforeSettings` 记住来处，
+  //      好让那两屏的「返回」回到用户原来待着的那一页。
+  //
+  // ⚠️ `capturing` 是"这一屏**在显示**才成立"的一格，因此它随屏走（人裁决，2026-09-17）：
+  // 取景屏一旦不再显示（切走页签、或待补抽屉把它顶掉），这一次取词就**结束**——
+  // 关掉摄像头流，并由 `abandonCapture()` 把状态送回 `ready`。三条理由：
+  //   · 硬件跟着屏走：灯一直亮着既费电又吓人，而人已经不在取景那一屏了；
+  //   · 回到学习页必须是**可操作**的一屏：留在 `capturing` 会让用户面对一块死画面
+  //     （`videoEl` 还在、流已经关了），全屏只有「快门」与「再拍一张」；
+  //   · 所以取词屏自己也得有出路：「返回」= 用户主动放弃这次取词（`cancelCapture`，
+  //     **不落任何事件**，见 `abandonCapture` 的说明）。
+  // 上一轮的口径（"切走页签不关流"，理由是当时 `capturing` 没有回 `ready` 的用户入口）
+  // 就此作废——出路补上之后，"留在 capturing"不再是唯一不让用户走进死路的办法。
+  // 代价如实登记：切走页签会**丢掉**这一次取景（回来后要重新点「拍照」），
+  // 而不是"回来时画面原样还在"。
+  let tab = 'home';
+  let tabBeforeSettings = 'home';
+
+  /** 四枚页签。**顺序就是界面上的顺序**，`label` 是用户可见的页签名（文案改动会弄红测试）。 */
+  const TABS = Object.freeze([
+    { id: 'home', label: '首页' },
+    { id: 'learn', label: '学习' },
+    { id: 'review', label: '复习' },
+    { id: 'settings', label: '设置' },
+  ]);
 
   /**
    * 拆掉这一份应用挂的定时器（**给测试用**：`node --test` 会等事件循环空掉才退出，
@@ -347,7 +400,14 @@ export async function mount(root, deps = {}) {
   const errorEl = doc.createElement('p');
   errorEl.className = 'error';
   const bodyEl = doc.createElement('div');
-  root.replaceChildren(statusEl, errorEl, bodyEl);
+  // 应用栏与底部页签是**壳**：它们不属于任何一个视图，所以放在 `bodyEl` **之外**
+  // ——`bodyEl.replaceChildren(...)` 换视图时不会连它们一起换掉（页签上的高亮由 `renderNav` 现算）。
+  const appBarEl = doc.createElement('header');
+  appBarEl.className = 'appbar';
+  const navEl = doc.createElement('nav');
+  navEl.className = 'tabbar';
+  navEl.setAttribute('aria-label', '主导航');
+  root.replaceChildren(appBarEl, statusEl, errorEl, bodyEl, navEl);
 
   const setError = (msg) => { errorEl.textContent = msg; };
 
@@ -616,11 +676,107 @@ export async function mount(root, deps = {}) {
     render(machine.state);
   }
 
+  // ── 壳：应用栏 + 底部页签 + 只渲染当前视图 ────────────────────────────────────
+
+  /**
+   * 应用栏（顶部）：品牌 + 一行状态。**壳的一部分**，每一屏都在。
+   *
+   * 状态行取"今天到期几个词"：这是全应用最该被一眼看见的一个数，而且**只有一处起源**
+   * （`dueList()` = `store.readWords()` + `units/scheduler.mjs` 的 `dueWords`）。
+   * 没有到期词时如实说「今天没有到期的词」，**不写"0 个词"**——0 在那个位置不是"极好"，
+   * 而是一句"今天没有待办"，两者在中文里不是同一句话（红线 4：没给的数不发明）。
+   */
+  function renderAppBar() {
+    const due = dueList();
+    const brand = doc.createElement('span');
+    brand.className = 'brand';
+    brand.textContent = '场景取词';
+    const state = doc.createElement('span');
+    state.className = 'appstatus';
+    state.textContent = due.length > 0 ? `今天该复习 ${due.length} 个词` : '今天没有到期的词';
+    appBarEl.replaceChildren(brand, state);
+  }
+
+  /**
+   * 底部页签（四枚）。三条口径：
+   *   · 点击**只切 `tab`**（`goTab`），不动状态机、不动任何学习现场；
+   *   · 当前页签用 `aria-current="page"` 标出来：它既是给屏幕阅读器的，也是样式侧**唯一**
+   *     的高亮判据——不靠 `:nth-child` 之类的位次判据（本仓在这一类判据上踩过四次，
+   *     `tests/styles.test.mjs` 明文禁止回流）；
+   *   · 触控目标 ≥44px 由基础 `button` 规则保证，`.tabbar > button` 里再显式重申一次
+   *     （页签是这一屏最常点的东西，不能靠继承来的保证）。
+   */
+  function renderNav() {
+    navEl.replaceChildren(...TABS.map((t) => {
+      const b = doc.createElement('button');
+      b.textContent = t.label;
+      if (t.id === tab) b.setAttribute('aria-current', 'page');
+      b.addEventListener('click', () => goTab(t.id));
+      return b;
+    }));
+  }
+
+  /**
+   * 切页签（**唯一**的页签入口：底部四枚按钮与首页的「开始学习」都走这里）。
+   * 它基本不做别的：不动状态机、不清任何现场——**唯独离开取景那一格是例外**
+   * （`abandonCapture`：取景屏不再显示 = 这次取词结束，见 `tab` 声明处的 ⚠️）。
+   */
+  function goTab(id) {
+    if (id === tab) return;
+    if (id === 'settings') tabBeforeSettings = tab;
+    const leavingLearn = tab === 'learn' && id !== 'learn';
+    tab = id;
+    // 待补抽屉被页签顶掉：页签是更强的导航意图（抽屉是"浮在某一屏上"的东西，
+    // 页签是"换一屏"，两者同时成立会让用户看不出自己在哪儿）。
+    viewingPending = false;
+    // 离开学习页时若正在取词，这一次取词就此结束（关流 + 回 ready）。
+    // 它自己会触发一次渲染（`send` → `onEnter` → `render`），下面那次是幂等的兜底。
+    if (leavingLearn) abandonCapture();
+    render(machine.state);
+  }
+
+  /**
+   * 放弃这一次取词：回 `ready` 并（经由 `render`）关掉摄像头流。**不落任何事件。**
+   *
+   * 红线（任务书）：这条路不是拒帧、不是识别失败，只是"我不想拍了"——事件流里
+   * 一条都不许增。所以这里**只**发 `cancelCapture`（表里那条什么都不记的转移），
+   * 绝不借 `frameBad` 收尾：那会给 `frameRejections` 加一、往 `lastRejectReason` 写一个
+   * 用户根本没遇到的失败理由，还会落一条 `frame_rejected`。
+   *
+   * 手选现场（`awaitingManualPick`）**必须在这里清掉**：它属于"这一次取词"。
+   * 不清的话，用户放弃后重点「拍照」会直接看到上一次的手选词包——一屏他并没有请求的东西。
+   *
+   * @returns {boolean} 真的放弃了一次取词（当前不在 `capturing` 时返回 `false`，什么都不做）
+   */
+  function abandonCapture() {
+    if (machine.state !== 'capturing') return false;
+    awaitingManualPick = false;
+    return machine.send('cancelCapture');
+  }
+
+  /**
+   * 取景这一屏**是不是当前这一屏**（判据是**位置**，不含状态机）：落在学习页、
+   * 且没有被待补抽屉盖住。
+   *
+   * 两处共用同一个判据，为的是不让"什么算取景屏在显示"有两个定义（那正是本仓反复
+   * 踩过的"两处机制产出同一结果"）：`render()` 用它决定关不关流，`onCapture()` 用它
+   * 决定相机开好之后要不要进 `capturing`。状态那一半由调用方自己拼——`render` 手上是
+   * 将要渲染的 `state`，`onCapture` 手上是"即将进入 capturing"这件事本身。
+   */
+  function captureScreenVisible() {
+    return tab === 'learn' && !viewingPending;
+  }
+
   // ── 页面装配 ────────────────────────────────────────────────────────────────
   function render(state) {
-    // 离开拍摄态就关掉摄像头（灯一直亮着既费电又吓人）
-    if (state !== 'capturing') stopStream();
+    // 摄像头只在**取景这一屏真的在显示**时才有理由开着（判据是这一屏，不是状态机）。
+    // 正常路径由 `abandonCapture()` 先把状态送回 ready 再渲染，这条是**防御性**的兜底：
+    // 相机是异步开出来的（`onCapture` 里有 await），万一"开流"与"切屏"交错，这里仍能收口
+    // ——留一路没人看的流就是灯一直亮着、电一直耗着。
+    if (!(state === 'capturing' && captureScreenVisible())) stopStream();
     statusEl.textContent = `状态：${state}`;
+    renderAppBar();
+    renderNav();
     bodyEl.replaceChildren(...viewFor(state));
   }
 
@@ -636,8 +792,8 @@ export async function mount(root, deps = {}) {
       return;
     }
     setError('');
-    viewingSettings = false;
-    render(machine.state);
+    // 存好了就回到**来处**（与「返回」同一条路）：留在设置屏会让用户以为还没存上。
+    goTab(tabBeforeSettings);
   }
 
   /** 清除已存的 Key（幂等）：留在设置屏，让"未配置"的状态当场可见。 */
@@ -647,7 +803,14 @@ export async function mount(root, deps = {}) {
     render(machine.state);
   }
 
-  function viewFor(state) {
+  /**
+   * 一屏的**元素工厂**：`view` / `row` / `title` / `hint` / `action` 都绑在这一屏上。
+   *
+   * 为什么抽成工厂（阶段 A 的"壳 + 视图"拆分）：拆分前这五样是 `viewFor` 的局部变量，
+   * 于是"渲染一屏"与"渲染哪一屏"是同一段代码；拆开后每个视图各拿一份，**谁也不共享 `row`**
+   * （共享的话两个视图会往同一行动作里塞按钮，而按钮的颗数是动作行布局与断言口径的依据）。
+   */
+  function screen() {
     const view = [];
     const row = doc.createElement('div');
     row.className = 'row';
@@ -679,35 +842,51 @@ export async function mount(root, deps = {}) {
       row.append(b);
       return b;
     };
+    return { view, row, title, hint, action };
+  }
 
-    // ── 设置（API Key）那一屏（12A）──────────────────────────────────────────────
-    //
-    // 与待补反馈同一个抽屉模式：任一屏都能打开（ready/word 屏必须可达是底线，入口按钮
-    // 每屏都挂着）。**不回显明文**：已配置只说"已配置"，输入框永远从空白开始。
-    if (viewingSettings) {
-      view.push(title('设置 · API Key'));
-      view.push(hint(hasKey()
-        ? '已配置：Key 已保存在这台手机的浏览器里（出于安全，这里不显示它的内容）。'
-        : '未配置：还没有保存任何 Key。'));
-      view.push(hint(SETTINGS_HINT));
-      const keyInput = doc.createElement('input');
-      keyInput.type = 'password';
-      keyInput.placeholder = '粘贴以 sk- 开头的 API Key';
-      keyInput.value = '';                      // 永远从空白开始：配置状态靠上面那句话，不靠回显
-      view.push(keyInput);
-      action('保存', () => onSaveSettings(keyInput), false, true);
-      action('清除 Key', onClearKey);
-      action(`返回（${machine?.state ?? ''}）`, () => { viewingSettings = false; render(machine.state); });
-      view.push(row);
-      return view;
-    }
+  // ── 视图：每个页签一个函数，壳只调其中一个 ────────────────────────────────────
 
-    // ── 待补反馈那一屏（Task 9B §5.1）────────────────────────────────────────────
-    //
-    // **它先于状态机那一屏**：待补界面是"任一屏都能打开的一个抽屉"，不是某个状态的分支。
-    // （首版把它嵌在 `case 'ready'` 里，于是从反馈屏点入口时什么都不会发生——
-    //  入口按钮每屏都挂着，界面却只在首页认它。`tests/pending-mount.test.mjs` 抓到了这一处。）
-    if (viewingPending) {
+  /**
+   * 「设置 · API Key」那一屏（12A）。
+   *
+   * 与待补反馈同一个抽屉模式：任一屏都能打开（ready/word 屏必须可达是底线，入口按钮
+   * 每屏都挂着）。**不回显明文**：已配置只说"已配置"，输入框永远从空白开始。
+   * 阶段 A 起它同时是**底部第三枚页签**指向的那一屏：`tabBeforeSettings` 记住来处，
+   * 「返回」与保存成功都回到那一页（文案仍是 `返回（<状态机状态>）`——它是既有文案，不改）。
+   */
+  function settingsView() {
+    const s = screen();
+    s.view.push(s.title('设置 · API Key'));
+    s.view.push(s.hint(hasKey()
+      ? '已配置：Key 已保存在这台手机的浏览器里（出于安全，这里不显示它的内容）。'
+      : '未配置：还没有保存任何 Key。'));
+    s.view.push(s.hint(SETTINGS_HINT));
+    const keyInput = doc.createElement('input');
+    keyInput.type = 'password';
+    keyInput.placeholder = '粘贴以 sk- 开头的 API Key';
+    keyInput.value = '';                      // 永远从空白开始：配置状态靠上面那句话，不靠回显
+    s.view.push(keyInput);
+    s.action('保存', () => onSaveSettings(keyInput), false, true);
+    s.action('清除 Key', onClearKey);
+    s.action(`返回（${machine?.state ?? ''}）`, () => goTab(tabBeforeSettings));
+    s.view.push(s.row);
+    return s.view;
+  }
+
+  /**
+   * 「待补反馈」抽屉（Task 9B §5.1）——不是页签，是**浮在当前页之上的一个抽屉**。
+   */
+  function pendingView() {
+      // ── 待补反馈那一屏（Task 9B §5.1）────────────────────────────────────────────
+      //
+      // **它先于页签**：待补界面是"任一屏都能打开的一个抽屉"，不是某个页签或状态的分支。
+      // （首版把它嵌在 `case 'ready'` 里，于是从反馈屏点入口时什么都不会发生——
+      //  入口按钮每屏都挂着，界面却只在首页认它。`tests/pending-mount.test.mjs` 抓到了这一处。）
+      // 阶段 A：底部页签**在抽屉打开时仍然渲染**（它是壳），点任一页签都会把抽屉关掉
+      // （见 `goTab`）——否则用户会看到"页签亮着，内容却是另一屏"。
+      const s = screen();
+      const { view, row, title, hint, action } = s;
       view.push(title(PENDING_ENTRY_LABEL));
       view.push(hint('这些句子当时没拿到判定。原句一直留在这儿，一条都不会丢；'
         + '下面可以手动再交一次（自动重试也会照常进行）。'));
@@ -748,7 +927,128 @@ export async function mount(root, deps = {}) {
       if (storageFull()) view.push(hint(STORAGE_FULL_NOTICE));
       view.push(row);
       return view;
+  }
+
+  /**
+   * 「首页」（阶段 A 的默认页）：一句话说明 + 今天该复习 N 个词 + 「开始学习」入口 + 已学词概览。
+   *
+   * 四条口径：
+   *   · **到期词数只有一处起源**：`dueList()`（`store.readWords()` + `units/scheduler.mjs`
+   *     的 `dueWords`）。**没有到期词就不显示那一行**——不写"今天该复习 0 个词"：
+   *     0 在那个位置不是一条信息，而是一句噪音（红线 4：没给的数不发明）。
+   *   · 已学词数同样来自 `store.readWords()`；词表为空时给**像样的空状态**
+   *     （说清"下一步做什么"），不是一片空白。
+   *   · 「开始学习」是这一屏的**大字入口**，但它**不是** `.primary`：重音只给"学习流程里
+   *     那一颗推进按钮"是 `DEC-OPI-968b804d-…db.6` 的人裁决（六屏表由
+   *     `tests/styles.test.mjs` 逐文案钉住、并断言"全站被标成主操作的调用点恰好那六颗"）。
+   *     首页入口靠**尺寸**（56px / 1.125rem）与位置区分。要把它改成实心重音，需要一条新裁决
+   *     + 把那六屏表扩成七屏——那是裁决不是实现细节，本阶段不擅自改。
+   *   · 到期那一行与**应用栏的状态行**同时出现是有意的：应用栏是"全局一行状态"（每个页签都在），
+   *     首页这一条是**可行动的那一条**（带上"上次在哪儿学的、要换个地方重拍"）。
+   */
+  function homeView() {
+    const s = screen();
+    s.view.push(s.title('拍一下，学一个词'));
+    s.view.push(s.hint('对准身边的一件东西拍一张，认出一个词，再用它写一句你自己的话——'
+      + '这是这个应用的完整闭环。'));
+    const due = dueList();
+    if (due.length > 0) {
+      const dueEl = doc.createElement('p');
+      dueEl.className = 'due';
+      // 场景提示是**建议**不是判定（系统不知道用户此刻站在哪儿），与 `ready` 屏同一口径。
+      dueEl.textContent = `今天该复习 ${due.length} 个词`;
+      s.view.push(dueEl);
+      s.view.push(s.hint(`最先到期的是「${due[0].lastScene ?? '未知'}」场景学的那个词——`
+        + `复习走的是同一条识物链路：换个地方重新拍一张（例如 ${RECURRENCE_SCENE_EXAMPLES}）。`));
     }
+    const startBtn = s.action('开始学习', () => goTab('learn'));
+    startBtn.className = 'start';     // 大字入口：靠尺寸区分（不是 `.primary`，理由见函数头）
+    s.view.push(s.row);
+
+    // ── 已学词概览（词数 + 一列词）──────────────────────────────────────────────
+    const words = Object.values(store.readWords()).sort((a, b) => (
+      ((b?.createdAt ?? 0) - (a?.createdAt ?? 0)) || compareIds(a?.id, b?.id)
+    ));
+    const total = words.length;
+    const head = doc.createElement('p');
+    head.className = 'stat';
+    head.textContent = total === 0 ? '还没有学过的词' : `已学 ${total} 个词`;
+    s.view.push(head);
+    if (total === 0) {
+      // 空状态：告诉用户下一步做什么，而不是留白（"没有内容"与"没有设计"是两件事）。
+      const empty = doc.createElement('p');
+      empty.className = 'empty';
+      empty.textContent = '学过的词会在这里排成一列，并标出下次什么时候该复习。'
+        + '点上面的「开始学习」，拍下身边的一件东西，第一个词就会出现。';
+      s.view.push(empty);
+    } else {
+      const shown = words.slice(0, LEARNED_PREVIEW_MAX);
+      const list = doc.createElement('div');
+      list.className = 'word-list';
+      for (const w of shown) {
+        const chip = doc.createElement('span');
+        chip.className = 'word-chip';
+        // 词名取 `word`（本应用写记录时用的键），退回 `label`（诊断/导出里的老键）再退回 id。
+        chip.textContent = String(w?.word ?? w?.label ?? w?.id ?? '');
+        list.append(chip);
+      }
+      s.view.push(list);
+      if (total > shown.length) {
+        s.view.push(s.hint(`另有 ${total - shown.length} 个词，学过的词都会留在记录里。`));
+      }
+    }
+    return appendTail(s);
+  }
+
+  /**
+   * 「复习」页（阶段 A：**只做最小可用**，完整版是阶段 B）。
+   *
+   * 两条口径：
+   *   · 数据只有两个来源，**一个新数都不造**——`dueList()`（到期词数）与 `openPending()`
+   *     （还没补上的待补反馈条数，来自事件流派生的队列，`units/pending.mjs`）；
+   *   · 出口两条：进**既有**待补抽屉（真有欠账时）、去学习页（复现走的是同一条识物链路）。
+   */
+  function reviewView() {
+    const s = screen();
+    s.view.push(s.title('复习'));
+    const due = dueList();
+    s.view.push(s.hint(due.length > 0
+      ? `今天该复习 ${due.length} 个词。换个地方重新拍一张、取到那个词，就算一次复现。`
+      : '今天没有到期的词。学完一个词之后，它会在 1 天 / 3 天 / 7 天后各催你一次。'));
+    const open = openPending().length;
+    s.view.push(s.hint(open > 0
+      ? `待补反馈 ${open} 条：那几句当时没拿到判定，原句一直留着，一条都不会丢。`
+      : '待补反馈 0 条：没有欠着的判定。'));
+    if (open > 0) s.action('去补交这几句', () => { abandonCapture(); viewingPending = true; render(machine.state); });
+    s.action('去学习', () => goTab('learn'));
+    s.view.push(s.row);
+    return appendTail(s);
+  }
+
+  /**
+   * 壳：**只渲染当前视图**。四个页签各一个视图函数，待补抽屉浮在页签之上。
+   *
+   * ⚠️ 这个分派是"非活动视图必须卸载"的**唯一落点**：`render()` 每次都
+   * `bodyEl.replaceChildren(...viewFor(state))`，没被选中的视图连元素都不会被创建
+   * ——所以首页那一屏里搜不到「拍照」（有浏览器实测为证，见阶段 A 报告）。
+   */
+  function viewFor(state) {
+    if (viewingPending) return pendingView();
+    if (tab === 'settings') return settingsView();
+    if (tab === 'review') return reviewView();
+    if (tab === 'home') return homeView();
+    return learnView(state);
+  }
+
+  /**
+   * 「学习」页：既有那条线性流程（`ready → capturing → word → reading → composing → feedback
+   * → done`）**原样**搬进来——这一段是阶段 A 唯一的"搬家"，行为一字不改（连注释一起搬）。
+   *
+   * `ready` 取词屏就是这一页的一个视图：它是页签的**内容**，不再是"应用的第一屏"。
+   */
+  function learnView(state) {
+    const s = screen();
+    const { view, row, title, hint, action } = s;
 
     switch (state) {
       case 'ready': {
@@ -816,12 +1116,19 @@ export async function mount(root, deps = {}) {
           // 用 onShutter 而不是 onCapture：相机还开着、画面还在，"再拍一张"就该真的再拍，
           // 而不是让用户回到 ready 再点一次拍照（那多两步点击，也更容易被误当成"卡住了"）。
           action('再拍一张', onShutter);
+          // 第三条出口（2026-09-17 人裁决）：**不想拍了**。「再拍一张」与候选词都要求
+          // "继续这次取词"，没有它，这一屏对"我就想退出去"的用户是一条死路——
+          // `capturing` 之前没有任何回 ready 的用户入口（`frameBad` 要真拍一张且会落拒帧事件）。
+          // 文案「返回」与待补抽屉、设置屏既有的一致；**不落任何事件**（见 abandonCapture）。
+          action('返回', abandonCapture);
           break;
         }
         view.push(title('对准物体，按「快门」'));
         if (videoEl !== null) view.push(videoEl);
         view.push(hint('这一帧先在端侧做质检（太暗 / 太糊当场退回），再送去识物。'));
         action('快门', onShutter, false, true);
+        // 同上：取词屏的退出路径（不落事件）。它**不是**主操作——「快门」才是这一屏要走的路。
+        action('返回', abandonCapture);
         break;
       }
       case 'word': {
@@ -941,6 +1248,17 @@ export async function mount(root, deps = {}) {
     }
 
     view.push(row);
+    return appendTail(s);
+  }
+
+  /**
+   * 「壳尾」：待补入口 + 诊断页链接 + 设置入口。**三样都每屏都挂着**（理由见下面各处原文）。
+   *
+   * 它跟着**页签视图**走（首页 / 学习 / 复习），不跟着设置屏与待补抽屉走——那两屏各自有
+   * 「返回」，在里面再挂一个"打开自己"的入口只会绕圈（与阶段 A 拆分前的行为**逐字一致**）。
+   */
+  function appendTail(s) {
+    const { view } = s;
     // 「待补反馈」入口（§5.1 明文要求的那一屏）：与下面那个诊断页链接一样**每屏都挂着**。
     // 为什么不能只挂在首页：自动重试失败可能发生在任意一屏（用户正在造句、正在看反馈），
     // 只在首页给入口的话，用户当场没有任何地方能知道"刚才那次补交又没成"。
@@ -950,7 +1268,14 @@ export async function mount(root, deps = {}) {
     if (!viewingPending && (openCount > 0 || archivedTotal > 0)) {
       const pendingBtn = doc.createElement('button');
       pendingBtn.textContent = `${PENDING_ENTRY_LABEL}（${openCount} 条）`;
-      pendingBtn.addEventListener('click', () => { viewingPending = true; render(machine.state); });
+      pendingBtn.addEventListener('click', () => {
+        // 抽屉会把**当前这一屏**顶掉（`viewFor` 先看 `viewingPending`）：若此刻在取词，
+        // 这一次取词就此结束——否则相机在整个待补界面期间都开着，从抽屉返回时还会
+        // 撞上一块死画面。它自己会触发一次渲染，下面那次是幂等的兜底。
+        abandonCapture();
+        viewingPending = true;
+        render(machine.state);
+      });
       const pendingRow = doc.createElement('p');
       pendingRow.className = 'row';
       pendingRow.append(pendingBtn);
@@ -967,9 +1292,10 @@ export async function mount(root, deps = {}) {
     view.push(diag);
     // 12A：设置（API Key）入口——ready/word 屏必须可达，索性与诊断页同款每屏都挂着
     //（Key 可能在任何一屏用完/失效，用户不该为了换 Key 而丢掉当前进度）。
+    // 阶段 A 起它同时会切到「设置」页签（`goTab`）；返回时回到点它时所在的那一页。
     const settingsBtn = doc.createElement('button');
     settingsBtn.textContent = '设置（API Key）';
-    settingsBtn.addEventListener('click', () => { viewingSettings = true; render(machine.state); });
+    settingsBtn.addEventListener('click', () => goTab('settings'));
     const settingsRow = doc.createElement('p');
     settingsRow.className = 'row';
     settingsRow.append(settingsBtn);
@@ -1019,14 +1345,14 @@ export async function mount(root, deps = {}) {
       return;
     }
     // 上一轮的取词结果作废（否则"重拍一张"之后界面还挂着旧的手选词包）。
-    // 这里只清 `lastPick` / `shownWord`——**手选态 `awaitingManualPick` 不在这一处清**，
-    // 它在 `onShutter` 开头清（见那里的 `awaitingManualPick = false`）。这样写是够的：
-    // 回到 `ready` 的唯一路径是 `capturing --frameBad--> ready`，而 `frameBad` 只在
-    // `onShutter` 里发出——也就是说"能再点拍照"这件事本身，已经蕴含着手选态刚被清过
-    // （state-machine.mjs 的 TRANSITIONS：`word` 没有回 `ready` 的转移）。
+    // 这里只清 `lastPick` / `shownWord`——**手选态 `awaitingManualPick` 不在这一处清**：
+    // 进 `capturing` 的两条路各自已经把它清过了（快门在 `onShutter` 开头清、相册在
+    // `onAlbumPicked` 里清），而回 `ready` 的两条转移（`frameBad` 与 `cancelCapture`）
+    // 也各有清它的地方（前者必经 `onShutter`，后者在 `abandonCapture` 里）——
+    // 也就是说，进到这一行时它**必然已经是 false**（能再点「拍照」= 手选现场刚被清过）。
     // 复审 Minor 4 记的就是这一点：原先这句注释写着"手选态也作废"，而代码并没有在这里清它；
-    // 选的是**把注释改成实情**（而不是加一行清 `awaitingManualPick`）——那样加出来的行在
-    // 当前状态机下永远不可达，没有任何用例能钉住它，属于注释之外又添一处不可验证的声明。
+    // 选的是**把注释改成实情**（而不是加一行清 `awaitingManualPick`）——那样加出来的行
+    // 会与上面那几处重复（同一件事多个出处，谁也不可单独验证）。
     lastPick = null;
     shownWord = null;
     // 上一次取词若是一次复现，它的说明不该留到这一轮（`recurrenceNote` 属于"某一次取词"）。
@@ -1066,6 +1392,17 @@ export async function mount(root, deps = {}) {
       return;
     } finally {
       opening = false;
+    }
+    // 相机是**异步**开出来的（上面那个 await），这中间用户可能已经切走了页签、或打开了
+    // 待补抽屉——那样取景屏根本不会显示，这一路流就没人看得见。此时**不进 capturing**：
+    //   · 关掉刚开的那路流——不关就是泄漏（灯亮着、电耗着，而且再没有任何人会去 stop 它）；
+    //   · 状态留在 `ready`，用户回到学习页看到的是**可取词**的那一屏，不是一块死画面。
+    // 这一条与 `goTab` 里的 `abandonCapture()` 合起来保证：`capturing` 只在取景屏真的
+    // 在显示时才成立（"人已经走开了，相机还在开"这条竞态就是这么堵上的）。
+    if (!captureScreenVisible()) {
+      stopStream();
+      render(machine.state);
+      return;
     }
     machine.send('capture');
   }

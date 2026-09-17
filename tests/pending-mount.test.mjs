@@ -246,7 +246,7 @@ test('自动重试用完仍失败 → 出现「待补反馈」入口（**数的�
   assert.ok(btn(h.root, '手动补交'), '要有手动补交的按钮');
 });
 
-test('**首页**（ready）同样有入口：重开页面的人第一眼就能看到还欠着什么', async (t) => {
+test('**首页**（默认页）同样有入口：重开页面的人第一眼就能看到还欠着什么', async (t) => {
   const timer = fakeTimers();
   const h = withCleanup(t, await harness({
     clock: timer.clock,
@@ -254,7 +254,10 @@ test('**首页**（ready）同样有入口：重开页面的人第一眼就能�
     clearTimeoutImpl: timer.clearTimeoutImpl,
     priorEvents: [priorPending()],
   }));
-  assert.equal(h.machine.state, 'ready', '这条用例要看的就是首页');
+  assert.equal(h.machine.state, 'ready', '这条用例要看的就是首页（状态机仍停在 ready）');
+  // 阶段 A：应用默认落在**首页**，所以"第一眼"真的就是这一屏——入口必须在这儿找得到。
+  // 唯一的改动是最后那条出口断言：首页上没有「拍照」（取词入口搬进了学习页），
+  // 换成首页自己的大字入口。断言语义不变（"返回之后这一屏照旧可用"），换的是"这一屏是哪一屏"。
   const entry = btn(h.root, '待补反馈');
   assert.ok(entry, '首页要有「待补反馈」入口');
   assert.match(entry.textContent, /（1 条）/);
@@ -262,7 +265,7 @@ test('**首页**（ready）同样有入口：重开页面的人第一眼就能�
   assert.match(text(h.root), /She go to school yesterday\./);
   assert.ok(btn(h.root, '返回'), '待补那一屏要有回原来那一屏的路');
   await btn(h.root, '返回').click();
-  assert.ok(btn(h.root, '拍照'), '返回之后首页照旧可用');
+  assert.ok(btn(h.root, '开始学习'), '返回之后首页照旧可用（首页的大字入口还在）');
 });
 
 test('入口长出来的时候队列里已经有内容了（点进去就是那句话，不是空列表）', async (t) => {

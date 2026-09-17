@@ -16,7 +16,7 @@ import assert from 'node:assert/strict';
 
 import {
   harness, openCameraAndShoot, reachComposing, submitCompose, settleFeedback,
-  manualRecognize, okRecognize, fakeTts,
+  manualRecognize, okRecognize, fakeTts, gotoLearn,
   disposeAllHarnesses,
 } from './helpers/mount-harness.mjs';
 
@@ -159,6 +159,8 @@ test('词的 id 是词本身的小写形式：识物给出 `Mug` 也归并到 `m
 
 test('有到期词时 ready 屏显示复现提示：上次的场景 + 换一个地方重拍', async () => {
   const h = await harness({ clock: () => T0, words: { mug: dueWord() } });
+  // 阶段 A：复现提示长在**学习页的 ready 屏**上（应用默认落在首页）⇒ 先导航再断言。
+  await gotoLearn(h.root);
   const shown = text(h.root);
   assert.match(shown, /该复习了/, '要到期的词必须让用户看见');
   assert.match(shown, /kitchen/, '要说清这个词上次是在哪个场景学的');
@@ -168,6 +170,9 @@ test('有到期词时 ready 屏显示复现提示：上次的场景 + 换一个�
 
 test('到期提示的文案里不许有 markdown 强调符（hint() 走 textContent，星号会一字不差显示）', async () => {
   const h = await harness({ clock: () => T0, words: { mug: dueWord() } });
+  // ⚠️ 阶段 A 必须**先导航到学习页**：留在首页的话 `doesNotMatch` 会平凡成立
+  // （首页根本没有复现提示那一句），这条断言就成了一条永远不会红的断言。
+  await gotoLearn(h.root);
   assert.doesNotMatch(text(h.root), /\*\*/, '这一屏与手选那一屏（brief §3.5 项 0）一起被这条钉住');
 });
 
@@ -176,6 +181,7 @@ test('多个词同时到期：一次只提示一个，并说明还有几个在�
     clock: () => T0,
     words: { mug: dueWord(), book: dueWord({ id: 'book', word: 'book', lastScene: 'desk', dueAt: T0 - 500 }) },
   });
+  await gotoLearn(h.root);
   const shown = text(h.root);
   // 先到期的是 book（dueAt 更早，dueWords 已排好序）
   assert.match(shown, /desk/, '提示的是最先到期的那个词上次的场景');
@@ -184,12 +190,14 @@ test('多个词同时到期：一次只提示一个，并说明还有几个在�
 
 test('没有到期词时不提示；已维护（maintained）的词也不提示', async () => {
   const future = await harness({ clock: () => T0, words: { mug: dueWord({ dueAt: T0 + 1 }) } });
+  await gotoLearn(future.root);   // 阶段 A：不导航的话下面两条 doesNotMatch 会平凡成立
   assert.doesNotMatch(text(future.root), /该复习了/, '没到期就不许催（催了就是编一个待办）');
 
   const kept = await harness({
     clock: () => T0,
     words: { mug: dueWord({ stage: 4, dueAt: null, maintained: true }) },
   });
+  await gotoLearn(kept.root);
   assert.doesNotMatch(text(kept.root), /该复习了/, '7 天档跑完转 maintained：不再主动推送（§4.5）');
 });
 
@@ -427,6 +435,7 @@ test('跟读被跳过这件事随 compose_submitted 一起落盘（不另开事�
 
 test('到期提示基于词表算：入队后重新进入 ready 时，到期的词会被提示（不靠内存标志）', async () => {
   const h = await harness({ clock: () => T0 });
+  await gotoLearn(h.root);   // 阶段 A：断言的是 ready 屏 ⇒ 先导航（否则整条用例平凡通过）
   assert.doesNotMatch(text(h.root), /该复习了/, '一开始词表是空的');
   // 学完一个词（入队），再把时间推到 1 天后 → 刷新页面（重新 mount）时应该提示它
   const compose = fakeCompose(okResult());
@@ -436,6 +445,7 @@ test('到期提示基于词表算：入队后重新进入 ready 时，到期的�
   const words = h2.store.words;
 
   const later = await harness({ clock: () => T0 + INTERVALS_DAYS[0] * DAY + 1, words });
+  await gotoLearn(later.root);
   assert.match(text(later.root), /该复习了/, '过了 1 天，这个词到期了');
   assert.match(text(later.root), /kitchen/);
   assert.equal(byTag(later.root, 'button').length > 0, true);

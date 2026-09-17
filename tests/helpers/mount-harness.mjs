@@ -223,7 +223,9 @@ export function defaultKeyring() {
  *   - `setTimeoutImpl` / `clearTimeoutImpl`：定时器注入点（待补重试的 10s/30s/90s 靠它驱动，
  *     否则测试要么睡 130 秒、要么把设定值改小成另一个值——两者都会让这条链失去证据价值）
  *   - `clock` / `onCompose` / `cameraOptions`：透传给 mount()
- * @returns {Promise<object>} `{ root, calls, stream, store, mounted, events, sessionId, machine }`
+ * @returns {Promise<object>} `{ root, calls, stream, streams, store, mounted, events, sessionId, machine }`
+ *   - `stream`：**第一条**流（第一次成功开相机时接上的那条；既有断言读的就是它）
+ *   - `streams`：这个实例成功开出来的全部流（"多开了一路没人关的流"数它）
  */
 export async function harness({
   grabResult = { blob: makeBlob(9), stats: OK_STATS },
@@ -247,20 +249,33 @@ export async function harness({
 } = {}) {
   const root = makeEl('div');
   const calls = { openCamera: [], grabFrame: [], recognize: [] };
-  const stream = {
+  /** 造一条假的 MediaStream（形状照 `camera.openCamera` 的返回值：`getTracks()` + 逐轨 `stop()`）。 */
+  const makeStream = () => ({
     tracks: [{ stopped: false, stop() { this.stopped = true; } },
       { stopped: false, stop() { this.stopped = true; } }],
     getTracks() { return this.tracks; },
-  };
+  });
+  /** 第一条流**预建**：`h.stream` 恒指它（既有断言的语义逐字不变）。 */
+  const stream = makeStream();
+  /** 这个夹具实例成功开出来的每一条流（"有没有多开一路没人关的流"要数它）。 */
+  const streams = [stream];
+  let opened = 0;
   const camera = {
     VIDEO_NOT_READY: 'VIDEO_NOT_READY',
     async openCamera(video, opts) {
       calls.openCamera.push({ video, opts });
       const err = knob(openError);
       if (err !== null && err !== undefined) throw err;
-      video.srcObject = stream;
+      // **每次成功开相机给一条新流**（真的 `getUserMedia` 就是这样）。原先这里每次回同一条
+      // 对象，于是"放弃这一次取词、再点拍照"之后拿到的是**上一次已经 stop 过**的那条流
+      // ——"新流是活的"永远验不出来，而"两路流是不是被当成一路"这种泄漏也照样看不出来
+      // （两路流共用一个对象）。第一条仍用上面预建的那条：`h.stream` 的语义不变。
+      opened += 1;
+      const s = opened === 1 ? stream : makeStream();
+      if (s !== stream) streams.push(s);
+      video.srcObject = s;
       await video.play();
-      return stream;
+      return s;
     },
     async grabFrame(video, canvas, opts) {
       calls.grabFrame.push({ video, canvas, opts });
@@ -353,7 +368,7 @@ export async function harness({
     ...(clearTimeoutImpl === null ? {} : { clearTimeoutImpl }),
   });
   const result = {
-    root, calls, stream, store, mounted: h, events: store.appended,
+    root, calls, stream, streams, store, mounted: h, events: store.appended,
     sessionId: h.sessionId, machine: h.machine,
     /**
      * 拆掉这份应用挂的定时器（`disposeAllHarnesses` 会替所有用例调它）。
@@ -404,8 +419,40 @@ export async function submitCompose(h, sentence) {
   return btn(h.root, '提交造句').click();
 }
 
-/** 按「拍照」→「快门」走一步（绝大多数用例的开头）。 */
+/**
+ * 切到「学习」页签（阶段 A：应用有了底部页签，**默认落在「首页」**）。
+ *
+ * 为什么必须有这个助手：`mount()` 之后界面在「首页」，而「拍照」「快门」「提交造句」
+ * 这些按钮**只长在学习页上**——非活动页签的视图是**从 DOM 卸载**的（不是 `display:none`
+ * 藏着），所以首页上真的搜不到它们。于是所有"驱动取词链路"的用例都必须先导航。
+ * 把这一步收成一个**具名**助手，读用例的人一眼看得见"这一条从学习页开始"，
+ * 而不是在一堆 `btn(h.root,'拍照')` 前面猜那次多出来的点击是干什么的。
+ *
+ * **它不改变任何断言语义**：导航只换视图，不动状态机（`machine.state` 仍是原来那个）。
+ *
+ * ⚠️ 取页签用**精确文案 + 限定在 `<nav>` 里**，不用 `btn()`（那是 `includes` 匹配）：
+ * 首页那颗大字入口叫「开始学习」，它**包含**「学习」二字，而导航条排在内容之后
+ * ⇒ `btn(root,'学习')` 在首页会先命中「开始学习」。两枚按钮的文案都由任务书钉死，
+ * 所以这个歧义只能靠"限定在导航里 + 全等"来消。
+ */
+export async function gotoLearn(root) {
+  const nav = byTag(root, 'NAV')[0];
+  assert.ok(nav, '阶段 A 的应用骨架必须有一个 <nav>（底部页签）');
+  const tab = byTag(nav, 'BUTTON').find((b) => b.textContent === '学习');
+  assert.ok(tab, '底部页签里必须有「学习」');
+  assert.ok(byTag(nav, 'BUTTON').length === 4, '底部页签恰好四枚（首页 / 学习 / 复习 / 设置）');
+  await tab.click();
+  // 学习页到了没有：这一屏的静态说明是它独有的（判据取文案，与走查台的 ARRIVED 同一口径）
+  assert.ok(btn(root, '拍照'), '切到学习页后必须有「拍照」（ready 屏的取词入口）');
+  return root;
+}
+
+/** 按「拍照」→「快门」走一步（绝大多数用例的开头）。
+ *
+ * ⚠️ 阶段 A 起它**先切到学习页**：这两个按钮只长在学习页上，而应用默认落在首页
+ * （见 `gotoLearn` 的说明）。这一步是"取词链路的前置条件"，不是断言的一部分。 */
 export const openCameraAndShoot = async (h) => {
+  await gotoLearn(h.root);
   await btn(h.root, '拍照').click();
   await btn(h.root, '快门').click();
 };

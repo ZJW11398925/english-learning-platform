@@ -100,11 +100,11 @@ test('can() 只对当前状态的合法动作返回 true', () => {
   assert.equal(m.can('next'), false);
 });
 
-test('done 是终态：10 个动作一个都进不去，状态不变', () => {
+test('done 是终态：11 个动作一个都进不去，状态不变', () => {
   const m = createMachine({ onEnter: () => {} });
   for (const a of ['capture', 'frameOk', 'wordReady', 'readDone', 'submit', 'next']) m.send(a);
   assert.equal(m.state, 'done');
-  for (const a of ['capture', 'frameOk', 'frameBad', 'wordReady', 'readDone',
+  for (const a of ['capture', 'frameOk', 'frameBad', 'cancelCapture', 'wordReady', 'readDone',
     'skipReading', 'submit', 'rewrite', 'next', 'finish']) {
     assert.equal(m.can(a), false, `${a} 不该在 done 态合法`);
     assert.equal(m.send(a), false, `${a} 不该被 done 态接受`);

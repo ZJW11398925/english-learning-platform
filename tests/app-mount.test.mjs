@@ -25,7 +25,7 @@ import { createKeyring, API_KEY_STORAGE_KEY } from '../web/units/keyring.mjs';
 import { fakeLocalStorage } from './helpers/fakes.mjs';
 import {
   harness, openCameraAndShoot, withFetch, makeBlob, OK_STATS, okFetch, realRecognizeWithFallback,
-  settleFeedback, fakeTts,
+  settleFeedback, fakeTts, gotoLearn,
   disposeAllHarnesses,
 } from './helpers/mount-harness.mjs';
 
@@ -36,8 +36,11 @@ import { btn, byTag, text, errorText, makeEl } from './helpers/dom.mjs';
 
 // ───────────────────────────────────── 用例 ─────────────────────────────────────
 
-test('首屏停在 ready：只有「拍照」一个主动作，没有任何假入口', async () => {
+test('学习页停在 ready：只有「拍照」一个主动作，没有任何假入口', async () => {
+  // 阶段 A：应用默认落在**首页**，取词那一条流程搬进了「学习」页签 ⇒ 先导航再断言。
+  // 断言语义未变（"ready 这一屏有哪些按钮"），变的是"这一屏现在在第几个页签上"。
   const h = await harness();
+  await gotoLearn(h.root);
   assert.equal(h.machine.state, 'ready');
   assert.ok(btn(h.root, '拍照'), 'ready 态必须有拍照按钮');
   assert.equal(btn(h.root, '开始跟读'), undefined, '没取到词之前不许出现"进入跟读"');
@@ -47,6 +50,7 @@ test('首屏停在 ready：只有「拍照」一个主动作，没有任何假�
 
 test('点「拍照」：开后置相机、把流接上 video，进 capturing 并出现「快门」', async () => {
   const h = await harness();
+  await gotoLearn(h.root);
   await btn(h.root, '拍照').click();
   assert.equal(h.machine.state, 'capturing');
   const video = byTag(h.root, 'video')[0];
@@ -64,6 +68,7 @@ test('注入的 cameraOptions 覆盖取景默认值（默认后置有断言，�
   // `mount(root, { cameraOptions })` 是文档化的注入点：注入了就以注入的为准。
   // 少了实现里的 `...cameraOptions`，这类覆盖会被静默忽略（用户拿到的是另一颗镜头）。
   const h = await harness({ cameraOptions: { facingMode: 'user', width: { ideal: 640 } } });
+  await gotoLearn(h.root);
   await btn(h.root, '拍照').click();
   assert.deepEqual(h.calls.openCamera[0].opts, { facingMode: 'user', width: { ideal: 640 } });
 });
@@ -148,6 +153,7 @@ test('落事件用注入的时钟：ts 等于注入值，而不是偷偷回退�
 
   const denied = Object.assign(new Error('Permission denied'), { name: 'NotAllowedError' });
   const h2 = await harness({ clock: () => T, openError: denied });
+  await gotoLearn(h2.root);
   await btn(h2.root, '拍照').click();
   const blocked = h2.events.filter((e) => e.type === 'blocked_permission');
   assert.equal(blocked.length, 1);
@@ -162,6 +168,7 @@ test('快门：judgeFrame 抛 RangeError 时绝不改判成"这张照片不行"�
     recognize: realRecognizeWithFallback,
     grabResult: { blob: makeBlob(9), stats: { brightness: NaN, laplacianVar: 10 } },
   });
+  await gotoLearn(h.root);
   await btn(h.root, '拍照').click();
   await assert.rejects(() => btn(h.root, '快门').click(), RangeError, 'RangeError 必须继续往上冒');
   assert.equal(h.machine.state, 'capturing', '状态不许被这次异常推动');
@@ -174,6 +181,7 @@ test('快门：judgeFrame 抛 RangeError 时绝不改判成"这张照片不行"�
 test('快门：视频还没出画（按太早）→ 只提示稍候，不落事件、不改状态', async () => {
   const notReady = Object.assign(new Error('grabFrame: 视频还没出画'), { code: 'VIDEO_NOT_READY' });
   const h = await withFetch({ fetchImpl: okFetch, recognize: realRecognizeWithFallback, grabError: notReady });
+  await gotoLearn(h.root);
   await btn(h.root, '拍照').click();
   await btn(h.root, '快门').click();
   assert.equal(h.machine.state, 'capturing', '还在取景，等下一按');
@@ -186,6 +194,7 @@ test('快门：视频还没出画（按太早）→ 只提示稍候，不落事�
 test('快门：其它取帧错误原样重抛（不静默变成功、也不变成拒帧）', async () => {
   const boom = new Error('取帧时炸了');
   const h = await withFetch({ fetchImpl: okFetch, recognize: realRecognizeWithFallback, grabError: boom });
+  await gotoLearn(h.root);
   await btn(h.root, '拍照').click();
   await assert.rejects(() => btn(h.root, '快门').click(), /取帧时炸了/);
   assert.equal(h.machine.state, 'capturing');
@@ -201,6 +210,7 @@ test('报错文案清空（开机）：授权被拒后重试成功 → 上一次
   const denied = Object.assign(new Error('Permission denied'), { name: 'NotAllowedError' });
   let attempt = 0;
   const h = await harness({ openError: () => (attempt++ === 0 ? denied : null) });
+  await gotoLearn(h.root);
   await btn(h.root, '拍照').click();
   assert.match(errorText(h.root), /相机没有授权/, '第一次失败要说清原因');
   await btn(h.root, '拍照').click();
@@ -216,6 +226,7 @@ test('报错文案清空（快门）：按太早之后补按成功 → 那句"�
     recognize: realRecognizeWithFallback,
     grabError: () => (attempt++ === 0 ? notReady : null),
   });
+  await gotoLearn(h.root);
   await btn(h.root, '拍照').click();
   await btn(h.root, '快门').click();
   assert.match(errorText(h.root), /稍等|准备好/);
@@ -227,6 +238,7 @@ test('报错文案清空（快门）：按太早之后补按成功 → 那句"�
 
 test('连点两次「拍照」只开一路相机（手机上双击不该开出两路流）', async () => {
   const h = await harness();
+  await gotoLearn(h.root);
   const first = btn(h.root, '拍照').click();
   const second = btn(h.root, '拍照').click();   // 状态还没变，按钮还在，第二次点击真的会发生
   await Promise.all([first, second]);
@@ -237,6 +249,7 @@ test('连点两次「拍照」只开一路相机（手机上双击不该开出�
 test('相机授权被拒：落 blocked_permission(denied)、留在 ready、按钮留着让用户改完设置再试', async () => {
   const denied = Object.assign(new Error('Permission denied'), { name: 'NotAllowedError' });
   const h = await harness({ openError: denied });
+  await gotoLearn(h.root);
   await btn(h.root, '拍照').click();
   assert.equal(h.machine.state, 'ready', '没有相机就没有取词，状态机不许前进');
   const blocked = h.events.filter((e) => e.type === 'blocked_permission');
@@ -253,6 +266,7 @@ test('没有 mediaDevices（http:// + 局域网 IP）：落 blocked_permission(u
     + 'getUserMedia 只在安全上下文可用：https:// 域名或 localhost。',
   ), { name: 'Error' });
   const h = await harness({ openError: unavailable });
+  await gotoLearn(h.root);
   await btn(h.root, '拍照').click();
   assert.equal(h.machine.state, 'ready');
   assert.equal(h.events.filter((e) => e.type === 'blocked_permission')[0].payload.reason, 'unavailable');
@@ -262,6 +276,7 @@ test('没有 mediaDevices（http:// + 局域网 IP）：落 blocked_permission(u
 test('走完一整轮：rewrite 回环、跳过跟读、各态停留时长都进得了快照', async () => {
   let t = 10_000;
   const h = await withFetch({ fetchImpl: okFetch, recognize: realRecognizeWithFallback, clock: () => t });
+  await gotoLearn(h.root);
   await btn(h.root, '拍照').click();
   t += 3000;                                   // capturing 停留 3s
   await btn(h.root, '快门').click();
@@ -309,6 +324,7 @@ test('完成页：零改写的会话不许说发生过改写（提交 1 次 ≠ 
   const h = await withFetch({
     fetchImpl: okFetch, recognize: realRecognizeWithFallback, ttsWin: fakeTts().win,
   });
+  await gotoLearn(h.root);
   await btn(h.root, '拍照').click();
   await btn(h.root, '快门').click();
   await btn(h.root, '我会读了（开始跟读）').click();
@@ -369,6 +385,7 @@ test('造句原文交给注入的钩子，并落一条 compose_submitted（Task 
     onCompose: (x) => seen.push(x),
     compose,
   });
+  await gotoLearn(h.root);
   await btn(h.root, '拍照').click();
   await btn(h.root, '快门').click();
   await btn(h.root, '我会读了（开始跟读）').click();
@@ -415,6 +432,9 @@ test("「提交造句」按钮只在 composing 态存在：那句 `send('submit'
   // 而 `machine.can('submit')` 与它逐态一致——`onSubmit` 只可能由这个按钮触发、且只在那一格。
   const compose = { submitSentence: async () => ({ status: 'ok', feedback: {}, sentence: '' }) };
   const h = await withFetch({ fetchImpl: okFetch, recognize: realRecognizeWithFallback, compose });
+  // 阶段 A：先把这条"逐态走一遍"钉在**学习页**上——`提交造句` 的存在性判据没变，
+  // 变的是"这一屏现在在哪个页签上"。七态仍要逐个走到（下面那条 deepEqual 还在）。
+  await gotoLearn(h.root);
   const seen = [];
   const record = (label) => {
     const able = h.machine.can('submit');
@@ -462,11 +482,16 @@ const emptyKeyring = () => createKeyring({ storage: fakeLocalStorage() });
 
 test('设置（API Key）入口每屏可达：ready 屏与 word 屏都点得进去', async () => {
   const h = await harness();
+  // 阶段 A：入口按钮仍然每屏都挂着（壳尾），但"ready 屏"现在指**学习页**那一屏
+  // ⇒ 先导航过去，"这一屏上真的够得着设置入口"才算被验到（留在首页验的是另一件事）。
+  await gotoLearn(h.root);
   assert.ok(btn(h.root, '设置（API Key）'), 'ready 屏要有设置入口');
   await btn(h.root, '设置（API Key）').click();
   assert.match(text(h.root), /设置 · API Key/);
   await btn(h.root, '返回').click();
   assert.equal(h.machine.state, 'ready', '返回要回到原来的屏');
+  // 阶段 A 追加：返回要回到**来处那一页**（不是硬编码回首页）——切走再切回是页签的基本语义
+  assert.ok(btn(h.root, '拍照'), '「返回」回到的是点入口时所在的学习页，不是首页');
 
   const h2 = await withFetch({ fetchImpl: okFetch, recognize: realRecognizeWithFallback });
   await openCameraAndShoot(h2);
@@ -492,6 +517,7 @@ test('设置屏显示"已配置/未配置"，**不回显明文**，输入框永�
 test('保存：合法的合成 Key 存进注入的 keyring，之后按拍照能正常走链路', async () => {
   const storage = fakeLocalStorage();
   const h = await harness({ keyring: createKeyring({ storage }) });
+  await gotoLearn(h.root);
   await btn(h.root, '设置（API Key）').click();
   byTag(h.root, 'INPUT')[0].value = 'sk-test-newly-saved-key';
   await btn(h.root, '保存').click();
@@ -501,6 +527,7 @@ test('保存：合法的合成 Key 存进注入的 keyring，之后按拍照能�
 
   // 存好 Key 之后主流程就通了（直连识物需要它）：挂一份新应用、共用同一个存储
   const h2 = await harness({ keyring: createKeyring({ storage }) });
+  await gotoLearn(h2.root);
   await btn(h2.root, '拍照').click();
   assert.equal(h2.machine.state, 'capturing', '配好 Key 后拍照放行');
 });
@@ -520,6 +547,7 @@ test('保存：粘贴不全的 Key（无 sk- 前缀 / 空白）被拦下，错�
 
 test('清除：清掉的 Key 从存储里消失，主流程随之被拦下（引导回来）', async () => {
   const h = await harness(); // 默认已配置
+  await gotoLearn(h.root);
   await btn(h.root, '设置（API Key）').click();
   await btn(h.root, '清除 Key').click();
   await btn(h.root, '返回').click();
@@ -531,6 +559,7 @@ test('清除：清掉的 Key 从存储里消失，主流程随之被拦下（引
 
 test('无 Key：ready 屏给引导文案（怎么拿 / 为什么需要 / 存哪 / 只存本机），不是死路', async () => {
   const h = await harness({ keyring: emptyKeyring() });
+  await gotoLearn(h.root);
   const ready = text(h.root);
   assert.match(ready, /还没有配置 API Key/, '说清现状');
   assert.match(ready, /platform\.deepseek\.com/, '说清去哪拿');
@@ -541,6 +570,7 @@ test('无 Key：ready 屏给引导文案（怎么拿 / 为什么需要 / 存哪 
 
 test('无 Key 点「拍照」：不开相机、不进 capturing、不落事件，错误区指到设置', async () => {
   const h = await harness({ keyring: emptyKeyring() });
+  await gotoLearn(h.root);
   await btn(h.root, '拍照').click();
   assert.equal(h.machine.state, 'ready');
   assert.equal(h.calls.openCamera.length, 0, '没有 Key 就不该开相机（反正也发不了请求）');
@@ -577,6 +607,7 @@ test('mount 返回识物链路需要的注入点：machine / sessionId / store /
   assert.equal(typeof grab, 'function');
   // 相机还没开时 grab 要响亮拒绝，而不是返回一个空帧
   await assert.rejects(() => grab(), /相机/);
+  await gotoLearn(h.root);
   await btn(h.root, '拍照').click();
   const shot = await grab();
   assert.equal(shot.blob.size, 9);

@@ -41,7 +41,19 @@ export const TRANSITIONS = Object.freeze({
   ready: Object.freeze({ capture: 'capturing' }),
   // frameOk → word（图上取到词），frameBad → 退回 ready 重拍。识物失败**不**走 frameBad：
   // frameBad 只表示"这帧不能送识别"，由端侧质检（frame-qc）判定（Task 7 接）。
-  capturing: Object.freeze({ frameOk: 'word', frameBad: 'ready' }),
+  //
+  // `cancelCapture` = **用户自己不想拍了**（取词屏的「返回」）。它是本表里唯一一个
+  // "什么坏事都没发生"的回退，与 `frameBad` 必须严格分开：
+  //   · `frameBad` 是**一次拒帧**——`send` 会给 `frameRejections` 加一、把 reason 记进
+  //     `lastRejectReason`，界面据此说"刚才那张太暗/太糊"；
+  //   · `cancelCapture` **什么都不记**：不计数、不记理由，调用方**也不落任何事件**
+  //     （用户主动放弃不是拒帧、不是识别失败，事件流里一条都不该多——
+  //      拿 `frameBad` 来收尾就是伪造一条"这一帧不能用"的记录）。
+  // 出口与 `frameBad` 同为一格（都是 ready，"可以重新取词"），但两步的账完全不同。
+  // 之所以把它放进本表而不是让界面自己去改状态：状态是这张表的唯一产物
+  // （见文件头"冻结"那一段），留一条绕过 `send` 的旁路等于把约束变成可运行时改写的东西；
+  // 而且 `send` 里的 `settle()` 是停留时长唯一的结算点，绕过它这一格的耗时就会漏账。
+  capturing: Object.freeze({ frameOk: 'word', frameBad: 'ready', cancelCapture: 'ready' }),
   // word 与 reading 分开：word 是"词已取到、等用户开始跟读"，reading 是跟读进行中。
   word: Object.freeze({ wordReady: 'reading' }),
   reading: Object.freeze({ readDone: 'composing', skipReading: 'composing' }),

@@ -82,6 +82,11 @@
   --shadow-1: 0 1px 2px rgba(60, 46, 30, 0.05);
   --shadow-2: 0 6px 20px -6px rgba(60, 46, 30, 0.18);
 
+  /* 底部页签条的高度（**不含** safe-area）：`#app` 的底部留白正好让开它。
+   * 它是一条"布局尺寸"令牌，不是颜色——写在 `:root` 里是为了让"让开多少"只有一处起源：
+   * 页签条自己与内容区底部留白都读它，改一个数两处一起动。 */
+  --tabbar-h: 64px;
+
   --ring: 0 0 0 3px color-mix(in srgb, var(--accent) 28%, transparent);
 }
 
@@ -138,12 +143,15 @@ body {
   -webkit-tap-highlight-color: transparent;
 }
 
-/* 容器：安全区 + 单列上限 + 底部留白（用户要能把最后一行滑到舒服的位置） */
+/* 容器：安全区 + 单列上限 + 底部留白（用户要能把最后一行滑到舒服的位置）。
+ * ⚠️ 阶段 A 起底部还要让开**固定的页签条**（`--tabbar-h`）——少这一截的话，
+ * 页面最后一颗按钮会永久压在页签底下，看得见、点不到（实测：让开之后 390×844 下
+ * 每一屏都能滚到最后一行）。 */
 #app {
   max-width: 560px;
   margin: 0 auto;
   padding: calc(var(--s-5) + env(safe-area-inset-top)) var(--s-5)
-    calc(var(--s-7) + env(safe-area-inset-bottom));
+    calc(var(--s-7) + var(--tabbar-h) + env(safe-area-inset-bottom));
 }
 
 /* ═══ 排版 ═══════════════════════════════════════════════════════════════════ */
@@ -549,6 +557,176 @@ textarea:focus {
   color: var(--ink-faint);
   /* 元信息是"目标词 · 状态"这类短句，用紧凑一点的数字排布更好读 */
   font-variant-numeric: tabular-nums;
+}
+
+/* ═══ 应用骨架（阶段 A：应用栏 + 底部页签 + 首页/复习页）═══════════════════════
+ *
+ * 三块东西，各自的分工（别互相串）：
+ *   · 应用栏（`header.appbar`）  = 我在哪个应用里（品牌 + 今天该复习几个词）
+ *   · 内容区（`#app > div`）      = 我在哪一页（**只渲染当前页签的视图**）
+ *   · 底部页签（`nav.tabbar`）    = 我能去哪（四枚，固定的）
+ *
+ * 两条实现口径：
+ *   1. **非活动视图从 DOM 卸载**（不是 `display:none`）⇒ 这里没有任何"藏起来的页"的样式，
+ *      也不需要：切换靠 `bodyEl.replaceChildren` 重建（见 `app.mjs` 的 `viewFor`）。
+ *   2. 页签的"当前是哪一个"由 **`aria-current="page"`** 决定（`app.mjs` 显式打标记）。
+ *      不用 `:nth-child` / `:first-child` 之类的位次判据——本文件在那一类判据上踩过四次
+ *      （见 `button.primary` 那一大段注释），`tests/styles.test.mjs` 明文禁止回流。
+ */
+
+/* 应用栏：品牌与一行状态。它在**正常流**里（不做 sticky）——顶部吸一条会与 `#app` 的
+ * 顶部安全区内边距打架（吸上去时上面那一段 padding 会露出滚动的内容），
+ * 而这一栏本身很矮，跟着页面滚走没有任何损失。 */
+.appbar {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: var(--s-2) var(--s-3);
+  flex-wrap: wrap;
+  margin-bottom: var(--s-4);
+  padding-bottom: var(--s-3);
+  border-bottom: 1px solid var(--line);
+}
+
+.appbar > .brand {
+  color: var(--ink);
+  font-size: 1.0625rem;
+  font-weight: 640;
+  letter-spacing: -0.01em;
+}
+
+/* 状态行是"今天该复习几个词"。数字用等宽数字位（tabular-nums），
+ * 免得词数变化时那一行左右轻微跳动。 */
+.appbar > .appstatus {
+  color: var(--ink-soft);
+  font-size: 0.8125rem;
+  font-variant-numeric: tabular-nums;
+}
+
+/* 底部页签：**固定**在视口底部（手机上它必须永远够得到）。
+ * `max-width` 与 `#app` 同一个上限 + `margin: 0 auto`：宽屏上它跟着内容列居中，
+ * 不会拉成一条横贯整屏的带子。 */
+.tabbar {
+  position: fixed;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  z-index: 10;
+  display: flex;
+  gap: var(--s-2);
+  max-width: 560px;
+  margin: 0 auto;
+  padding: var(--s-2) var(--s-3) calc(var(--s-2) + env(safe-area-inset-bottom));
+  background: var(--surface);
+  border-top: 1px solid var(--line);
+}
+
+/* 页签按钮走 `--btn-*` 变量（与 `button.primary` 同一套机制）：
+ * 缺省是"中性的一格"，当前那一枚由 `[aria-current='page']` 覆写变量。
+ *
+ * ⚠️ 为什么当前页签**不**用重音底色（`--btn-bg: var(--accent)`）：
+ * 全站只允许**一处**给按钮上重音底色（就是 `button.primary`，主操作专用），
+ * `tests/styles.test.mjs` 按"恰好一处"钉着它。页签是导航，不是主操作——它靠
+ * **浅青底 + 重音文字 + 重音描边**区分（对比度实测见阶段 A 报告）。 */
+.tabbar > button {
+  --btn-bg: var(--surface);
+  --btn-line: var(--surface);      /* 与底色同值 = 看不见的边，但边框宽度不变（不会引起跳动） */
+  --btn-fg: var(--ink-soft);
+  --btn-bg-hover: var(--surface-sunken);
+  --btn-line-hover: var(--line-strong);
+  flex: 1 1 0;
+  min-width: 0;
+  /* 触控目标：比基础 button 的 44px 再宽裕一档（页签是这一屏最常点的东西）。
+   * `--tabbar-h` 扣掉上下 padding 正好是它，两处不会各自漂移。 */
+  min-height: calc(var(--tabbar-h) - 2 * var(--s-2));
+  padding: 0 var(--s-1);
+  border-radius: var(--r);
+  box-shadow: none;
+  font-size: 0.9375rem;
+  font-weight: 560;
+}
+
+.tabbar > button[aria-current='page'] {
+  --btn-bg: var(--accent-wash);
+  --btn-fg: var(--accent);
+  --btn-line: var(--accent);
+  font-weight: 640;
+}
+
+/* ── 首页 ─────────────────────────────────────────────────────────────────── */
+
+/* 到期那一行（「今天该复习 N 个词」）。**只在真有到期词时**才被创建（`app.mjs` 的
+ * `homeView`）——所以这里不需要"空的时候怎么画"的规则。
+ * 形态照 `.error`（左侧重音条 + 浅色底）：那是本文件里"需要你处理的一件事"的既有写法。 */
+.due {
+  margin: var(--s-4) 0 var(--s-3);
+  padding: var(--s-3) var(--s-4);
+  border-radius: var(--r);
+  border-left: 3px solid var(--accent);
+  background: var(--accent-wash);
+  color: var(--ink);
+  font-weight: 620;
+  font-variant-numeric: tabular-nums;
+}
+
+/* 首页的大字入口「开始学习」。
+ * ⚠️ 它**不是** `.primary`：重音只给学习流程里那一颗推进按钮（人裁决
+ * `DEC-OPI-968b804d-…db.6`，那张六屏表被 `tests/styles.test.mjs` 逐文案钉住）。
+ * 所以这一颗靠**尺寸**成为这一屏最重的东西（56px 高 / 1.125rem / 更软的圆角），
+ * 不靠颜色。 */
+.start {
+  --btn-line: var(--line-strong);
+  min-height: 56px;
+  padding: 0 var(--s-6);
+  border-radius: var(--r-lg);
+  font-size: 1.125rem;
+  font-weight: 640;
+}
+
+/* 已学词概览的小标题（「已学 3 个词」/「还没有学过的词」） */
+.stat {
+  margin: var(--s-6) 0 var(--s-3);
+  color: var(--ink-soft);
+  font-size: 0.9375rem;
+  font-weight: 640;
+  font-variant-numeric: tabular-nums;
+}
+
+/* 空状态：**虚线卡片**而不是一行灰字。它是这一屏的"内容"，
+ * 所以给它一个容器（用户看到的是"这里现在空着，但它是被设计过的"）。 */
+.empty {
+  margin: 0 0 var(--s-3);
+  padding: var(--s-5) var(--s-4);
+  border: 1px dashed var(--line-strong);
+  border-radius: var(--r-lg);
+  background: var(--surface-sunken);
+  color: var(--ink-soft);
+  font-size: 0.9375rem;
+  line-height: 1.62;
+  text-wrap: pretty;
+}
+
+/* 已学词：一列小圆角块，**用衬线**——它们是"要学的英文词"，
+ * 与 `.choices` / `.word-title` / `.pending-item > p:first-child` 同一条排版口径。 */
+.word-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--s-2);
+  margin: 0 0 var(--s-3);
+}
+
+.word-chip {
+  display: inline-flex;
+  align-items: center;
+  min-height: 32px;
+  padding: 0 var(--s-3);
+  border: 1px solid var(--line);
+  border-radius: var(--r-xl);
+  background: var(--surface);
+  color: var(--ink);
+  font-family: var(--font-word);
+  font-size: 1rem;
+  line-height: 1;
 }
 
 /* ═══ 媒体 ═══════════════════════════════════════════════════════════════════ */

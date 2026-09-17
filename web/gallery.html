@@ -33,8 +33,16 @@
     形状写错的话这一屏会**静默变空**，于是走查台自己先失真。
 
     用法：`gallery.html?scenario=<名>&key=set|unset`
+      home | home-due | review                        ← 阶段 A 新增（首页 / 首页+到期词 / 复习页）
       ready | ready-due | pending | pending-empty | settings | capturing |
       capturing-manual | word | reading | composing | feedback | done
+
+    ── 阶段 A：应用有了底部页签（默认落在「首页」）──────────────────────────────
+    取词那一条线性流程搬进了「学习」页签，所以**渲染学习页那一屏的档位都要先导航**
+    （`ON_LEARN` 那一组）。导航走的是**真实按钮**（`<nav>` 里的页签），与用户点的是同一颗；
+    取页签用**精确文案 + 限定在 `<nav>` 里**——首页那颗大字入口叫「开始学习」，
+    它包含「学习」二字，`includes` 匹配会选错（`tests/helpers/mount-harness.mjs` 的
+    `gotoLearn` 同一个理由）。
   -->
   <div id="app"></div>
 
@@ -53,6 +61,20 @@
       'capturing', 'capturing-manual', 'word', 'reading', 'composing', 'feedback', 'done',
     ]);
 
+    /**
+     * 渲染**学习页**上某一屏的档位（阶段 A：应用默认落在首页，这些屏现在在第二个页签上）。
+     * 不先导航的话走查台会在首页上找不到「拍照」并响亮失败（`clickButton` 的说明）。
+     */
+    const ON_LEARN = new Set([
+      'ready', 'ready-due', 'pending', 'pending-empty',
+      'capturing', 'capturing-manual', 'word', 'reading', 'composing', 'feedback', 'done',
+    ]);
+
+    /** 要摆"有到期词"现场的档位（`dueWords` 的 shapes 见 units/scheduler.mjs 的文件头）。 */
+    const DUE_SCENARIOS = new Set(['ready-due', 'home-due', 'review']);
+    /** 要摆"有待补欠账"现场的档位（`pending-empty` 只摆 compose_submitted、不摆欠账）。 */
+    const PENDING_SCENARIOS = new Set(['pending', 'pending-empty', 'review']);
+
     // ── 假存储：形状照 units/store.mjs 的键名与 units/event-log.mjs 的 REQUIRED ──
     const events = [];
     const words = {};
@@ -60,7 +82,7 @@
 
     if (keyMode === 'set') key = 'sk-gallery-demo-key-not-real-000000000000';
 
-    if (scenario === 'ready-due') {
+    if (DUE_SCENARIOS.has(scenario)) {
       // 三个词到期，最早的一个在 2 天前——复现提示要显示"上次是在「厨房」场景学的"。
       words.mug = {
         id: 'mug', label: 'mug', scene: 'kitchen', stage: 0,
@@ -76,7 +98,7 @@
       };
     }
 
-    if (scenario === 'pending' || scenario === 'pending-empty') {
+    if (PENDING_SCENARIOS.has(scenario)) {
       events.push({
         ts: now - 3 * HOUR,
         type: 'compose_submitted',
@@ -85,7 +107,7 @@
         roundIndex: 1,
         payload: { sentence: 'I very like my mug.', word: 'mug', scene: 'kitchen' },
       });
-      if (scenario === 'pending') {
+      if (scenario !== 'pending-empty') {
         events.push({
           ts: now - 3 * HOUR + 40,
           type: 'feedback_pending',
@@ -100,6 +122,9 @@
             reason: 'timeout',
           },
         });
+      }
+      // 第二条欠账只在 pending 那一档里（review 需要的是"有欠账"这一件事，不必两条）
+      if (scenario === 'pending') {
         events.push({
           ts: now - 2 * HOUR,
           type: 'compose_submitted',
@@ -280,21 +305,13 @@
       urlApi: driven ? fakeUrlApi : null,
     });
 
-    if (scenario === 'pending' || scenario === 'pending-empty') {
-      // 待补那一屏是"任一屏都能打开的一个抽屉"，所以要按它的入口按钮进去。
-      const entry = [...root.querySelectorAll('button')]
-        .find((b) => b.textContent.includes('待补'));
-      if (entry) entry.click();
-    }
-    if (scenario === 'settings') {
-      const entry = [...root.querySelectorAll('button')]
-        .find((b) => b.textContent.includes('设置'));
-      if (entry) entry.click();
-    }
-
     /**
      * 按**文案**点一颗按钮（与用户点的是同一颗；找不到就响亮失败，不静默跳过）。
      * `textContent.includes` 而不是全等：按钮文案里有全角括号与省略号，全等太脆。
+     *
+     * ⚠️ 阶段 A 起**页签不许用这个函数点**：首页那颗大字入口叫「开始学习」，
+     * 它包含「学习」二字 ⇒ `clickButton('学习')` 会点到首页的入口而不是页签。
+     * 页签一律走 `tabButton()`（限定在 `<nav>` 里 + 全等）。
      */
     const clickButton = (needle) => {
       const b = [...root.querySelectorAll('button')].find((x) => x.textContent.includes(needle));
@@ -312,6 +329,53 @@
       throw new Error(`走查台等不到「${needle}」`);
     };
 
+    /** 底部页签里的某一枚（**精确文案 + 只在 `<nav>` 里找**；理由见 `clickButton` 的说明）。 */
+    const tabButton = (label) => {
+      const nav = root.querySelector('nav.tabbar');
+      if (!nav) throw new Error('走查台：界面上没有底部页签（阶段 A 的应用骨架）');
+      const tabs = [...nav.querySelectorAll('button')];
+      if (tabs.length !== 4) throw new Error(`走查台：底部页签应当是四枚，实测 ${tabs.length} 枚`);
+      const b = tabs.find((x) => x.textContent === label);
+      if (!b) throw new Error(`走查台：底部页签里没有「${label}」`);
+      return b;
+    };
+
+    /** 切到「学习」页签（点的是真实页签按钮，与用户点的是同一颗）。 */
+    const gotoLearn = async () => {
+      tabButton('学习').click();
+      await settle('拍一件你身边的东西');     // ready 屏的标题：到了学习页才算就位
+    };
+
+    /** 切到「设置」页签（阶段 A 起设置既是抽屉也是页签；这一档走页签那条路）。 */
+    const gotoSettings = async () => {
+      tabButton('设置').click();
+      await settle('设置 · API Key');
+    };
+
+    // ── 导航到目标档位所在的页签（阶段 A：应用默认落在首页）───────────────────────
+    // ⚠️ 顺序有讲究：这几句必须写在上面那些 `const` 助手**之后**（`const` 有 TDZ，
+    // 提前调用会当场 ReferenceError）。
+    if (scenario === 'settings') {
+      // 这一档走**设置页签**那条路（它同时仍能从每屏都挂的「设置（API Key）」入口打开，
+      // 两条路进入的是同一屏；页签那条路的「返回」回到进来时待着的那一页）。
+      await gotoSettings();
+    } else if (scenario === 'review') {
+      // 复习页是第三枚页签（阶段 A 新增档位）：点真实页签过去，判据是它独有的出口按钮。
+      tabButton('复习').click();
+      await settle('去学习');
+    } else if (ON_LEARN.has(scenario)) {
+      // 这些档位渲染的都是**学习页**上的某一屏 ⇒ 先导航（否则下面在首页上找不到「拍照」）。
+      await gotoLearn();
+    }
+    // `home` 那一档**不做任何导航**：它存在的意义正是"证明应用默认落在首页"。
+
+    if (scenario === 'pending' || scenario === 'pending-empty') {
+      // 待补那一屏是"任一屏都能打开的一个抽屉"，所以要按它的入口按钮进去。
+      const entry = [...root.querySelectorAll('button')]
+        .find((b) => b.textContent.includes('待补'));
+      if (entry) entry.click();
+    }
+
     // ── 走真实链路到目标档位（每一步都是真按钮）─────────────────────────────────
     /** 手选档（两轮都落空）停在 capturing，其余驱动档位都取到词、进 word。 */
     const manualScenario = scenario === 'capturing-manual';
@@ -325,9 +389,22 @@
      * `tests/helpers/mount-harness.mjs` 的 `FEEDBACK_BUSY_MARK` 同一种做法）。
      */
     const ARRIVED = {
+      home: '拍一下，学一个词',              // 阶段 A 新增：首页那一屏（空词表 → 空状态）
+      'home-due': '最先到期的是',            // 阶段 A 新增：首页 + 有到期词（到期卡片 + 已学词概览）
+      review: '去学习',                     // 阶段 A 新增：复习页独有的出口按钮（别的屏没有这三个字）
       ready: '拍一件你身边的东西',
       'ready-due': '该复习了',
-      pending: '待补反馈',
+      // 判据取抽屉里的**正文**而不是入口按钮上的「待补反馈」（后者在抽屉没打开时也成立，
+      // 那样这条判据就分不出"入口在"与"抽屉真的开了"）。
+      pending: '这些句子当时没拿到判定',
+      // ⚠️ 如实说明这一档的现状（阶段 A 顺手把它写清楚，不改行为）：`pending-empty`
+      // **看不到"空的待补抽屉"**——入口按钮只在真有欠账时才渲染（`openCount > 0 ||
+      // archivedTotal > 0`，那是 `app.mjs` 的明文口径：一个永远挂着"待补反馈（0 条）"的
+      // 按钮只会让人以为出了事）。只有 `compose_submitted`、没有 `feedback_pending` 时
+      // 队列其实是空的，于是这一档实际落在**学习页的 ready 屏**上。
+      // 所以判据按**实际**到达的那一屏写，并在 `data-gallery-arrived` 上如实报它，
+      // 而不是留一个永远为 null 的判据（那正是 AGENTS.md 里记着的那条旧缺口）。
+      'pending-empty': '拍一件你身边的东西',
       settings: '设置 · API Key',
       capturing: '对准物体，按「快门」',
       'capturing-manual': '没能自动认出这个词',
@@ -340,7 +417,7 @@
     const mark = (name) => { document.body.dataset.galleryScenario = name; };
 
     if (driven) {
-      await clickButton('拍照');            // ready → capturing（真状态机）
+      await clickButton('拍照');            // ready → capturing（真状态机；页签已在上面切好）
       await clickButton('快门');            // 取帧 → 假识物器（capturing 那一档永不回话）
       if (scenario === 'capturing') {
         // 停在"识物还没回话"的现场（见 hangRecognize 的说明）。这里是**同步**渲染出来的，
@@ -377,7 +454,9 @@
       }
       mark(scenario);
     } else {
-      mark(scenario);   // 四个"只摆数据现场"的档位：mount 之后就位（抽屉入口已点）
+      // "只摆数据现场"的档位：mount 之后就位（页签已切好、抽屉入口已点）。
+      // 阶段 A 新增的 `home` / `review` 也走这一支（它们不驱动链路，只摆数据）。
+      mark(scenario);
     }
 
     document.body.dataset.galleryReady = 'true';
