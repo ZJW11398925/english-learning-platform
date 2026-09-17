@@ -651,10 +651,28 @@ export async function mount(root, deps = {}) {
     const view = [];
     const row = doc.createElement('div');
     row.className = 'row';
-    const title = (t) => { const n = doc.createElement('h2'); n.textContent = t; return n; };
+    // `cls` 是**可选**的语义类名：目前只有 `word` 屏那句"要学的那个词"用它（`word-title`）。
+    // 加它的理由与按钮的 `primary` 同源：纯按 DOM 形状认"哪个 h2 是要学的词"不可能
+    // （`word` 与 `composing` 的 h2 祖先链完全一样），所以让生产者显式声明。
+    // 不留类名时 `className` 保持空串，既有 DOM 契约（h2 无类名）逐字不变。
+    const title = (t, cls = '') => {
+      const n = doc.createElement('h2');
+      if (cls !== '') n.className = cls;
+      n.textContent = t;
+      return n;
+    };
     const hint = (t) => { const n = doc.createElement('p'); n.className = 'muted'; n.textContent = t; return n; };
-    const action = (label, onClick, disabled = false) => {
+    // `primary` 是**显式声明**"这一屏的主操作"，不是按位置猜的。
+    //   为什么必须显式：`settings` 与 `pending` 的动作行 DOM 形状**完全一样**
+    //   （同为 `#app > div > div.row`），`button:nth-child(2)`（行里夹着隐藏 input）、
+    //   `only-of-type`（设置屏那行有 3 个子节点）、`.muted 祖先`（实为普通 div）三种
+    //   位置判据**全部实测失败**。所以"谁是主操作"只能由生产者说了算，样式侧只认 `.primary`。
+    //   怎么用：**一屏至多一颗**——`pending`（手动补交 / 返回）与 `feedback`
+    //   （再写一次 / 下一个词）是对等选项，都不传 `primary`（点亮其一 = 凭空造出并不存在的优先级）。
+    //   只加类名，**不改文案、不改点击逻辑、不改 DOM 结构**（按钮仍是同一个 `row` 的第 N 个子节点）。
+    const action = (label, onClick, disabled = false, primary = false) => {
       const b = doc.createElement('button');
+      if (primary) b.className = 'primary';
       b.textContent = label;
       b.disabled = disabled;
       b.addEventListener('click', onClick);
@@ -677,7 +695,7 @@ export async function mount(root, deps = {}) {
       keyInput.placeholder = '粘贴以 sk- 开头的 API Key';
       keyInput.value = '';                      // 永远从空白开始：配置状态靠上面那句话，不靠回显
       view.push(keyInput);
-      action('保存', () => onSaveSettings(keyInput));
+      action('保存', () => onSaveSettings(keyInput), false, true);
       action('清除 Key', onClearKey);
       action(`返回（${machine?.state ?? ''}）`, () => { viewingSettings = false; render(machine.state); });
       view.push(row);
@@ -756,7 +774,7 @@ export async function mount(root, deps = {}) {
             + `请换一个地方重新拍一张（例如 ${RECURRENCE_SCENE_EXAMPLES}）。`
             + (others > 0 ? `另有 ${others} 个词也到期了，先取这一个就行。` : '')));
         }
-        action('拍照', onCapture, storageFull());
+        action('拍照', onCapture, storageFull(), true);
         // 12B：相册导入入口——与「拍照」并列的第二条输入源。背后是一个
         // `input[type=file][accept=image/*]`（移动浏览器上它会拉起相册/拍照选择器），
         // 选中后走**同一条**帧质检 → 识物链路（onAlbumPicked）。按钮负责把入口说人话。
@@ -803,7 +821,7 @@ export async function mount(root, deps = {}) {
         view.push(title('对准物体，按「快门」'));
         if (videoEl !== null) view.push(videoEl);
         view.push(hint('这一帧先在端侧做质检（太暗 / 太糊当场退回），再送去识物。'));
-        action('快门', onShutter);
+        action('快门', onShutter, false, true);
         break;
       }
       case 'word': {
@@ -814,7 +832,9 @@ export async function mount(root, deps = {}) {
           img.alt = '刚拍到的画面';
           view.push(img);
         }
-        view.push(title(shownWord?.word ?? ''));
+        // 这一屏的标题**就是**"要学的那个词"，所以它是全屏的视觉主角：
+        // 走 `word-title` 语义类名，样式侧用衬线 + 大一号字号（口径见 styles.css 文件头）。
+        view.push(title(shownWord?.word ?? '', 'word-title'));
         if (shownWord?.source === 'manual') {
           view.push(hint(`这是你自己挑的词，不是识别出来的。场景：${shownWord.scene}`));
         } else {
@@ -826,7 +846,7 @@ export async function mount(root, deps = {}) {
             ? `这个词到期了，这次是在「${recurrenceNote.scene}」重新取到的（上次在「${recurrenceNote.expectedScene}」）。`
             : '这个词到期了，这次又取到了一次；场景没能确认与上次不同，所以只记"又一次取到"。'));
         }
-        action('我会读了（开始跟读）', onWordReady);
+        action('我会读了（开始跟读）', onWordReady, false, true);
         break;
       }
       case 'reading': {
@@ -838,7 +858,7 @@ export async function mount(root, deps = {}) {
           view.push(hint(`先点「听示范」听 ${shownWord?.word ?? '这个词'} 怎么读；然后自己出声念一遍，念完自己打勾。`));
           view.push(hint('系统不判断你念得准不准（自动判定已退役）；念没念由你自己确认。'));
           action(demoBusy ? '正在播放…' : '听示范', onPlayDemo, demoBusy);
-          action('我读过了（自评打勾）', () => machine.send('readDone'));
+          action('我读过了（自评打勾）', () => machine.send('readDone'), false, true);
           action('跳过跟读', () => machine.send('skipReading'));
           break;
         }
@@ -860,7 +880,7 @@ export async function mount(root, deps = {}) {
         // 见 progress 必办 1）；改了几版从提交次数看得出来（改写次数 = 提交次数 - 1）。
         view.push(hint('这一段停留时长与提交次数会进记录（改了几版从提交次数看得出来），'
           + '用于事后筛出敷衍样本；首版不做内容校验。'));
-        action('提交造句', onSubmit);
+        action('提交造句', onSubmit, false, true);
         break;
       }
       case 'feedback': {

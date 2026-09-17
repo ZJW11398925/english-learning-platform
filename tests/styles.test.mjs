@@ -12,6 +12,10 @@
 //      于是"改一处主题"变成全文件搜索。这里钉住"组件不许写死颜色"。
 //   3. 触控目标 ≥44px：设计文档是针对**手机浏览器**的，手指点不中就是不可用。
 //   4. 单一重音：多过一个强调色是"像模板"的头号成因。
+//   5. **DOM 标记与样式必须对得上**（本轮新增）：`word-title` 与 `primary` 这两个语义类名
+//      是 `app.mjs` 与 `styles.css` 之间唯一的耦合面。样式侧写对了、app.mjs 忘了标记，
+//      界面**不会报错**、只会静默丢掉衬线与重音——所以这里同时读两份文件对账。
+//      口径来源：`DEC-OPI-968b804d-af33-437d-be9b-277ecead51db.6`（两条「重要」的人裁决）。
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync, existsSync } from 'node:fs';
@@ -19,8 +23,128 @@ import { fileURLToPath } from 'node:url';
 
 const cssPath = fileURLToPath(new URL('../web/styles.css', import.meta.url));
 const htmlPath = fileURLToPath(new URL('../web/index.html', import.meta.url));
+const appPath = fileURLToPath(new URL('../web/app.mjs', import.meta.url));
 const css = readFileSync(cssPath, 'utf8');
 const html = readFileSync(htmlPath, 'utf8');
+// `app.mjs`（生产者：谁带语义类名）与 `styles.css`（消费者：类名怎么画）是本文件仅有的两个被测源
+const app = readFileSync(appPath, 'utf8');
+/** 剥掉注释后的 CSS：注释里可以讨论写法，断言只该看规则本身。 */
+const cssBody = css.replace(/\/\*[\s\S]*?\*\//g, '');
+
+/**
+ * 取 `styles.css` 里某个选择器的规则体（剥注释后）。
+ * 找不到就断言失败——"规则被删了"必须报错，不能静默返回空串让后面的 match 蒙混过关。
+ *
+ * ⚠️ 实现要点（本轮踩了两次才定下来，别退回去用行首锚定）：
+ * 遍历**每一个规则块**，并要求它的**整条选择器列表**与 pattern 精确相等（`^\s*…\s*$`）。
+ * 不能写成 `^textarea\s*\{` 那种"行首锚定"：多行选择器列表的**最后一行**在文本上与
+ * "独占一行的选择器"无法区分——`input[type='password'],\ninput[type='text'],\ntextarea {`
+ * 里的 `textarea {` 就正好落在一个行首，而 `^` 在该行匹配、前缀可以为空。
+ * 实测后果：`cssBlock('textarea')` 抓到的是那个**合写块**（它没有 `overflow-wrap`），
+ * 于是"删掉 textarea 的 overflow-wrap"这条断言永远 RED——一个自己坏掉的助手会被误读成
+ * "实现没写"（本轮就是这么误判过一次，白跑一轮）。
+ * 现在合写块的 selector 是 `input[…], input[…], textarea`（含逗号、不等于 pattern），天然被排除。
+ *
+ * `[^{}]*?` 惰性展开 + 引擎"最早起点优先"⇒ 匹配到的 `m[1]` 一定是**从上一个 `}` 之后
+ * 到 `{` 之前的完整选择器文本**（中间夹着的换行也包含在内），不会只截到最后一行。
+ */
+function cssBlock(selectorPattern) {
+  const want = new RegExp(`^\\s*${selectorPattern}\\s*$`);
+  const re = /(?:^|\n)([^{}]*?)\{([^}]*)\}/g;
+  let m;
+  while ((m = re.exec(cssBody)) !== null) {
+    if (want.test(m[1])) return m[2];
+  }
+  return assert.fail(`styles.css 里没有"选择器恰好等于 /${selectorPattern}/"的规则`
+    + '（要求整条选择器列表精确相等；合写块如 `input, textarea {` 会被排除——'
+    + '那是有意的：只有独占的选择器才能保证量到的声明属于这个规则）');
+}
+
+/**
+ * 取 `app.mjs` 的 `viewFor` 里全部 `action(...)` 调用点，解析出参数个数与文案。
+ *
+ * 为什么值得写这个解析器（而不是在测试里 grep 几个字符串）：本轮的核心断言是
+ * **"哪 6 屏有主操作、哪 2 屏一颗都不许有"**——这是一张与屏幕一一对应的表。
+ * 只断言"某个文案带 primary"会让"给 pending 也加上 primary"这条真实回归**照样 GREEN**。
+ */
+function actionCallSites() {
+  const sites = [];
+  // 逐字符扫描参数，遇到顶层逗号才切分（文案里含全角括号、参数里含箭头函数与三元表达式，
+  // 所以不能用简单 split）。
+  const re = /action\(/g;
+  let m;
+  while ((m = re.exec(app)) !== null) {
+    let i = m.index + 'action('.length;
+    let depth = 0;
+    let inString = null;
+    const args = [];
+    let cur = '';
+    for (; i < app.length; i += 1) {
+      const ch = app[i];
+      if (inString !== null) {
+        cur += ch;
+        if (ch === '\\') { cur += app[i + 1]; i += 1; continue; }
+        if (ch === inString) inString = null;
+        continue;
+      }
+      if (ch === "'" || ch === '"' || ch === '`') { inString = ch; cur += ch; continue; }
+      if (ch === '(' || ch === '[' || ch === '{') depth += 1;
+      if (ch === ')' || ch === ']' || ch === '}') {
+        if (depth === 0 && ch === ')') break;
+        depth -= 1;
+      }
+      if (ch === ',' && depth === 0) { args.push(cur.trim()); cur = ''; continue; }
+      cur += ch;
+    }
+    args.push(cur.trim());
+    const first = args[0] ?? '';
+    const label = /^'(.*)'$/.exec(first)?.[1] ?? null;
+    sites.push({ label, argCount: args.length, isPrimary: args[3] === 'true' });
+  }
+  assert.ok(sites.length >= 18, `app.mjs 里应能解析出全部 action 调用点，实测 ${sites.length} 个`);
+  return sites;
+}
+
+/**
+ * 文案 → 该文案的**全部**调用点是否都被标成主操作。
+ *
+ * 为什么按文案索引是成立的：全站每一颗动作按钮的文案都只出现一次，**唯一例外是
+ * 「再写一次」「下一个词」**——它们在 `feedback` 屏有**两处**调用点（等判定的那一格
+ * 与判定回来后的那一格）。这两颗本来就必须**都不是** primary，所以"全部调用点"这个口径
+ * 对我们关心的判断没有失真；反过来，如果哪天给其中一处标了 primary，
+ * `assert.deepEqual([...].filter(v => v))` 那条会立刻 RED。
+ */
+function primaryByLabel() {
+  const map = new Map();
+  for (const s of actionCallSites()) {
+    if (s.label === null) continue;         // 动态文案（`演示播放中 ? … : …`）不参与
+    map.set(s.label, (map.get(s.label) ?? []).concat(s.isPrimary));
+  }
+  return map;
+}
+
+/** 该文案的**所有**调用点都是主操作。 */
+const allPrimary = (map, label) => {
+  const v = map.get(label);
+  assert.ok(v, `app.mjs 里找不到文案为「${label}」的 action 调用点`);
+  return v.every(Boolean);
+};
+/** 该文案的**所有**调用点都不是主操作。 */
+const nonePrimary = (map, label) => {
+  const v = map.get(label);
+  assert.ok(v, `app.mjs 里找不到文案为「${label}」的 action 调用点`);
+  return v.every((x) => x === false);
+};
+
+/** 本轮裁决里**必须有**主操作的那 6 屏（`DEC-…db.6`）。 */
+const PRIMARY_LABELS = ['拍照', '保存', '快门', '我会读了（开始跟读）', '提交造句', '我读过了（自评打勾）'];
+/** 本轮裁决里**一颗都不许有**主操作的那 2 屏：对等选项，点亮其一 = 凭空造出优先级。
+ *  这张表里**只放走 `action()` 造的按钮**，且文案必须是静态字面量：
+ *   ·「从相册选图」与候选词一样是手写 `createElement('button')`（`ready` 屏里排在「拍照」之后）
+ *     ⇒ 不在 `action()` 调用点里，由另一条测试（"候选按钮是一组等权选项"那条）钉住；
+ *   ·「听示范」走的是动态文案 `demoBusy ? '正在播放…' : '听示范'`（解析器读不到字面量）
+ *     ⇒ 由下面单独一条断言按"带 disabled 参数、不带 primary"钉住。 */
+const NO_PRIMARY_LABELS = ['手动补交', '再写一次', '下一个词', '跳过跟读', '清除 Key', '再拍一张'];
 
 test('样式表存在且被 index.html 链接（链接断了就是无样式白板）', () => {
   assert.ok(existsSync(cssPath), 'web/styles.css 不存在');
@@ -86,40 +210,163 @@ test('键盘可达性：有焦点环，且尊重"减少动态"', () => {
   assert.match(css, /@media\s*\(prefers-reduced-motion:\s*reduce\)/, '缺少 prefers-reduced-motion 分支');
 });
 
-test('"要学的英文词用衬线"这条排版口径真的落地了', () => {
-  // 口径本身写在文件头注释里；这里钉住它被两个"英文词所在处"真的用上了
+test('"要学的英文词用衬线"这条排版口径真的落地了（含 word 屏那个词）', () => {
+  // 口径本身写在文件头注释里；这里钉住它落在**三个**"英文词所在处"：
+  // 候选词、待补原句，以及 `word` 屏那个**用户来拿的那个词**。
   assert.match(css, /--font-word:/, '缺少 --font-word 令牌');
-  assert.match(css, /\.choices\s*>\s*button\s*\{[^}]*var\(--font-word\)/s, '候选词没有用衬线字族');
-  assert.match(css, /\.pending-item\s*>\s*p:first-child\s*\{[^}]*var\(--font-word\)/s,
+  assert.match(cssBlock('\\.choices\\s*>\\s*button'), /var\(--font-word\)/, '候选词没有用衬线字族');
+  assert.match(cssBlock('\\.pending-item\\s*>\\s*p:first-child'), /var\(--font-word\)/,
     '待补原句没有用衬线字族');
+  // `word` 屏的标题：它是整屏的视觉主角，所以衬线之外还要**大一号**。
+  // 两条一起断言（而不是只断言"用了衬线"）：只改衬线不改字号的话，这个"主角"仍然
+  // 与周围中文标题同号，"那个词就是用户来拿的东西"这层意思没有落到视觉上。
+  const wordTitle = cssBlock('h2\\.word-title');
+  assert.match(wordTitle, /font-family:\s*var\(--font-word\)/, 'word 屏的标题没有用衬线字族');
+  const wSize = /font-size:\s*([\d.]+)rem/.exec(wordTitle);
+  assert.ok(wSize, 'word 屏的标题没有显式 font-size');
+  const h2Size = /font-size:\s*([\d.]+)rem/.exec(cssBlock('h2'));
+  assert.ok(h2Size, '通用 h2 没有显式 font-size');
+  assert.ok(Number(wSize[1]) > Number(h2Size[1]),
+    `word 屏标题必须比通用 h2 大（它是整屏主角）：实测 ${wSize[1]}rem vs 通用 ${h2Size[1]}rem`);
+  // ⚠️ 反向守卫：**不许**把衬线挂到通用 `h2` 上——中文标题（「用这个词写一句你自己的话」…）
+  // 必须保持系统无衬线，那是文件头的明文口径。这条是本轮唯一"加类名而不是改 h2"的理由，
+  // 必须钉住，否则下一个人"顺手简化"就把中文标题一起变成衬线了。
+  assert.equal(/font-family/.test(cssBlock('h2')), false,
+    '通用 h2 不许声明 font-family（中文标题必须用系统无衬线；衬线只给 .word-title）');
+  // 生产者那一半：`word` 屏的标题必须真的带上这个类名。
+  // 只查样式侧会漏掉最隐蔽的一种坏法——CSS 写对了、`app.mjs` 忘了标记，界面**不报错**，
+  // 只是"要学的那个词"静默变回无衬线（这正是本轮要修的那条「重要 1」）。
+  assert.match(app, /title\(shownWord\?\.word \?\? '', 'word-title'\)/,
+    'app.mjs 的 word 屏标题没有声明 word-title 类名');
 });
 
-test('主操作的重音判据与真实 DOM 形状一致（两条屏幕判据 + 兜底压回）', () => {
-  const body = css.replace(/\/\*[\s\S]*?\*\//g, '');
-  // 设置屏：靠 Key 输入框认屏（settings 与 pending 的动作行 DOM 形状完全一样，
-  // 位置/数量判据都分不开——这两条是实测踩出来的结论）
-  assert.match(body, /#app:has\(input\[type='password'\]\)\s*div\.row\s*>\s*button:first-child/,
-    '缺少"设置屏首颗按钮是主操作"的判据');
-  // 主屏取词行：靠那个隐藏的文件选择器认行
-  assert.match(body, /div\.row:has\(>\s*input\[type='file'\]\)\s*>\s*button:first-child/,
-    '缺少"主屏取词行首颗按钮是主操作"的判据');
-  // 兜底：其余动作行（pending 的「手动补交 / 返回」、feedback 的「下次 / 改写」）必须压回描边，
-  // 否则界面会凭空出现两个同等重量的实心块
-  assert.match(body, /div\.row\s*>\s*button:first-child\s*\{/,
-    '缺少"其余动作行一律次级"的兜底规则');
-  // 曾经把它写成 nth-child / only-of-type 而静默失效，这两种形态不许再回来
-  assert.equal(/button:nth-child\(2\)/.test(body), false,
-    '不要用 nth-child 数按钮（动作行里夹着隐藏的 input，位次判据恒不成立）');
-  assert.equal(/button:first-child:only-of-type/.test(body), false,
-    '不要用 only-of-type 判"独占一行"（设置屏那一行有 3 个子节点，实测 matches() 为 false）');
-  // 入口行（设置 / 待补）必须整体压成次要，且必须写在主操作规则之前（同权重靠顺序取胜）
-  const entryIdx = body.indexOf('p.row > button');
-  const primaryIdx = body.indexOf('div.row:has(> input');
-  assert.ok(entryIdx > -1, '缺少 p.row > button（入口行的次级外观）');
-  assert.ok(primaryIdx > -1, '缺少主操作判据');
-  assert.ok(entryIdx < primaryIdx,
-    'p.row > button 必须写在主操作判据之前：同权重时靠书写顺序取胜，'
-    + '写在后面会把设置屏的「保存」重新压成次要外观');
+test('主操作的重音由 `.primary` 显式声明（类名 + 6 屏表，不猜 DOM 形状）', () => {
+  // ── 背景（四轮踩坑换来的，别按直觉改这里）──────────────────────────────────
+  // 上一版靠 `:has()` 从"屏幕独有元素"反推主操作（`#app:has(input[type=password])` 认设置屏、
+  // `div.row:has(> input[type=file])` 认主屏取词行）。它覆盖不到 `capturing` / `word` /
+  // `composing`——那三屏**唯一的推进按钮一颗重音都没有**。根因是结构性的：
+  // `settings` 与 `pending` 的动作行 DOM 形状**完全一样**（同为 `#app > div > div.row`），
+  // 位置/数量判据（`nth-child` / `only-of-type` / 按钮个数）三次实测全败。
+  //
+  // ── 新判据 = 生产者显式声明，这张表就是契约本身 ──────────────────────────────
+  const prim = primaryByLabel();
+  // 1. 六屏各有一颗：缺一颗 = 那一屏的主操作静默变成描边（就是本轮要修的「重要 2」）
+  for (const label of PRIMARY_LABELS) {
+    assert.equal(allPrimary(prim, label), true, `「${label}」必须是主操作（primary=true）`);
+  }
+  // 2. `pending` 与 `feedback` **一颗都不许有**：它们是对等选项，点亮其一 = 凭空造出优先级。
+  //    这一半是"回证没被误点亮"，比第 1 条更容易被漏——只断言"该亮的亮了"会让
+  //    "顺手把「手动补交」也标成 primary"照样 GREEN。
+  for (const label of NO_PRIMARY_LABELS) {
+    assert.equal(nonePrimary(prim, label), true, `「${label}」不许是主操作（它是与同级按钮对等的选项）`);
+  }
+  // 3. "一屏至多一颗"的结构性保证：全站被标成 primary 的调用点恰好就是那 6 个
+  //    （同屏出现两颗实心块是"层级失灵"最直观的形态；多出来的那颗一定是标错了屏）。
+  //    注意 `feedback` 的两处「再写一次 / 下一个词」共 4 个调用点，全部必须是 false——
+  //    它们不在下面这张表里，所以只要有一处被点亮，这条 deepEqual 立刻 RED。
+  const primSites = actionCallSites().filter((s) => s.isPrimary);
+  assert.deepEqual(primSites.map((s) => s.label).sort(), [...PRIMARY_LABELS].sort(),
+    '全站被标成主操作的 action 调用点必须恰好是那六屏各一颗');
+  // 4. `ready` 屏那一行里有两颗按钮（`[拍照, input[type=file], 从相册选图]`）：
+  //    **第一颗是主操作，第二颗是中性的**——这正是旧版靠 `nth-child(2)` 想表达、
+  //    却因为中间夹着那个隐藏 input 而恒不成立的那件事。现在它由显式标记决定：
+  //    「拍照」在 PRIMARY_LABELS 里，「从相册选图」不在，且后者是手写 createElement，
+  //    结构上拿不到 `.primary`。
+  assert.match(app, /albumButton\.textContent = '从相册选图';/, '相册按钮必须仍是手写创建的（不参与 action 标记）');
+  assert.equal(prim.has('从相册选图'), false, '「从相册选图」不许出现在 action 调用点里（它与拍照并列，不是主操作）');
+  // 「听示范」的文案是动态的（`demoBusy ? '正在播放…' : '听示范'`），按文案索引读不到，
+  // 所以按"调用点形状"钉：它带 disabled 参数（第 3 个）但**不带** primary（第 4 个）。
+  // 这一颗是 `reading` 屏的辅助动作（播示范音），主操作是「我读过了（自评打勾）」。
+  const demoSites = actionCallSites().filter((s) => s.label === null && s.argCount === 3);
+  assert.equal(demoSites.some((s) => s.isPrimary), false,
+    '动态文案的辅助动作（「听示范」）不许被标成主操作');
+  // 5. 标记形态：只有 `primary` 这一条路径能给按钮加重音（裸 `.primary` 以外不许表达）
+  assert.match(app, /if \(primary\) b\.className = 'primary';/,
+    'app.mjs 的 action 必须用 `if (primary) b.className = \'primary\';` 这一个形态打标记');
+
+  // ── 样式侧：`.primary` 是**唯二**的 accent 声明（另一处是 `.choices > button` 的中性描边）──
+  assert.match(cssBody, /button\.primary\s*\{/, '缺少 `button.primary` 的重音规则');
+  const accentBg = [...cssBody.matchAll(/([^{}]+)\{([^{}]*)\}/g)]
+    .filter(([, , body]) => /--btn-bg:\s*var\(--accent\)/.test(body))
+    .map(([, sel]) => sel.trim().replace(/\s+/g, ' '));
+  assert.equal(accentBg.length, 1,
+    `给按钮上重音底色（--btn-bg: var(--accent)）的位置必须恰好一处，实测 ${accentBg.length} 处：${accentBg.join(' | ')}`);
+  assert.match(accentBg[0], /\.primary/, `重音规则必须靠 .primary 类名，实测选择器：${accentBg[0]}`);
+  // 候选词仍是中性描边（它是"一组等权选项"）；"不会被点亮"的第一道防线是它自己那条声明，
+  // 第二道是下面第 5 条——它拿不到 `.primary` 类（见 NO_PRIMARY_LABELS + PRIMARY_LABELS 那张表）。
+  assert.match(cssBlock('\\.choices\\s*>\\s*button'), /--btn-bg:\s*var\(--surface\)/,
+    '候选词必须是中性描边外观（不许是重音）');
+
+  // 5. **旧判据不许回流**。三种形态各自对应一次真实事故，全部实测过：
+  //    · `:has()` 屏幕判据：分不开 settings / pending，且覆盖不到三屏（本轮删掉的原因）；
+  //    · `:nth-child(2)`：`ready` 的动作行第 2 个子节点是隐藏的 `input[type=file]`，位次判据恒不成立；
+  //    · `:first-child:only-of-type`：假设"保存独占一行"，实为 3 个子节点，`matches()` 恒为 false。
+  //    再加上"任何针对按钮的位置判据"一起去查（`button:first-child` 这类）：
+  //    只要重音还能被位置决定，本文件就又会回到"猜 DOM 形状"的老路。
+  for (const [re, why] of [
+    [/\.row:has\(/, ':has() 屏幕判据分不开 settings 与 pending（同为 #app > div > div.row）'],
+    [/:has\(input\[type='password'\]\)/, ':has() 认设置屏已被类名声明取代'],
+    [/button:nth-child\(2\)/, 'nth-child 数按钮恒不成立（动作行里夹着隐藏的 input）'],
+    [/button:first-child:only-of-type/, 'only-of-type 判"独占一行"恒不成立（设置屏那行有 3 个子节点）'],
+  ]) {
+    assert.equal(re.test(cssBody), false, `styles.css 里不许再出现这种猜屏/猜位次的判据：${why}`);
+  }
+  // 6. 入口行（「设置（API Key）」与「待补反馈（n 条）」）恒次级，且**结构上**不可能被点亮：
+  //    它们的按钮由 `p.row` 包着，而主操作用的类名只打在「动作行」的按钮上。
+  assert.match(cssBody, /p\.row\s*>\s*button\s*\{/, '缺少 p.row > button（入口行的次级外观）');
+  assert.equal([...cssBody.matchAll(/p\.row\s*>\s*button[^{]*\{([^}]*)\}/g)]
+    .some(([, body]) => /--btn-bg:\s*var\(--accent\)/.test(body)), false,
+  '入口行不许声明重音底色（「设置（API Key）」每屏都挂着，点亮它等于每屏两个实心块）');
+});
+
+test('禁用态压过主操作重音：两条互为冗余的防线 + 一个真正的脆点', () => {
+  // 背景（总控提出、我实测核对过）：`ready` 屏的「拍照」在 `storageFull()` 时会被禁用
+  // （`action('拍照', onCapture, storageFull(), true)`）。如果禁用后它还是满血实心，
+  // 用户会看到一个"看起来能点、点了没反应"的按钮——而这一档的 UX 口径是"停止派发新任务"。
+  //
+  // ⚠️ **实测结论：现在没有这个缺陷**（`tmp/probes/disabled-settled-check.mjs`）：
+  // 给 `button.primary` 设 `disabled` 并**等 180ms 过渡结束**后，computed 背景
+  // 浅色 `rgb(243,240,235)`（= `--surface-sunken`）、深色 `rgb(26,25,23)`，都不是重音。
+  // 一开始量到"没变"是**测量假象**：`button` 基础规则有 `transition: background 180ms`，
+  // 设完 `disabled` **立刻**读 `getComputedStyle` 拿到的是**过渡起点**（旧颜色）。
+  // 这条坑值得留在注释里——它会让"禁用失效"这种缺陷看起来成立（也会让真缺陷看起来不成立）。
+  //
+  // ── 为什么禁用能压过重音（机制，别再按"顺序"想）────────────────────────────
+  // `button.primary` 只设 `--btn-*` **变量**，不声明 `background` 本身；于是这颗按钮的
+  // `background` 只由两条声明竞争：基础 `button`（0,0,1）与 `button:disabled`（0,1,1）。
+  // **权重分胜负、与书写顺序无关** ⇒ `button:disabled` 的直接 `background` 赢。
+  // 加上 `button.primary:disabled`（0,2,1）把变量也钉成沉底灰，两条**互为冗余**：
+  // 删任一条外观都不变（测试两条都钉住，删任一条都会 RED——这是回归防线，不是冗余断言）。
+  const baseDisabled = cssBlock('button:disabled');
+  // ① 承重墙：基础禁用规则必须**直接声明 background**（不能只设变量）
+  assert.match(baseDisabled, /(^|[;{\s])background(-color)?\s*:\s*var\(--surface-sunken\)/,
+    'button:disabled 必须直接声明 background: var(--surface-sunken)'
+    + '（只设 --btn-* 变量的话，主操作的 accent 会从基础 button 规则漏出来）');
+  // ② 第二条独立防线：主操作的禁用态显式规则必须在，且把变量也钉成沉底灰
+  assert.match(cssBlock('button\\.primary:disabled'), /--btn-bg:\s*var\(--surface-sunken\)/,
+    'button.primary:disabled 必须把 --btn-bg 钉成 var(--surface-sunken)');
+  // ③ 入口行的禁用态也要有（三类按钮的禁用外观必须一致）
+  assert.match(cssBlock('p\\.row\\s*>\\s*button:disabled'), /--btn-bg:\s*var\(--surface-sunken\)/,
+    'p.row > button:disabled 必须把 --btn-bg 钉成 var(--surface-sunken)');
+  // ④ **真正的脆点**（这一条才是"别再让顺序说话"的正确写法）：
+  //    `button.primary` 不许**直接**声明 `background`。现在它走变量，变量与
+  //    `button:disabled` 直接声明的属性不冲突 ⇒ 顺序无关、禁用态稳。
+  //    但若有人"顺手"把它写成 `button.primary { background: var(--accent) }`：
+  //    那条是 0,1,1、与 `button:disabled` **同权重**，而 `.primary` 写在后面
+  //    ⇒ **靠书写顺序赢** ⇒ 禁用按钮重新变成满血实心（真缺陷）。
+  assert.equal(/(^|[;{\s])background(-color)?\s*:/.test(cssBlock('button\\.primary')), false,
+    'button.primary 不许直接声明 background（必须走 --btn-* 变量；直接声明会与 button:disabled '
+    + '同权重、靠书写顺序分胜负，禁用态就会随"谁写在后面"而静默失效）');
+  // ⑤ 第二层保险（**不是机制本身**，如实说明）：`button:disabled` 必须写在 `button.primary` **之后**。
+  //    机制是 ①+④（两者不争同一个属性 ⇒ 顺序无关；实测禁用后为沉底灰）。
+  //    但把"禁用"写在后面，等于万一有人同时破坏了 ④（把重音写成直属性），
+  //    顺序仍然站在"禁用"这一边。这是**与书写顺序绑定的冗余**，所以要用结构断言钉住它——
+  //    否则有人把两块挪一下，这层保险会静默消失，而 ①④ 照样全绿（测不出来）。
+  const iPrimary = cssBody.indexOf('button.primary {');
+  const iDisabled = cssBody.indexOf('button:disabled {');
+  assert.ok(iPrimary > -1 && iDisabled > -1, 'styles.css 缺少 button.primary 或 button:disabled 规则');
+  assert.ok(iDisabled > iPrimary,
+    'button:disabled 必须写在 button.primary 之后（同权重 0,1,1；这条顺序是"禁用压过重音"的第二层保险）');
 });
 
 test('深色模式由系统偏好驱动，且是暖黑而非纯黑', () => {
@@ -154,43 +401,38 @@ test('候选按钮是"大一号的衬线块"，且触控区比普通按钮更高
   assert.match(btn[0], /min-height:\s*56px/, '候选词触控高度必须是 56px（高于普通按钮的 44px）');
 });
 
-test('候选按钮与入口行都不参与"第一颗是主操作"那条重音映射', () => {
-  // 走查台实测（11 个档位逐颗按钮比 computed 背景）：全站只有 ready 屏的「拍照」与设置屏的
-  // 「保存」是实心重音，其余动作行全是描边——候选词是**一组等权选项**，点亮其中一颗
-  // 会凭空制造出一个并不存在的"推荐词"。
+test('候选按钮是一组等权选项：既不是重音外观，也拿不到 .primary', () => {
+  // 候选词（手选档那 15 颗）是**一组等权选项**，点亮其中一颗会凭空制造出一个并不存在的
+  // "推荐词"。本轮改成显式 `.primary` 声明之后，这条防线有**两道**，两道都要钉住：
   //
-  // ⚠️ 两条与脑算不符的实测事实（都是本轮在浏览器里量出来的，别按直觉改这里）：
-  //   1. `.choices > button`（权重 0,2,0）的规则块写在**主操作判据之后**——但 `div.row >
-  //      button:first-child`（同权重、写在之前）**根本匹配不到候选按钮**（实测
-  //      `btn.matches("div.row > button:first-child") === false`），两条规则不命中同一批元素，
-  //      所以顺序无关。写一条"`.choices > button` 必须写在主操作之前"是**与实情不符的假断言**
-  //      （本轮实跑 RED，见报告的变异校验一节）。
-  //   2. 候选词"不会被点亮"的**真正**防线是下面第 2 条（`.choices > button` 自己声明了中性的
-  //      `--btn-bg: var(--surface)`）。实测：把 `.choices > button` 并进主操作选择器之后，
-  //      候选按钮的 computed 背景**仍然是 rgb(255,255,255)**（`--btn-bg: var(--accent)` 被
-  //      同权重、写在后面的那条中性声明覆盖）——所以第 1 条是**结构性**断言（防止判据选择器
-  //      里混进候选词这一类），不是"再挡一层视觉回归"。
-  const body = css.replace(/\/\*[\s\S]*?\*\//g, '');
-  const blockOf = (selector) => {
-    const re = new RegExp(`${selector}\\s*\\{([^}]*)\\}`, 's');
-    const m = re.exec(body);
-    assert.ok(m, `styles.css 缺少 ${selector} 规则`);
-    return m[1];
-  };
-  // 1. 两类主操作的判据里都不许出现 .choices（判据的适用范围必须一眼可读：它只针对那两类屏）
-  for (const sel of ["#app:has\\(input\\[type='password'\\]\\) div\\.row > button:first-child",
-    "div\\.row:has\\(> input\\[type='file'\\]\\) > button:first-child"]) {
-    assert.equal(new RegExp(sel).test(body), true, `缺少主操作判据：${sel}`);
-    const rule = new RegExp(`${sel}[^{]*\\{([^}]*)\\}`, 's').exec(body);
-    assert.equal(/\.choices/.test(rule?.[0] ?? ''), false, `主操作判据里不许出现 .choices：${sel}`);
-  }
-  // 2. **视觉防线在这里**：候选按钮自己那套值必须是"中性描边"（--btn-bg 指到 --surface）
-  const choices = blockOf('\\.choices\\s*>\\s*button');
+  // ⚠️ 一条与脑算不符的实测事实（上一轮在浏览器里量出来的，别按直觉改这里）：
+  //   候选词"看起来不亮"**不是**因为书写顺序赢了。实测：把 `.choices > button` 并进当时
+  //   那条主操作选择器之后，候选按钮的 computed 背景**仍然是 rgb(255,255,255)**——
+  //   `--btn-bg: var(--accent)` 被同权重、写在后面的中性声明覆盖了。
+  //   所以"候选按钮自己声明中性外观"才是**视觉**防线；"它拿不到 `.primary` 类名"是
+  //   另一道**结构性**防线（两道都留着，任何一道单独都不够）。
+  //
+  // 1. 视觉防线：候选按钮自己那套值必须是中性描边（--btn-bg 指到 --surface）
+  const choices = cssBlock('\\.choices\\s*>\\s*button');
   assert.match(choices, /--btn-bg:\s*var\(--surface\)/, '候选词必须是中性描边外观（不许是重音）');
-  // 3. 入口行（设置 / 待补）压在主操作判据之前：同权重靠书写顺序取胜，
-  //    写反了设置屏的「保存」会被重新压成白的（实测踩过，见 styles.css 的注释）
-  assert.ok(body.indexOf('p.row > button') < body.indexOf("#app:has(input[type='password'])"),
-    'p.row > button 必须写在主操作判据之前');
+  assert.equal(/--btn-bg:\s*var\(--accent\)/.test(choices), false, '候选词不许自己被点亮');
+  // 2. 结构防线（与第 1 条互相独立）：候选词按钮**不是** `action()` 造的
+  //    （`case 'capturing'` 里手写 `doc.createElement('button')` + `list.append(b)`），
+  //    所以它结构上**根本拿不到** `.primary` 这个类名——`action()` 是唯一打标记的地方。
+  //    这里把"唯一性"钉住：`action()` 的调用点里不许出现候选词文案（否则说明有人把
+  //    候选词改成走 action 造了，那道结构防线就没了）。
+  //    ⚠️ 这条的杀伤力在**变异**上：真把候选按钮打上 primary 之后，
+  //    第 4 条测试里"全站被标成主操作的调用点恰好是那六屏各一颗"会立刻 RED。
+  const prim = primaryByLabel();
+  for (const w of ['mug', 'cup', 'bottle', 'bowl', 'kettle', 'umbrella']) {
+    assert.equal(prim.has(w), false, `候选词「${w}」不该出现在 action 调用点里（它必须由 .choices 自己造）`);
+  }
+  // 3. 候选词的容器仍是 `.choices`（竖排一整列，见下面那条测试），不是 `.row`
+  assert.match(app, /list\.className = 'choices';/, '候选词容器必须仍是 .choices');  // 3. 入口行（「设置（API Key）」/「待补反馈（n 条）」）的次级外观也一并钉住：
+  //    它们每屏都挂着，一旦被点亮就是"每屏两个实心块"。
+  assert.match(cssBody, /p\.row\s*>\s*button\s*\{/, '缺少 p.row > button（入口行恒次级）');
+  assert.equal([...cssBody.matchAll(/p\.row\s*>\s*button[^{]*\{([^}]*)\}/g)]
+    .some(([, body]) => /--btn-bg:\s*var\(--accent\)/.test(body)), false, '入口行不许被点亮');
 });
 
 test('动作行的按钮可以换行，且不许被压窄成一条', () => {
@@ -209,19 +451,41 @@ test('动作行的按钮可以换行，且不许被压窄成一条', () => {
   assert.match(btn[1], /min-height:\s*44px/, '按钮触控高度必须 ≥44px');
 });
 
-test('长串不许把页面撑宽：原句与造句框都要能断行', () => {
+test('长串不许把页面撑宽：原句与造句框都显式声明了断行', () => {
   // 走查台实测：输入框/文本域在 390px 下都不撑宽页面（`document.documentElement.scrollWidth`
-  // 恒为 390），靠的就是下面这两条断行规则。学习者的原句与造句都是**用户自己打的字**，
-  // 里面有长英文单词（"supercalifragilisticexpialidocious"）是常态，不是边角情形。
+  // 恒为 390）。学习者的原句与造句都是**用户自己打的字**，里面有长英文单词
+  // （"supercalifragilisticexpialidocious"）是常态，不是边角情形。
   // 删掉 `.pending-item` 那条会 RED：待补抽屉里一条超长原句就能把整页顶出横向滚动条。
-  assert.match(css, /\.pending-item\s*>\s*p:first-child\s*\{[^}]*overflow-wrap:\s*anywhere/s,
+  assert.match(cssBlock('\\.pending-item\\s*>\\s*p:first-child'), /overflow-wrap:\s*anywhere/,
     '待补原句必须能任意断行（它是用户逐字写下的句子，不许截断也不许撑宽页面）');
-  // ⚠️ **不许**在这里断言"造句输入框有 overflow-wrap"——实测：styles.css 里 `overflow-wrap`
-  // **只出现一次**（就是上面那条），textarea 的 `break-word` 来自浏览器 UA 默认样式表。
-  // 写一条"textarea 有断行规则"的断言就是一个永远 RED 的假契约；反过来把它当成本产品的
-  // 保证也是错的（换浏览器就可能没有）。所以这里只钉"不许出现 overflow: hidden/scroll
-  // 这类会把长句截掉的写法"这条我们真正拥有的性质。
-  const inputBlock = [...css.replace(/\/\*[\s\S]*?\*\//g, '').matchAll(/([^{}]+)\{([^{}]*)\}/g)]
-    .find(([, sel]) => /textarea/.test(sel));
-  assert.ok(inputBlock, 'styles.css 里必须有 textarea 的规则块（输入框样式单源）');
+  // ── textarea 这一条是本轮新增的**口径变化**，说明为什么它现在可以是一条真断言 ──────
+  // 上一轮这里写的是"**不许**断言 textarea 有 overflow-wrap"——当时的实测事实是
+  // `styles.css` 里 `overflow-wrap` 只出现一次（待补原句那条），textarea 的
+  // `break-word` 来自**浏览器 UA 默认样式表**。那时写这条断言就是个永远 RED 的假契约，
+  // 而且会把"浏览器的行为"错当成"本产品的保证"。**本轮已把这行显式写进产品样式**（零风险清理 3），
+  // 于是它从"借来的默认值"变成"我们的声明"——断言的对象随之变成产品自己的声明。
+  // ⚠️ 别把它改回"只断言存在 textarea 规则块"：那样删掉这行也不会有人响，
+  // 而在 Firefox/WebKit 上 UA 默认值未必相同（本机没装那两个引擎，未验）。
+  const ta = cssBlock('textarea');      // 锚定行首：只命中那条独立规则，不吃 `input, textarea` 合写块
+  assert.match(ta, /overflow-wrap:\s*break-word/,
+    'textarea 必须显式声明 overflow-wrap: break-word（长串不撑宽页面不许靠浏览器默认值兜着）');
+  // 反面：不许用 `overflow: hidden` 之类把长句**截掉**（用户看不见自己写的后半句）
+  assert.equal(/(^|[^-])overflow:\s*(hidden|scroll|auto|clip)/.test(ta), false,
+    'textarea 不许用 overflow: hidden/scroll 截断长句（截掉用户自己写的字比撑宽更坏）');
+});
+
+test('深色分支的 --bg 只声明一次（唯一一行死代码曾被下一行救回）', () => {
+  // 曾经这里是两条：
+  //     --bg: #16151300;   /* 8 位十六进制，alpha=00 ⇒ 全透明 */
+  //     --bg: #161513;     /* 下一行立刻覆盖成不透明 */
+  // 最终值是对的（实测 rgb(22,21,19)），所以**没有任何测试会响**——而真正的风险是
+  // "将来有人删掉下面那行"：整个深色底会变全透明，用户看到浏览器白底，全站没有一条测试拦得住。
+  // 断言"恰好声明一次"同时防住两种坏法：残留死代码、以及删掉那行（次数会变成 0）。
+  const dark = /@media\s*\(prefers-color-scheme:\s*dark\)\s*\{([\s\S]*?)\n\}/.exec(css);
+  assert.ok(dark, '缺少 prefers-color-scheme: dark 分支');
+  const bgDecls = [...dark[1].matchAll(/--bg:\s*([^;]+);/g)].map((m) => m[1].trim());
+  assert.equal(bgDecls.length, 1,
+    `深色分支里 --bg 必须恰好声明一次（多条会互相覆盖，删错一条就是全透明底），实测 ${bgDecls.length} 次：${bgDecls.join(' | ')}`);
+  // 8 位十六进制在这里必然意味着"带 alpha"，而深色底色不能透（会露出浏览器白底）
+  assert.equal(/#[0-9a-fA-F]{8}\b/.test(dark[1]), false, '深色分支里不许出现 8 位十六进制颜色（带 alpha 会让底色透明）');
 });

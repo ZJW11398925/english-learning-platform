@@ -88,7 +88,6 @@
 @media (prefers-color-scheme: dark) {
   :root {
     /* 暖黑：不是纯黑（纯黑会显得廉价且失去层次） */
-    --bg: #16151300;
     --bg: #161513;
     --surface: #201e1b;
     --surface-sunken: #1a1917;
@@ -158,6 +157,23 @@ h2 {
   text-wrap: balance;
 }
 
+/* `word` 屏的标题：**要学的那个英文词**，所以它是整屏的视觉主角。
+ * 它是用户来这一屏**要拿走的东西**，不是一个"分区小标题"——所以衬线（`--font-word`）
+ * 之外还要大一号（2rem vs 通用 h2 的 1.5rem）。
+ *
+ * ⚠️ **不要**把 `--font-word` 挂到通用 `h2` 上：中文标题（「拍一件你身边的东西」
+ * 「用这个词写一句你自己的话」…）必须保持系统无衬线，那是本文件头的明文口径。
+ * 这个类名由 `app.mjs` 的 `title(t, cls)` **显式**打上，不是按 DOM 形状猜的
+ * （`word` 的 h2 与 `composing` 的 h2 祖先链完全一样，纯 CSS 分不开）。 */
+h2.word-title {
+  font-family: var(--font-word);
+  font-size: 2rem;
+  line-height: 1.15;
+  font-weight: 600;
+  /* 英文词不加负字距（那条是给中文标题收紧用的） */
+  letter-spacing: 0;
+}
+
 p {
   margin: 0 0 var(--s-3);
   /* 正文不要长到难以回行（中文约 30–40 字/行在这个宽度下最舒适） */
@@ -212,9 +228,9 @@ a:hover {
 }
 
 /* ═══ 按钮 ═══════════════════════════════════════════════════════════════════
- * 默认是**次要**外观（描边中立），主操作由 :first-child 那一颗升格为实心重音。
- * 理由：一屏里只该有一个最重的动作；app.mjs 里主操作恒为该行第一颗按钮
- * （ready 是「拍照」、word 是主推进、反馈是「下次」），所以这个映射是稳定的。
+ * 默认是**次要**外观（描边中立），主操作由 **`.primary` 类名**升格为实心重音。
+ * 理由：一屏里只该有一个最重的动作，而"哪一个"是**产品决定**，所以由生产者
+ * （`app.mjs` 的 `action(label, onClick, disabled, primary)`）显式声明，样式只认类名。
  */
 button {
   display: inline-flex;
@@ -253,24 +269,22 @@ button:focus-visible {
   border-color: var(--accent);
 }
 
-button:disabled {
-  color: var(--ink-faint);
-  background: var(--surface-sunken);
-  border-color: var(--line);
-  box-shadow: none;
-  cursor: not-allowed;
-}
+/* （`button:disabled` 原本在这里。**它已下移到 `button.primary` 之后**——理由见那一处的注释：
+ *  两者同为 0,1,1，把"禁用"写在后面，等价于给"禁用压过重音"再加一层与书写顺序绑定的保证。） */
 
-/* 「待补反馈（n 条）」与「设置（API Key）」各自独占一行（app.mjs 里都是 `p.row`）：
- * 次级样式即可，不与主操作争重音。
- *
- * ⚠️ 两条纪律（都踩过）：
- * 1. 必须写成 `p.row > button`（而非 `:only-of-type` 等更窄的形态）——它与下面
- *    `div.row` 的选择器**同权重**，收窄会让"单独一颗按钮的入口行"被重音规则点亮。
- * 2. 必须写在 `div.row` 那几条**之前**。权重相同时靠书写顺序取胜，而设置屏的 `保存`
- *    恰恰也独占一个 `div.row`（`only-of-type` 规则会给它重音）——本规则若写在后面，
- *    就会把 `保存` 重新压成白的，界面于是丢掉唯一的主操作。（实测记录：本规则原先
- *    写在本节末尾，`保存` 的 computed background 因此是 rgb(255,255,255)。）
+/* ⚠️ 这条注释**已按实情更正**（原文写于"主操作靠 `:first-child` 猜"那一版，两句话现在都不成立）：
+ * 1. 原文写「必须写成 `p.row > button`（而非 `:only-of-type` 等更窄的形态）——它与下面
+ *    `div.row` 的选择器**同权重**，收窄会让"单独一颗按钮的入口行"被重音规则点亮」。
+ *    现在主操作是 `.primary` 类名，**不再有"行内第一颗自动升格"那条规则**，
+ *    所以收窄与否都不会让入口行被点亮。仍然保留 `p.row > button` 的写法：它是**显式**的
+ *    （一眼看出"入口行恒次级"），且不依赖任何别的规则是否还在。
+ * 2. 原文写「必须写在 `div.row` 那几条**之前**」（理由是"同权重靠书写顺序取胜，
+ *    写反了设置屏的 `保存` 会被压成白的"）。**这条约束现在也不存在了**：
+ *    入口行的按钮在 `<p class="row">` 里、动作行的按钮在 `<div class="row">` 里，
+ *    **两组选择器不命中同一批元素**（`p.row > button` 对 `div.row` 里的按钮
+ *    `matches()` 恒为 false），所以书写顺序对结果没有影响。
+ *    实测复核方式：`document.querySelector('div.row > button.primary')` 存在，
+ *    而它 `matches('p.row > button') === false`。
  */
 p.row > button {
   --btn-bg: var(--surface);
@@ -279,36 +293,44 @@ p.row > button {
   font-weight: 560;
 }
 
-/* 主操作：**主屏那一条动作行**里的第一颗按钮。
+/* 主操作：**`.primary` 类名**（由 `app.mjs` 的 `action(..., primary = true)` 打上）。
  *
  * 做法：按钮的全部视觉都读 `--btn-*` 变量（带缺省值，见上面 button 规则），
  * 这里**只覆写那一颗**的变量，于是"谁是主操作"是一处显式声明。
  *
- * ── 为什么不用"行内第一颗按钮"这种直觉判据（三条实测反例，全部踩过）──────
- * `ready` 屏的动作行 = `[button(拍照), input[type=file], button(从相册选图)]`，
- *   第二个**子节点**是那个隐藏 input——所以任何 `button:nth-child(2)` 类判据恒不成立。
- * `settings` 屏的动作行 = `[保存, 清除 Key, 返回]`（**三颗**），而
- * `pending` 屏的动作行 = `[手动补交, 返回]`（**两颗**）——所以"按行内按钮个数"分类
- *   同样分不开：既踩过"≥3 算次级"把 `保存` 压成白的，也踩过"≥2 算主操作"把
- *   `手动补交` 点亮成实心块。
+ * ── 为什么不再用屏幕判据猜（第四次的结论：猜不动了）────────────────────────
+ * 本条规则的前一版靠 `:has()` 从"屏幕独有元素"反推主操作：
+ *   `#app:has(input[type='password'])`（设置屏）与 `div.row:has(> input[type='file'])`（主屏取词行）。
+ * 它之所以只剩这两条，是因为**位置/数量判据三次实测全败**：
+ *   `ready` 屏的动作行 = `[button(拍照), input[type=file], button(从相册选图)]`，
+ *     第二个**子节点**是那个隐藏 input ⇒ 任何 `button:nth-child(2)` 类判据恒不成立；
+ *   `settings` 屏的动作行 = `[保存, 清除 Key, 返回]`（**三颗**）而
+ *     `pending` 屏 = `[手动补交, 返回]`（**两颗**）⇒ "按行内按钮个数"分类分不开，
+ *     既踩过"≥3 算次级"把 `保存` 压成白的，也踩过"≥2 算主操作"把 `手动补交` 点亮；
+ *   `:only-of-type`（假设"保存独占一行"，实为 3 个子节点）与 `.muted div.row`
+ *     （假设祖先带 .muted，实为普通 div）两次 `matches()` 都是 false。
+ * 根因是**结构性的、不可绕**：`settings` 与 `pending` 的动作行 DOM 形状**完全一样**
+ * （同为 `#app > div > div.row`），所以纯 CSS 永远分不开它们。
+ * 而 `:has()` 路线的覆盖也是残缺的：`capturing` 的「快门」、`word` 的「我会读了」、
+ * `composing` 的「提交造句」三屏**既不匹配上面那两条、也没有别的规则**，
+ * 于是那些屏**唯一的推进按钮没有任何重音**——`composing` 整屏只有一颗真动作按钮，
+ * 它却不是最重的视觉块。每多一屏就要多猜一条判据，这条路没有终点。
  *
- * ── 真正的判据（与 DOM 一一对应，可机械复核）──────────────────────────────
- * 实测（走查台 eval 取 `parentElement` / children / `matches()`，不是看截图猜的）：
- *   ready    : `div.row` 内含 **`input[type=file]`**（相册入口那个隐藏 input）；
- *   settings : `div.row` 三颗（保存 / 清除 Key / 返回），祖先链 `button < div.row < div`；
- *   pending  : `div.row` 两颗（手动补交 / 返回），**祖先链与 settings 完全相同**；
- *   feedback : `div.row` 两颗（下次 / 改写）。
+ * ── 现在：显式声明（一句话可复核）──────────────────────────────────────────
+ * 谁是主操作由**生产者**说了算（`app.mjs` 的 `action` 第 4 个参数），样式只认 `.primary`。
+ * **一屏至多一颗**：`ready`（拍照）/ `settings`（保存）/ `capturing`（快门）/
+ * `word`（我会读了（开始跟读））/ `composing`（提交造句）/ `reading`（我读过了（自评打勾））
+ * 各一颗；`pending`（手动补交 / 返回）与 `feedback`（再写一次 / 下一个词）**一颗都不给**——
+ * 它们是对等选项，点亮其中之一会凭空造出并不存在的优先级。
  *
- * ⚠️ 关键事实：`settings` 与 `pending` 的动作行在 DOM 形状上**不可区分**（同为
- * `#app > div > div.row`）。所以"谁是主操作"不能靠位置/数量判——两个屏幕唯一的区别是
- * **设置屏有那句 `input[type=password]`**（Key 输入框），拿它当屏幕判据才成立。
- * 前一版先后试过 `:only-of-type`（假设"保存独占一行"，实为 3 个子节点）与
- * `.muted div.row`（假设祖先带 .muted，实为普通 div）——两次都 `matches()` 为 false，
- * `保存` 因此丢了重音。记在这里，免得第三次再猜。
- *
- * ⚠️ 下面三条权重相同、按书写顺序取胜：先点亮两类主操作，再由「其余」那条压回描边。 */
-#app:has(input[type='password']) div.row > button:first-child,
-div.row:has(> input[type='file']) > button:first-child {
+ * ⚠️ 权重说明：下面写成 **`button.primary`（0,1,1）** 而不是裸 `.primary`（0,1,0）。
+ * 理由是**不再有更具体的位置判据压过它**：上一版那条兜底 `div.row > button:first-child`
+ * （0,2,1）虽然已删，但"再加一条位置判据"正是本文件反复发生的事故，而
+ * `div.row` 里的主操作按钮**同时命中** `div.row > button:first-child`（0,2,1）；
+ * 裸 `.primary` 会被它压成描边（重音静默消失），`button.primary` 则稳稳赢。
+ * 与 `p.row > button`（0,1,1）**不冲突**：那条只命中 `<p class="row">` 里的按钮，
+ * 而主操作恒在 `<div class="row">` 里，两组选择器不命中同一批元素。 */
+button.primary {
   --btn-bg: var(--accent);
   --btn-fg: var(--on-accent);
   --btn-line: var(--accent);
@@ -317,22 +339,61 @@ div.row:has(> input[type='file']) > button:first-child {
   font-weight: 600;
 }
 
-/* 其余动作行一律描边外观（同权重、写在后面 ⇒ 靠顺序压住上面那条）。
- * 例子：pending 的「手动补交 / 返回」是对等的两个选项；
- * feedback 的「下次 / 改写 / …」同理，点亮其中之一会凭空制造出并不存在的优先级。 */
-div.row > button:first-child {
-  --btn-bg: var(--surface);
-  --btn-fg: var(--ink);
-  --btn-line: var(--line-strong);
-  --btn-bg-hover: var(--surface-sunken);
-  --btn-line-hover: var(--ink-faint);
-  font-weight: 560;
+/* 禁用的按钮（**基础规则，适用于所有按钮**）。
+ *
+ * ⚠️ 位置是有意的：它写在 `button.primary` **之后**。两者权重相同（都是 0,1,1），
+ * 而这里声明的是 `background` / `color` / `border-color` **属性本身**（`.primary` 声明的是
+ * `--btn-*` 变量）。当前两者**不争同一个属性**，所以顺序其实无关（实测：禁用后 computed
+ * 背景为 `--surface-sunken`，见 `tmp/probes/disabled-settled-check.mjs`）。
+ * 但把它放在后面，等于额外买一层保险：万一将来有人把重音写成
+ * `button.primary { background: var(--accent) }`（直属性、同权重），
+ * 身后这条仍然赢——**禁用按钮不会因为"谁写在后面"而静默变回满血实心**。
+ * 这道保险靠断言钉住（`tests/styles.test.mjs` 的"禁用态压过主操作重音"那条）。 */
+button:disabled {
+  color: var(--ink-faint);
+  background: var(--surface-sunken);
+  border-color: var(--line);
+  box-shadow: none;
+  cursor: not-allowed;
 }
 
-/* 禁用的按钮：压过上面所有变量声明（同权重、写在最后）。
- * `p.row > button` 也要在这里列一次：它在本节之后才声明 --btn-*，靠顺序本来就能赢，
- * 但禁用态必须与其余的禁用外观完全一致，所以显式钉住。 */
-div.row > button:first-child:disabled,
+/* 禁用的主操作：按钮禁用后不再是"可推进的那一步"，所以压回与其余禁用按钮完全一致的外观。
+ *
+ * ⚠️ 这条规则**不是**禁用外观的唯一防线（实测确认，别把它当承重墙）：
+ * 真正让"禁用压过重音"的是上面那条 `button:disabled` ——它**直接声明 `background`**
+ * （权重 0,1,1），而基础 `button` 那条是 `background: var(--btn-bg, var(--surface))`（0,0,1），
+ * 权重高的赢 ⇒ 禁用态的底色由 `button:disabled` 决定，跟 `--btn-*` 变量无关。
+ * 本条只是把变量也钉成同一套值，于是**两条路都指向"沉底灰"**：
+ *   · 删掉本条 ⇒ `--btn-bg` 回到 `var(--accent)`，但 `button:disabled` 的直接 `background` 仍然赢 ⇒ 外观不变；
+ *   · 删掉 `button:disabled` 的 `background` ⇒ 本条把 `--btn-bg` 钉成 `var(--surface-sunken)` ⇒ 外观也不变。
+ * 两条**互为冗余**，所以这个外观是稳的（测试里两条都钉住，删任一条都会 RED）。
+ *
+ * 权重算准：`button`(0,0,1) + `.primary`(0,1,0) + `:disabled`(0,1,0) = **0,2,1**。
+ * 它压过 `button.primary`（0,1,1），所以 `--btn-bg` 的最终值是沉底灰。 */
+button.primary:disabled {
+  --btn-bg: var(--surface-sunken);
+  --btn-fg: var(--ink-faint);
+  --btn-line: var(--line);
+  box-shadow: none;
+}
+
+/* 其余动作行（没打 `.primary` 的）不需要任何规则：它们直接落在上面的基础 `button` 规则上
+ * （`--btn-bg` 缺省即 `--surface`、`--btn-line` 缺省即 `--line-strong`），
+ * 也就是"次级描边外观"。旧版这里有一条 `div.row > button:first-child` 兜底，
+ * 存在的唯一理由是"把上面 `:has()` 误点亮的第一颗压回去"——判据换成类名后它没有用途了，
+ * 而且它与 `.choices > button` 同为 0,2,0/0,2,1 量级、专门挑"行内第一颗"，
+ * 是一条随时可能咬到新按钮的**位置判据**（正是本文件反复踩的那一类）。一并删掉。 */
+
+/* 入口行（「设置（API Key）」/「待补反馈（n 条）」）的禁用态。
+ *
+ * ⚠️ 这条注释**已按实情更正**。原文写「禁用的按钮：压过上面所有变量声明（同权重、写在最后）。
+ * `p.row > button` 也要在这里列一次：它在本节之后才声明 --btn-*，靠顺序本来就能赢」——
+ * 两处都不对了：① 本节**不是**"最后"，后面还有 `.row` / 输入 / 候选词 / 待补 / 媒体等规则；
+ * ② `p.row > button` 现在写在本节**之前**（在文件里搜得到），"本节之后才声明"是旧版的事实。
+ * 真实情况：`p.row > button`（0,1,1）与 `p.row > button:disabled`（0,2,1）**权重不同**，
+ * 后者靠**权重**取胜、与书写顺序无关；而基础 `button:disabled`（0,1,1）声明的是同一套
+ * "沉底灰"值，所以即使这两条都不在，入口行的禁用外观也一样。这里保留它只为**显式**：
+ * 让"入口行禁用 = 沉底灰"在文件里一眼可读，不必去基础规则里推。 */
 p.row > button:disabled {
   --btn-bg: var(--surface-sunken);
   --btn-fg: var(--ink-faint);
@@ -340,9 +401,9 @@ p.row > button:disabled {
   box-shadow: none;
 }
 
-/* 不支持 `:has()` 的老浏览器退化为全部次要外观——重音缺失不影响任何功能。 */
-
-
+/* （旧版这里有一句「不支持 `:has()` 的老浏览器退化为全部次要外观」的退化说明。
+ *  现在主操作判据是类名，与 `:has()` / `color-mix()` 的支持度**完全无关**：
+ *  类名选择器是所有引擎都有的。这条退化路径连同它的注释一起退场。） */
 
 /* ═══ 按钮组（app.mjs 的 .row）═══════════════════════════════════════════════ */
 .row {
@@ -401,11 +462,17 @@ textarea {
   transition: border-color var(--dur) var(--ease), box-shadow var(--dur) var(--ease);
 }
 
-/* 拼写/自动纠正在学习场景里是干扰（用户写的就是要评的东西） */
+/* 造句框比通用输入框大一号（这是这一屏的主输入，用户要在这里写一整句）。 */
 textarea {
   min-height: 6.5em;
   resize: vertical;
   font-size: 1.0625rem;
+  /* 长串不许把页面撑宽：**显式声明**，不靠浏览器 UA 默认值。
+   * 用户在这里打的是一句英文，出现长单词（"supercalifragilisticexpialidocious"）
+   * 或粘贴一整段没有空格的串都是常态，不是边角情形。实测带上这条之后，
+   * 40 字符无空格长词下 `documentElement.scrollWidth` 仍是 390（不撑宽页面）。
+   * ⚠️ 别把它删掉换成 `overflow: hidden`：那会把长句**截掉**（用户看不见自己写的后半句）。 */
+  overflow-wrap: break-word;
 }
 
 input::placeholder,
