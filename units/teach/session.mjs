@@ -14,6 +14,11 @@
 //
 // 代价（如实记）：`close` 之后没有回到 `intake` 的转移——一次会话就是一次会话。
 // 想继续练要新开一次（`createSession`），这是有意的：会话边界是"这一轮教了什么"的账本边界。
+//
+// 另一处代价（与 `units/state-machine.mjs` 的口径相同）：`snapshot()` 会把**当前拍子尚未结算
+// 的那一段**算进去（读到快照的那一刻为止），因此它每次调用都读一次时钟——它不是幂等的纯读数，
+// 同一次停留里连读两次可以拿到两个不同的值。换来的是"在 elicit 里磨了 90 秒最后还是收尾了"
+// 这种样本不丢时间；只报已结算的账本会让**正在进行的拍子**永远读成 0。
 
 /** 拍子顺序（快照的 dwellMs 按这个顺序建键，形状稳定）。 */
 export const PHASES = Object.freeze([
@@ -46,7 +51,24 @@ export const TRANSITIONS = Object.freeze({
   close: Object.freeze({}),
 });
 
-/** 造一台教学会话状态机。 */
+/**
+ * 造一台教学会话状态机。
+ *
+ * @param {{ onEnter: (phase: string) => void, now?: () => number }} options
+ *   - `onEnter(phase)`：进入某拍子时回调，**构造时先以 `'idle'` 调一次**（否则首屏没有渲染时机）
+ *   - `now()`：时钟注入点，默认 `Date.now`（算停留时长用；测试注入假时钟即可确定性地断言时长）
+ * @returns {{
+ *   readonly phase: string,
+ *   can: (action: string) => boolean,
+ *   send: (action: string) => boolean,
+ *   snapshot: () => { phase: string, dwellMs: Record<string, number> },
+ * }}
+ *   `send` **只接动作名**：本模块当前没有任何动作携带负载，所以不开第二个形参——
+ *   挂一个没人用、也没规定语义的 `payload?` 只会让调用方以为它会被处理（`units/state-machine.mjs`
+ *   的 `send(action, payload)` 是因为它的 `frameBad` 真的要读 `payload.reason`）。
+ *   将来真有动作需要负载时再加，并同时补上语义与测试。
+ * @throws {TypeError} `onEnter` / `now` 不是函数（契约违约，响亮失败）
+ */
 export function createSession({ onEnter, now = Date.now } = {}) {
   if (typeof onEnter !== 'function') {
     throw new TypeError('createSession: onEnter 必须是函数（进入每个拍子时回调，用于渲染）');
@@ -59,24 +81,39 @@ export function createSession({ onEnter, now = Date.now } = {}) {
   let enteredAt = now();
   const dwellMs = Object.fromEntries(PHASES.map((p) => [p, 0]));
 
-  const settle = () => {
-    dwellMs[phase] += now() - enteredAt;
-    enteredAt = now();
+  // 时钟**只读一次**，读数传进来结算：写成 `dwellMs[phase] += now() - enteredAt; enteredAt = now();`
+  // 会把两次读数之间的那段时间记成谁的都不是（每次转移漏一小段，且逐次调用都走时的假时钟下
+  // 是系统性偏差，不是偶发抖动）。口径与 `units/state-machine.mjs` 的 `settle(t)` 一致。
+  const settle = (t) => {
+    dwellMs[phase] += t - enteredAt;
+    enteredAt = t;
   };
+
+  // 查表只认**自有属性**：`Object.prototype` 上有 `constructor` / `toString` / `__proto__` /
+  // `hasOwnProperty` 这些成员，靠 `TRANSITIONS[phase]?.[action]` 查会顺着原型链取到它们——
+  // 于是 `send('toString')` 返回 `true`，并把 `phase` 设成一个**函数**（接着 `dwellMs[phase]`
+  // 变成 undefined、`onEnter` 收到函数），全程不抛错。这是静默的错误状态，比抛错坏得多。
+  const nextOf = (action) => (
+    Object.hasOwn(TRANSITIONS[phase], action) ? TRANSITIONS[phase][action] : undefined
+  );
 
   onEnter(phase);
 
   return {
     get phase() { return phase; },
-    can(action) { return Boolean(TRANSITIONS[phase]?.[action]); },
+    can(action) { return nextOf(action) !== undefined; },
     send(action) {
-      const next = TRANSITIONS[phase]?.[action];
-      if (!next) return false;           // 非法动作：静默忽略，绝不悄悄改状态
-      settle();
+      const next = nextOf(action);
+      if (next === undefined) return false;   // 非法动作：静默忽略，绝不悄悄改状态
+      settle(now());
       phase = next;
       onEnter(phase);
       return true;
     },
-    snapshot() { return { phase, dwellMs: { ...dwellMs } }; },
+    // 当前拍子**尚未结算**的那一段也算进去（读到快照的那一刻为止）：否则正在进行的拍子永远读成 0，
+    // "在 elicit 里磨了很久"这种样本会丢掉全部时间。返回副本，调用方改它改不到内部账本。
+    snapshot() {
+      return { phase, dwellMs: { ...dwellMs, [phase]: dwellMs[phase] + (now() - enteredAt) } };
+    },
   };
 }
