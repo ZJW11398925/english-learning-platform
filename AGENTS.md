@@ -27,7 +27,9 @@
 - **实弹标定已完成（`DEC-…b3.7`，2026-09-17，5 次真实计费调用全 200、零超时）**：识物腿 `latencyMs=1860.4ms`（返 mug 0.95 / cup 0.4）；造句反馈腿端到端 1718/1291/1681/1683 ms，usage 完整，`validateFeedback` 四条全过；另 1 次零计费空句 `status=pending reason=empty_sentence`（一次请求都没发）。**结论：三条常量原样保留**（`RECOGNIZE_REQUEST_TIMEOUT_MS=12000` / `FEEDBACK_REQUEST_TIMEOUT_MS=24000` / `PLAY_WORD_TIMEOUT_MS=15000`，余量 6.5x/14x/8.9x），不收紧（本机有线≠弱网，假超时比多等更坏）也不抬高（无弱网证据）。**真实瓶颈已定位不在网络而在模型侧 reasoning token 生成**（completion 144-239，其中 reasoning 100-177）。上传腿有界：相机/相册同口径先缩后编（长边 512 / JPEG 0.8），base64 后约 40-80KB，对 32MiB 上限有 3 个数量级余量。**如实登记两处未验**：`uncertain` 一档本轮 4 条语料 **0 次命中**（探针如实报不一致）；`--degenerate` 三条退化语料**未跑**（3 次计费调用，未授权）。
 - **线上已与仓库对齐（`VAL-…b3.13` 二次跑 `VR-…b3.38` = PASS）**：首跑 `VR-…b3.17` = **FAIL**（19 文件中 3 处不一致，**全部只在注释**——线上仍在注释里点名已退役的 `server/*-upstream.mjs`，HEAD 已改为「旧服务端代理（已退役）」，可执行代码逐字节一致、功能性漂移 = 0；线上落后 HEAD 恰 1 个提交）。已按 `DEC-…b3.19` 跑 `node scripts/deploy-pages.mjs` 把 gh-pages 从 `f9d73d4` **快进**到 `e982789`，复跑得 **mismatched_files=0 / in-sync=19/19**。
   - **部署脚本已修**（`scripts/deploy-pages.mjs`）：原逻辑只要远端 SHA ≠ split SHA 就报「不一致且无法快进」并要人 `--force`，但它**从不检查祖先关系**——而 split 是确定性的，远端是本地结果的祖先时本应是一次普通快进（`--force` 反而会丢掉远端那个祖先提交，把增量部署变成历史改写）。现改为先问 `merge-base --is-ancestor`，只有真分叉才拦。首次触发场景：上一次部署后又有只改注释的提交（`e476063`）没发上去。
-  - ⚠️ **CDN 缓存会造成假阴性**：推送成功后线上最长 **10 分钟**（`Cache-Control: max-age=600`）仍服务旧内容，此时比对会假报 MISMATCH。**复验要么等 TTL 过期，要么用 cache-buster（`?cb=<随机>`）取内容**；判别依据可看响应头 `x-origin-cache: HIT`。
+  - ⚠️ **CDN 缓存会造成假阴性**：推送成功后线上最长 **10 分钟**（`Cache-Control: max-age=600`）仍服务旧内容，此时比对会假报 MISMATCH。
+  - ⚠️ **复验判据已更正（2026-09-17 第二次部署实测）**：**看响应的 `Last-Modified`**——它仍是上一次部署的时间 ⇒ GitHub Pages 构建**尚未完成**，此时等多久读都是旧的。**`?cb=<随机>` 这个 cache-buster 不可靠**：上一轮它在"边缘 CDN 陈旧"时有效，这一轮在"构建未完成"时**无效**（带 cb 仍返回旧 CSS，且 `x-origin-cache` 为空、`Age` 很小）。**正确姿势：先看 `Last-Modified` 是否已更新，再谈内容比对**；不要靠加随机 query 硬闯。
+  - **第二次部署记录**（界面修复上线）：gh-pages `83d827d..f1d3350` 快进（非强推）；构建落地后复验 **mismatched_files=0 / in-sync=22**，且线上 `styles.css` 实测含 `button.primary` / `word-title` / `textarea overflow-wrap`、深色 `16151300` 死代码已清。
 - **文档摘要核验必须先归一（`DEC-…b3.24`）**：`DEC-…d5.5` 登记的三份文档摘要**按「工作树 LF 归一后的字节」计算**，**不是**盘上原始字节、也不是 git blob。核验证明：LF 归一口径下三个摘要**逐位相等（零漂移）**；用原始字节算则 CRLF 的两份会假报 DRIFT（spec 是 LF 文件故两种口径同值）。**以后复验一律先 `-replace "`r`n","`n"` 再 sha256**，否则会重踩本轮踩过的假漂移。
 - Task 1–10 + Task 9B：代码资产仍在（551/551 绿，`6758e44`）；分支 `feat/first-value-slice`，master 停在计划提交
 - **Task 11 契约级验收 = 挂起**（`docs/真机验证清单.md` 57 步清单与两份实验方案保留在册，重构后若重启验证可复用）
@@ -74,6 +76,7 @@ node scripts/mutation-probe.mjs          # 变异探针（跑前先冻住工作�
   - `DEC-OPI-968b804d-af33-437d-be9b-277ecead51db.1` —— 补验交付的裁决：**产物接受、测试数字口径纠正**（它报 510/0，文档那条命令实测 509/1）+ 探针命名污染的根因与修法
   - **`DEC-OPI-968b804d-af33-437d-be9b-277ecead51db.6` —— 两条「重要」的人裁决**：①`word` 屏要学的词真的用衬线；②主操作改成**显式类名 `primary`**，废掉那两条 `:has()` 猜屏判据（代价：突破 `DEC-…b3.44` 的「DOM 零改动」——`app.mjs` 只加类名/标记，不改文案不改交互）；③轻微项只清零风险的三个，**`--ink-faint` 对比度 2.93:1 未修（已登记）**。任务书 `TASK-OPI-968b804d-…db.3` 已委派执行
   - `VAL-OPI-968b804d-af33-437d-be9b-277ecead51db.8` —— 上述修复的验收（`VR-…db.10` = **PASS**，511/0，六屏各恰一颗 primary、pending/feedback 零点亮）
+  - `VAL-OPI-968b804d-af33-437d-be9b-277ecead51db.14` —— **上线核验**（`VR-…db.16` = **PASS**，线上 22 文件 0 不一致，`button.primary` / `word-title` / `overflow-wrap` 实测在线）
   - 本轮代码改动：`scripts/deploy-pages.mjs`（修快进误拦）+ `web/styles.css` / `web/app.mjs`（界面重做，**第一轮 DOM 零改动；第二轮按人裁决加了 `word-title` / `primary` 两个类名**）/ `web/gallery.html` / `web/favicon.svg` / `web/index.html` / `tests/styles.test.mjs`
 - **契约载体**（GOAL / IN_SCOPE / OUT_OF_SCOPE / 约束 / CORE_JOURNEY）：`DEC-OPI-ecb3037d-1a56-46d3-b931-4d482dcc668f.19`
 - **文档绑定决策**（三份治理文档的 SHA-256 登记在其 ASSUMPTIONS 断言里；文档变更后 digest 不匹配即漂移证据）：`DEC-OPI-5c134c67-9bdd-46d2-b9bc-7d51bfde8585.5`
