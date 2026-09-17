@@ -9,10 +9,24 @@
 // （挑焦点、选方法、定难度、组装提示词、校验输出）都在 `web/units/teach/**` 的纯模块里。
 // 这样"教什么"可以在 Node 里被确定性地测，而"长什么样"才需要浏览器。
 //
-// 代价（如实记）：MVP 是**单线程对话**，没有历史会话列表、没有作品回看
-// （设计稿 §8 的作品化是下一步，Task 12）。没有它，"拥有感"这一条还没兑现。
+// 代价（如实记）：MVP 是**单线程对话**，没有历史会话列表、没有"哪一天聊过什么"的导航。
 // 另一条：一次会话就是一次会话（`session.mjs` 的 `close` 没有回到 `intake` 的转移），
-// 而本视图**从不发 `close`**——刷新页面即新开一次，历史不在盘上（同 §11 风险 3）。
+// 而本视图**从不发 `close`**——刷新页面即新开一次。
+//
+// ===========================================================================
+// Task 12：作品回看与导出（兑现设计稿 §8 的"拥有感"与 §11 风险 3 的长期语料）
+// ===========================================================================
+//   · 作品按 `WORK_KEY` 落在**调用方注入的那个 storage** 上（`web/dialogue.html` 注的是
+//     `localStorage`）⇒ 刷新页面 / 关标签页再打开，回看与导出里**东西还在**。
+//   · **读回发生在挂载时**（`readWork(storage)`，坏数据安全回退成空作品）；
+//     **写回发生在回合落定之后**（学习者那句 + 系统回复那句都渲染完之后，一次 `appendTurn`）。
+//   · 导出的下载（`Blob` + `URL.createObjectURL`）**只在这个文件里**——`work.mjs` 是纯模块，
+//     只吐字符串；下载出口可以注入（`deps.download`），注入不进来时退化成"摊出只读 JSON"。
+//   · **只有一份权威**：作品的存储键是 `work.mjs` 的 `WORK_KEY`，本视图不另存一份内存副本
+//     真相（`work` 就是盘上那份的读回值，每次写回都是它的新数组）。
+//   ⚠️ **没做删除**：设计稿的 `PRIVACY_CONSTRAINTS` 里"可删除"这一半**本视图没有出口**
+//   （清浏览器数据会连 API Key 与画象一起删）。如实登记为缺口，见
+//   `.superpowers/sdd/task-12-report.md`。
 //
 // ===========================================================================
 // 本轮对计划 Task 10 Step 3 的三处改动（每一处都在仓库外实测过，见
@@ -88,6 +102,7 @@ import { chooseMethod } from './units/teach/method.mjs';
 import { runTurn } from './units/teach/loop.mjs';
 import { createProfile } from './units/teach/profile.mjs';
 import { bandRules } from './units/teach/difficulty.mjs';
+import { WORK_KEY, appendTurn, readWork, renderWork, workDayOf, exportWork } from './units/teach/work.mjs';
 
 /** 首屏邀请（视图自己造的两句话之一，另一句是"挑不出焦点"的换话题邀请）。 */
 const EMPTY_PROMPT = '说说你今天干了什么，或者你现在想说什么——中文就行。';
@@ -98,10 +113,19 @@ const NO_FOCUS_HINT = '这个我一时接不上——换一件今天的事说说
 /** 焦点一个都没挑出来时，情境槽的兜底（`focus.meaning` 为空串时的占位）。 */
 const FOCUS_PLACEHOLDER = '某个说法';
 
-/** 每回合写进提示词【拍子】槽的值。**照计划第 1813 行**，见文件头后果 (b)。 */
+/** 回看出口的按钮文案（`tests/dialogue-mount.test.mjs` 的按钮清单按精确文案钉住）。 */
+const REVIEW_LABEL = '回看我写过的';
+
+/** 导出出口的按钮文案。 */
+const EXPORT_LABEL = '导出记录';
+
+/** 作品还是空的时候回看里说的那句（空作品不许是一片空白）。 */
+const EMPTY_WORK_NOTE = '还没有写过什么——等你今天开口，这里会攒成你自己的日记。';
+
+/** 每个回合写进提示词【拍子】槽的值。**照计划第 1813 行**，见文件头后果 (b)。 */
 const TURN_PHASE = 'elicit';
 
-/** 每回合写进提示词【学习者状态】槽的值。**照计划第 1813 行**，见文件头后果 (c)。 */
+/** 每个回合写进提示词【学习者状态】槽的值。**照计划第 1813 行**，见文件头后果 (c)。 */
 const LEARNER_STATE = 'untouched';
 
 /**
@@ -134,22 +158,31 @@ function sceneFor(scenes, focus) {
 /**
  * 把对话挂到容器上。
  * @param {HTMLElement} root
- * @param {{ doc?: object, storage: object, generate: Function, candidates?: Array, scenes?: Array }} deps
+ * @param {{ doc?: object, storage: object, generate: Function, candidates?: Array, scenes?: Array, download?: Function }} deps
  *   - `doc`：DOM 工厂，默认 `globalThis.document`（与 `web/app.mjs` 的 `mount` 同一个既有做法）。
  *     **不许写成 `root.ownerDocument ?? globalThis.document`**：本仓库的假 DOM
  *     （`tests/helpers/dom.mjs` 的 `makeEl`）既没有 `ownerDocument`，Node 里也没有
  *     `globalThis.document`，那样写会让整个挂载在测试里当场炸（计划第 1760 行的原话，已实测）。
- *   - `storage`：学习者画象的存储（**由调用方注入**，视图不直接读写 `localStorage`）。
+ *   - `storage`：画象**与作品**的存储（**由调用方注入**，视图不直接读写 `localStorage`）。
  *   - `generate`：模型调用，形状 `({ prompt, attempt }) => Promise<string>`（`runTurn` 的契约）。
  *     本视图**不自己发请求**——这是"教学判断可以在 Node 里确定性地测"的前提。
  *   - `candidates` / `scenes`：候选焦点与情境（缺省 `[]`）。
+ *   - `download`：导出作品的下载出口，形状 `({ filename, text }) => void`。**可注入是为了
+ *     能在 Node 里测**（`Blob` 与 `URL.createObjectURL` 是浏览器 API，假 DOM 里没有）；
+ *     不注入、或它自己抛错时，导出退化成"摊出一个只读的 JSON 框让学习者自己复制"——
+ *     绝不允许"按了导出什么都没发生"（同族：`web/dialogue.html` 的失败路径都要有出口）。
+ *   - `Blob` / `urlFactory`：**只在测试里注入**（浏览器里它们就是全局的）。
+ *     `urlFactory` 的形状是 `{ createObjectURL, revokeObjectURL }`，缺省取 `globalThis.URL`。
  * @returns {Promise<void>}
  * @throws {TypeError} `generate` 不是函数 / `root` 不是容器 / `storage` 缺 `getItem`+`setItem`
  *   （`storage` 的守卫由 `createProfile` 提供，**一个 HTTP 请求都不会发**）
  */
 export async function mountDialogue(root, deps = {}) {
   assertRoot(root);
-  const { doc = globalThis.document, storage, generate, candidates = [], scenes = [] } = deps;
+  const {
+    doc = globalThis.document, storage, generate, candidates = [], scenes = [], download,
+    Blob: BlobCtor = globalThis.Blob, urlFactory = globalThis.URL,
+  } = deps;
   if (typeof generate !== 'function') {
     throw new TypeError('mountDialogue: generate 必须是函数（模型调用由调用方注入）');
   }
@@ -158,10 +191,17 @@ export async function mountDialogue(root, deps = {}) {
   // 先读档再建 DOM：storage 违约在**动界面之前**就响亮抛错（界面不许出现"挂了一半"的样子）。
   const maxChars = bandRules(profile.band()).maxChars;
 
-  /** 本次挂载的对话记录（**纯内存**：作品落盘是 Task 12 的事，见文件头代价）。 */
+  /** 本次挂载的对话记录（**纯内存**：它是"这一次会话聊了什么"，不是作品）。
+   *  作品在 `work` 里，而且是**盘上那份的读回值**（只有一份权威，见文件头 Task 12 段）。 */
   const transcript = [];
   const log = doc.createElement('div');
   log.className = 'dialogue-log';
+  // 作品区：回看的内容与"导出兜底"都落在这里（挂在记录区里面，与对话流同一个滚动区）。
+  // 建了就一直在，**但里面是空的**——回看的内容只在按下「回看我写过的」之后才生成
+  // （这是"没打开回看之前 DOM 里没有回看条"那条反向控制的界面侧前提）。
+  const workArea = doc.createElement('div');
+  workArea.className = 'work-area';
+  log.append(workArea);
   const input = doc.createElement('textarea');
   input.placeholder = EMPTY_PROMPT;
   input.rows = 3;
@@ -172,7 +212,15 @@ export async function mountDialogue(root, deps = {}) {
   const row = doc.createElement('div');
   row.className = 'row';
   row.append(send);
-  root.replaceChildren(log, input, row);
+  const review = doc.createElement('button');
+  review.textContent = REVIEW_LABEL;
+  const exportBtn = doc.createElement('button');
+  exportBtn.textContent = EXPORT_LABEL;
+  const workRow = doc.createElement('div');
+  workRow.className = 'row';
+  workRow.append(review, exportBtn);
+  // root 的直接子节点恰好四个：记录区（含作品区）/ 输入框 / 发送行 / 作品行。
+  root.replaceChildren(log, input, row, workRow);
 
   const push = (who, body) => {
     transcript.push({ who, body });
@@ -184,6 +232,91 @@ export async function mountDialogue(root, deps = {}) {
 
   const session = createSession({ onEnter: () => {} });
   push('system', EMPTY_PROMPT);
+
+  // ═══ 作品：挂载时**按 WORK_KEY 从注入的 storage 读回**（读路径坏数据安全回退） ═══
+  // 照计划原样交付时这里是 `let work = []` 纯内存 ⇒ 刷新页面后回看与导出皆空，
+  // 而所有测试都会绿（`DEC-OPI-968b804d-…db.107` 已核实）。这一行就是那个缺口的修法。
+  let work = readWork(storage);
+
+  /** 把回看视图重画一遍（**只在按下「回看我写过的」时调用**）。 */
+  const drawWork = () => {
+    // 每次重画前清空：连点两次不许把上次那批再追加一遍。
+    workArea.replaceChildren();
+    if (work.length === 0) {
+      // 空作品不许是一片空白（第一次按回看的人要知道这里将来装什么）。
+      const note = doc.createElement('p');
+      note.className = 'say-system';
+      note.textContent = EMPTY_WORK_NOTE;
+      workArea.append(note);
+      return;
+    }
+    // `renderWork` 按天分组（每天一块：标题行 + 该天所有回合行），分组的权威在 work.mjs 里。
+    // 视图**只负责把每一块印出来**，不解析日期、不自己拼文案。
+    // `workDayOf` 是分组键的同一份权威（标题行的日期与它同源，不会两处印出不同的日期）。
+    let cursor = 0;
+    for (const block of renderWork(work)) {
+      void workDayOf(work[cursor]);
+      const parts = block.split('\n');
+      cursor += parts.length - 1;   // 这一块里有几个回合（标题行不算）
+      // 按天分组的标题——回看视图**自己**的东西：没打开回看之前它在 DOM 之外
+      // （该判据的反向控制见 `tests/teach-work.test.mjs`）。
+      const heading = doc.createElement('p');
+      heading.className = 'work-day';
+      [heading.textContent] = parts;
+      workArea.append(heading);
+      for (const line of parts.slice(1)) {
+        const el = doc.createElement('p');
+        el.className = 'work-line';
+        el.textContent = line;
+        workArea.append(el);
+      }
+    }
+  };
+
+  review.addEventListener('click', () => {
+    drawWork();
+  });
+
+  /** 导出的下载出口：`Blob` + `URL.createObjectURL`，**本地完成、不经过任何服务器、不上传**。
+   *  注入的 `deps.download` 优先（测试用它，顺便让这一截在浏览器之外也可验）；
+   *  两者都没有（旧浏览器）⇒ 返回 false，由调用方走"摊出 JSON"那条兜底。 */
+  const startDownload = ({ filename, text: body }) => {
+    if (typeof download === 'function') {
+      download({ filename, text: body });
+      return true;
+    }
+    if (typeof BlobCtor !== 'function' || urlFactory === null || typeof urlFactory?.createObjectURL !== 'function') {
+      return false;   // 下载出口整体不可用
+    }
+    const blob = new BlobCtor([body], { type: 'application/json' });
+    const href = urlFactory.createObjectURL(blob);
+    const anchor = doc.createElement('a');
+    anchor.href = href;
+    anchor.download = filename;
+    anchor.click();
+    urlFactory.revokeObjectURL(href);
+    return true;
+  };
+
+  exportBtn.addEventListener('click', () => {
+    const body = exportWork(work);
+    let delivered = false;
+    try {
+      delivered = startDownload({ filename: '我的英语作品.json', text: body });
+    } catch {
+      delivered = false;   // 注入的实现自己炸了：与"没有出口"同一条兜底路
+    }
+    if (delivered) return;
+    // **不许静默什么都不发生**：摊出一个只读的 JSON 框让学习者自己复制。
+    // 导出是契约承诺（设计稿 §11 风险 3 的长期语料处置），这条路必须走得通。
+    // 📌 已知代价：它摊在**作品区**里，而作品区会被下一次「回看我写过的」的 `replaceChildren()`
+    // 清掉 ⇒ 兜底框在看一眼回看之后就没了（再按一次「导出记录」就回来）。
+    // 这是有意的（不从对话区里另开一块），但它确实是这个位置换来的代价。
+    const shows = doc.createElement('textarea');
+    shows.value = body;
+    shows.readOnly = true;
+    workArea.append(shows);
+  });
 
   send.addEventListener('click', async () => {
     const content = String(input.value ?? '').trim();
@@ -216,5 +349,17 @@ export async function mountDialogue(root, deps = {}) {
       scene,
     });
     push('system', turn.text);
+
+    // ═══ 作品写回：**学习者那句 + 系统这句都落定之后**才落一条 ═══
+    // 为什么放在这里（而不是在 push('learner', ...) 之后）：半条回合不是作品——
+    // 系统的回复还没到就落盘，会让"回看"里出现自己写了半句的幻觉。
+    // 日期照计划原文取 UTC 的 YYYY-MM-DD（代价见 `work.mjs` 文件头 ③）。
+    // 写失败（配额满 / 隐私模式）**不抛错**：学习流程不许因为写不进去而中断。
+    work = appendTurn(work, { date: new Date().toISOString().slice(0, 10), learner: content, system: turn.text });
+    try {
+      storage.setItem(WORK_KEY, exportWork(work));
+    } catch {
+      // 存储满了 / 隐私模式：这一次没记住（代价已登记在 work.mjs 文件头 ⑤）
+    }
   });
 }
