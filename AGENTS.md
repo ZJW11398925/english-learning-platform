@@ -68,6 +68,7 @@ node scripts/mutation-probe.mjs          # 变异探针（跑前先冻住工作�
   - `VAL-OPI-5a247eb9-6816-4e78-b80f-1c5eeff7ceb3.51` —— 界面重做**上线核验**（`VR-…b3.53` = **PASS**，线上 22 文件 0 不一致）
   - **`DEC-OPI-5a247eb9-6816-4e78-b80f-1c5eeff7ceb3.56` —— 流程违规的纠正**（总控亲自执行了开发；见红线 0）+ 任务书 **`TASK-OPI-5a247eb9-6816-4e78-b80f-1c5eeff7ceb3.54`**（剩余档位补验，已委派子代理）
   - `DEC-OPI-968b804d-af33-437d-be9b-277ecead51db.1` —— 补验交付的裁决：**产物接受、测试数字口径纠正**（它报 510/0，文档那条命令实测 509/1）+ 探针命名污染的根因与修法
+  - **`DEC-OPI-968b804d-af33-437d-be9b-277ecead51db.6` —— 两条「重要」的人裁决**：①`word` 屏要学的词真的用衬线；②主操作改成**显式类名 `primary`**，废掉那两条 `:has()` 猜屏判据（代价：突破 `DEC-…b3.44` 的「DOM 零改动」——`app.mjs` 只加类名/标记，不改文案不改交互）；③轻微项只清零风险的三个，**`--ink-faint` 对比度 2.93:1 未修（已登记）**。任务书 `TASK-OPI-968b804d-…db.3` 已委派执行。
   - 本轮代码改动：`scripts/deploy-pages.mjs`（修快进误拦）+ `web/styles.css` / `web/gallery.html` / `web/favicon.svg` / `web/index.html` / `tests/styles.test.mjs`（界面重做）；`app.mjs` 零改动
 - **契约载体**（GOAL / IN_SCOPE / OUT_OF_SCOPE / 约束 / CORE_JOURNEY）：`DEC-OPI-ecb3037d-1a56-46d3-b931-4d482dcc668f.19`
 - **文档绑定决策**（三份治理文档的 SHA-256 登记在其 ASSUMPTIONS 断言里；文档变更后 digest 不匹配即漂移证据）：`DEC-OPI-5c134c67-9bdd-46d2-b9bc-7d51bfde8585.5`
