@@ -1,0 +1,42 @@
+[
+  {
+    "point": "very + 动词",
+    "chineseTrap": "I very like it.",
+    "fix": "I like it very much. / I really like it."
+  },
+  {
+    "point": "冠词缺失",
+    "chineseTrap": "I went to bank.",
+    "fix": "I went to the bank."
+  },
+  {
+    "point": "过去时与现在时混用",
+    "chineseTrap": "Yesterday I go to the gym and I meet my friend.",
+    "fix": "Yesterday I went to the gym and met my friend."
+  },
+  {
+    "point": "there have",
+    "chineseTrap": "There have many people.",
+    "fix": "There are many people."
+  },
+  {
+    "point": "open/close 误用",
+    "chineseTrap": "Please open the light.",
+    "fix": "Please turn on the light."
+  },
+  {
+    "point": "虽然…但是… 直译",
+    "chineseTrap": "Although it rained, but we went out.",
+    "fix": "Although it rained, we went out."
+  },
+  {
+    "point": "borrow/lend 方向反",
+    "chineseTrap": "I borrowed him my book.",
+    "fix": "I lent him my book."
+  },
+  {
+    "point": "marry with",
+    "chineseTrap": "She married with him.",
+    "fix": "She married him."
+  }
+]

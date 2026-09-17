@@ -1,0 +1,42 @@
+[
+  {
+    "id": "rent-talk",
+    "setup": "你要跟房东说要再考虑两天再决定续不续租。",
+    "fits": ["hesitate", "deposit", "landlord"]
+  },
+  {
+    "id": "late-work",
+    "setup": "同事问你昨天为什么那么晚才走。",
+    "fits": ["overtime", "deadline", "exhausted"]
+  },
+  {
+    "id": "morning-rush",
+    "setup": "早上赶时间，你在跟家人说今天怎么出门。",
+    "fits": ["commute", "queue", "umbrella"]
+  },
+  {
+    "id": "cafe-order",
+    "setup": "你在咖啡店点单，想说清楚你要哪一种杯子。",
+    "fits": ["mug", "receipt", "refund"]
+  },
+  {
+    "id": "kitchen-chat",
+    "setup": "室友在厨房问你水开了没有、剩饭怎么办。",
+    "fits": ["kettle", "leftover", "mug"]
+  },
+  {
+    "id": "apology",
+    "setup": "你迟到了，要跟朋友解释并道歉。",
+    "fits": ["awkward", "grateful", "annoyed"]
+  },
+  {
+    "id": "clinic-visit",
+    "setup": "你身体不舒服，在诊所预约并描述症状。",
+    "fits": ["appointment", "exhausted", "figure out"]
+  },
+  {
+    "id": "shopping-return",
+    "setup": "你买错了东西，想退货并要回钱。",
+    "fits": ["refund", "receipt", "awkward"]
+  }
+]

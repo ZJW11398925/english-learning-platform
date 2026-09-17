@@ -1,0 +1,162 @@
+[
+  {
+    "headword": "hesitate",
+    "meaning": "to pause before doing something because you are unsure（犹豫）",
+    "wordFamily": ["hesitates", "hesitated", "hesitating", "hesitation", "hesitant"],
+    "collocations": ["hesitate to do sth", "hesitate about doing sth"],
+    "example": "I hesitated for a moment before I knocked on the door.",
+    "confusables": ["waver", "vacillate"]
+  },
+  {
+    "headword": "mug",
+    "meaning": "a large cup with a handle, used for coffee or tea（马克杯）",
+    "wordFamily": ["mugs"],
+    "collocations": ["a coffee mug", "a mug of tea"],
+    "example": "She filled her mug with hot coffee and sat by the window.",
+    "confusables": ["cup", "glass"]
+  },
+  {
+    "headword": "kettle",
+    "meaning": "a container used for boiling water（烧水壶）",
+    "wordFamily": ["kettles"],
+    "collocations": ["put the kettle on", "the kettle is boiling"],
+    "example": "Put the kettle on and we will have some tea.",
+    "confusables": ["pot", "teapot"]
+  },
+  {
+    "headword": "umbrella",
+    "meaning": "a thing you hold over your head when it rains（雨伞）",
+    "wordFamily": ["umbrellas"],
+    "collocations": ["take an umbrella", "put up an umbrella"],
+    "example": "Take an umbrella with you because it looks like rain.",
+    "confusables": ["parasol"]
+  },
+  {
+    "headword": "commute",
+    "meaning": "to travel regularly between home and work（通勤）",
+    "wordFamily": ["commutes", "commuted", "commuting", "commuter", "commuters"],
+    "collocations": ["commute to work", "a long commute"],
+    "example": "I commute to work by subway every morning.",
+    "confusables": ["travel", "transfer"]
+  },
+  {
+    "headword": "leftover",
+    "meaning": "food remaining after a meal（剩饭剩菜）",
+    "wordFamily": ["leftovers"],
+    "collocations": ["leftovers for lunch", "eat the leftovers"],
+    "example": "We had the leftovers from last night for lunch today.",
+    "confusables": ["remainder", "residue"]
+  },
+  {
+    "headword": "queue",
+    "meaning": "a line of people waiting（排队）",
+    "wordFamily": ["queues", "queued", "queuing", "queueing"],
+    "collocations": ["join the queue", "queue up"],
+    "example": "There was a long queue outside the ticket office.",
+    "confusables": ["line (AmE)", "row"]
+  },
+  {
+    "headword": "deadline",
+    "meaning": "the latest time by which something must be done（截止时间）",
+    "wordFamily": ["deadlines"],
+    "collocations": ["meet a deadline", "miss the deadline"],
+    "example": "I have to finish this report before the deadline on Friday.",
+    "confusables": ["due date", "time limit"]
+  },
+  {
+    "headword": "colleague",
+    "meaning": "a person you work with（同事）",
+    "wordFamily": ["colleagues"],
+    "collocations": ["a close colleague", "my colleagues at work"],
+    "example": "A colleague of mine gave me a lift home.",
+    "confusables": ["coworker", "classmate"]
+  },
+  {
+    "headword": "overtime",
+    "meaning": "extra hours worked beyond normal hours（加班）",
+    "wordFamily": ["overwork"],
+    "collocations": ["work overtime", "do overtime"],
+    "example": "I worked overtime three evenings this week.",
+    "confusables": ["extra hours"]
+  },
+  {
+    "headword": "landlord",
+    "meaning": "the owner who rents a place to you（房东）",
+    "wordFamily": ["landlords"],
+    "collocations": ["pay the landlord", "the landlord raised the rent"],
+    "example": "The landlord raised the rent again this year.",
+    "confusables": ["tenant", "host"]
+  },
+  {
+    "headword": "deposit",
+    "meaning": "money paid as a first part or as security（押金/定金）",
+    "wordFamily": ["deposits", "deposited"],
+    "collocations": ["pay a deposit", "get the deposit back"],
+    "example": "We paid a deposit of two months of rent for the flat.",
+    "confusables": ["down payment", "advance"]
+  },
+  {
+    "headword": "receipt",
+    "meaning": "a paper proving you paid（收据）",
+    "wordFamily": ["receipts"],
+    "collocations": ["keep the receipt", "ask for a receipt"],
+    "example": "Keep the receipt in case you want to return it.",
+    "confusables": ["invoice", "bill"]
+  },
+  {
+    "headword": "refund",
+    "meaning": "money returned to you（退款）",
+    "wordFamily": ["refunds", "refunded", "refunding"],
+    "collocations": ["ask for a refund", "a full refund"],
+    "example": "I asked for a full refund because the shoes did not fit.",
+    "confusables": ["rebate", "return"]
+  },
+  {
+    "headword": "appointment",
+    "meaning": "an arranged meeting at a fixed time（预约）",
+    "wordFamily": ["appointments"],
+    "collocations": ["make an appointment", "cancel an appointment"],
+    "example": "I made an appointment with the dentist for next Monday.",
+    "confusables": ["reservation", "booking"]
+  },
+  {
+    "headword": "exhausted",
+    "meaning": "extremely tired（精疲力尽）",
+    "wordFamily": ["exhausting", "exhaustion", "exhaust"],
+    "collocations": ["feel exhausted", "absolutely exhausted"],
+    "example": "After the long flight I felt completely exhausted.",
+    "confusables": ["tired", "worn out"]
+  },
+  {
+    "headword": "annoyed",
+    "meaning": "slightly angry（有点恼火）",
+    "wordFamily": ["annoying", "annoy", "annoys", "annoyance"],
+    "collocations": ["annoyed with sb", "annoyed about sth"],
+    "example": "I was annoyed with myself for forgetting her birthday.",
+    "confusables": ["angry", "irritated"]
+  },
+  {
+    "headword": "grateful",
+    "meaning": "feeling thankful（感激）",
+    "wordFamily": ["gratefully", "gratitude"],
+    "collocations": ["grateful for sth", "grateful to sb"],
+    "example": "I am really grateful for all your help last week.",
+    "confusables": ["thankful", "appreciative"]
+  },
+  {
+    "headword": "awkward",
+    "meaning": "embarrassing or difficult to deal with（尴尬/不好处理）",
+    "wordFamily": ["awkwardly", "awkwardness"],
+    "collocations": ["an awkward silence", "an awkward situation"],
+    "example": "There was an awkward silence after he asked about her old boyfriend.",
+    "confusables": ["embarrassing", "clumsy"]
+  },
+  {
+    "headword": "figure out",
+    "meaning": "to understand or solve something（想明白/弄清楚）",
+    "wordFamily": ["figures out", "figured out", "figuring out"],
+    "collocations": ["figure out how to do sth", "figure it out"],
+    "example": "I could not figure out how to open the box at first.",
+    "confusables": ["find out", "work out"]
+  }
+]
