@@ -1,0 +1,473 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <title>界面走查台 · 今天的一句（从零写）</title>
+  <!-- 内联 data URI 图标：只为消掉 favicon 那次请求（零外部资源，与 gallery-dialogue.html 同口径） -->
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Crect width='16' height='16' rx='4' fill='%23a8562f'/%3E%3C/svg%3E">
+  <link rel="stylesheet" href="./write.css">
+</head>
+<body>
+  <!--
+    ⚠️ 这是**开发用的界面走查台**，不是产品页面（产品页是 `write.html`）。
+
+    做法照 `gallery.html` / `gallery-dialogue.html`：**注入假依赖 + 把生产那份装配挂起来**
+    （`web/write.mjs` 的 `mountWrite`）——所以走查台上看到的界面与生产页**不会漂移**，
+    不是另画一套假界面。生产页与走查台唯一的差别是 `mountWrite` 的第二参数。
+
+    ── 假门面的形状**照真引擎实读对齐**（这一点比"看起来像"重要得多）──────────────
+    走查台失真比走查台没有更坏：画一个现实中不可能出现的状态，会让人对着假画面点头。
+    所以下面这份假门面逐条照 `web/units/write/index.mjs` + `flow.mjs` 的真实形状写：
+      · `state()` 的字段名 = `sentences` / `words` / `rewriteQueue`；
+      · 「我的句子」的英文在 **`draft`** 字段里（不是 `en`）；`zh` 是他说的中文；
+      · 「我的词」是对象 `{word, zh, pos}`（不是字符串）；
+      · 队列项**没有正文**（要按 `sessionId` 回 `sentences` 里取），`dueAt` 是毫秒时间戳；
+      · **`askHint` 在"读这一版"发生之前只能回 `{level:0, text:null}`**（引擎的 `askHint`
+        要求 `round.read !== null`，而那次读**只在 `submit()` 里发生**）；
+      · `reveal()` 在**没真改过一版**之前返回 `null`；
+      · `setDraft` / `reviseDraft` 在阶段不对时返回 `false`；`addWord` 回 `{added}`。
+    自洽性（任务书第六节）：教点的 `quote` 与 `issue.quote` **都是 v1 的子串**；
+    `reveal().glosses[].word` **都出现在 `system` 里**；`reveal()` 之前**没有任何**
+    `system` / `why` 字段。
+
+    ── 结构上不可能花钱（三层，缺一层都不够）──────────────────────────────────
+    1. **不 import `./units/write/client.mjs` / `./units/write/index.mjs`**：
+       整个文件里没有端点常量（`api.deepseek.com` 一次都不出现），`fetch` 一次都不调；
+    2. **假门面是本地函数**：所有返回值写死在下面，不看 Key、不发请求；
+    3. **Key 环用内存 Map**（`elp.apiKey` 是一串明显的假 Key）——真 localStorage
+       只被用来存"我的句子 / 我的词 / 待重写"，**从不碰 `elp.apiKey`**。
+       （这就是为什么本页敢用真 localStorage：持久化那一截**必须**是真的，
+       否则 `reload()` 之后的回读证据毫无意义 —— 本项目踩过"假 storage 永远看不见这一截"。）
+
+    ── 数据往哪儿写 / 怎么清 ───────────────────────────────────────────────────
+    键：`elp.write.gallery`（一份 JSON，装 `sentences` / `words` / `rewriteQueue` 三样，
+    与引擎自己那份 `exportState()` 的形状同源）。`?reset=1` 进页面时先把它清掉。
+
+    ── 就位判据（截图脚本按它等，**不按固定时长**）──────────────────────────────
+      `document.body.dataset.galleryReady === 'true'`  —— 挂载 + 驱动全部落地；
+      `document.body.dataset.galleryArrived`           —— 等于 `?scenario=` 那个值
+        （它只在**该档的标志文案真的出现在屏上**时才写下去）；
+      `document.body.dataset.galleryError`             —— 落在失败那一屏时，值是那句人话。
+  -->
+  <main id="app"></main>
+  <script type="module">
+    import { mountWrite } from './write.mjs';
+    import { createKeyring } from './units/keyring.mjs';
+
+    const params = new URLSearchParams(location.search);
+    const scenario = params.get('scenario') ?? 'source';
+    const app = document.getElementById('app');
+
+    /* ═══════════════════════════════════════════════════════════════════════
+       1. 假门面（形状照真引擎实读对齐，内容全部本地写死）
+       ═══════════════════════════════════════════════════════════════════════ */
+
+    /** 他那一版（v1）。三个教点候选与 issue 的 quote **都必须是它的子串**。 */
+    const V1 = 'Nothing special today. I had class as usually for half a day.';
+    /** 系统版。`glosses[].word` **必须都出现在这里**。 */
+    const SYSTEM = 'Nothing special today. I had classes as usual for half a day.';
+    /** 他说的中文（出处）。 */
+    const ZH = '今天没什么特殊的，我正常上了半天课';
+
+    /** 三个教点候选：quote 逐条是 V1 的子串。 */
+    const CANDIDATES = [
+      { key: 'as-usual', label: 'as usually 该怎么写', quote: 'as usually', kind: '固定短语' },
+      { key: 'class-count', label: 'class 要不要变复数', quote: 'class', kind: '可数与泛指' },
+      { key: 'for-half', label: '「半天」怎么说', quote: 'for half a day', kind: '时长表达' },
+    ];
+
+    /** 三级台阶：**每一级都只提问，不给答案**（给答案会杀死学习）。 */
+    const HINTS = {
+      word: {
+        1: '你写的这句里，as 后面跟的那个词，你觉得它该是「什么词性」？',
+        2: 'as 后面这个位置，通常放的是一个名词性的词还是一个副词？',
+        3: '把 as 和它后面那个词当一个整体看：这个整体在你读过的句子里长什么样？',
+      },
+      structure: {
+        1: '你把这句拆成两半看：前半句在说什么，后半句在说什么？',
+        2: '后半句里「上了半天课」这件事，主语和动词各是谁？',
+        3: '「上课」这件事，英文里更常见的是把它当成一件「事」还是几节「课」？',
+      },
+      content: {
+        1: '你想说的是「照常上了半天课」，还是「只上了半天课就不上了」？',
+        2: '「照常」这个意思，是想落在 class 上，还是落在 as 后面那个词上？',
+        3: '如果只让你改一个词就把「照常」说出来，你会改哪一个？',
+      },
+    };
+
+    /** 逐词释义。**故意不全**：`usually` 不在表里 —— 于是「没查到」那一支在屏上真的能走到。 */
+    const LEX = {
+      nothing: { pos: 'pron.', zh: '没有什么' },
+      special: { pos: 'adj.', zh: '特别的' },
+      today: { pos: 'adv.', zh: '今天' },
+      i: { pos: 'pron.', zh: '我' },
+      had: { pos: 'v.', zh: '有；上（课）' },
+      class: { pos: 'n.', zh: '课' },
+      classes: { pos: 'n.', zh: '课（复数），have classes = 上课' },
+      as: { pos: 'prep.', zh: '像；作为' },
+      usual: { pos: 'adj.', zh: '平常的，as usual = 照常' },
+      for: { pos: 'prep.', zh: '（持续）达' },
+      half: { pos: 'det.', zh: '一半的' },
+      a: { pos: 'art.', zh: '一个' },
+      day: { pos: 'n.', zh: '天' },
+    };
+
+    /** 走查台自己的存储键（真 localStorage；`elp.apiKey` 一次都不碰）。 */
+    const K_STATE = 'elp.write.gallery';
+
+    if (params.get('reset') === '1') {
+      try { localStorage.removeItem(K_STATE); } catch { /* 隐私模式：清不掉也不拦流程 */ }
+    }
+
+    const emptyState = () => ({ sentences: [], words: [], rewriteQueue: [] });
+    const loadState = () => {
+      try {
+        const raw = localStorage.getItem(K_STATE);
+        if (raw === null) return emptyState();
+        const obj = JSON.parse(raw);
+        return {
+          sentences: Array.isArray(obj?.sentences) ? obj.sentences : [],
+          words: Array.isArray(obj?.words) ? obj.words : [],
+          rewriteQueue: Array.isArray(obj?.rewriteQueue) ? obj.rewriteQueue : [],
+        };
+      } catch { return emptyState(); }
+    };
+
+    /**
+     * 造一个假门面（形状与闸门都照真引擎实读对齐 —— 逐条见文件头那段）。
+     * @param {{refuseSubmit?: boolean, refusePick?: boolean}} opts 两个"接不住"档
+     */
+    function fakeFacade(opts = {}) {
+      const st = loadState();
+      const save = () => {
+        try { localStorage.setItem(K_STATE, JSON.stringify(st)); } catch { /* 走查台：存不进去不拦流程 */ }
+      };
+
+      const cost = { calls: 0, promptTokens: 0, completionTokens: 0, latencyMsTotal: 0 };
+      let draft = '';
+      let readDone = false;    // ← 「读这一版」发生过没有（提示与挑教点的闸门）
+      let pickedKey = null;
+      let revised = false;     // ← 「他真改过一版」发生过没有（揭开的闸门）
+      let finalized = false;
+      let sid = st.sentences.length;
+      const asked = {};
+
+      /** 记一次"模型调用"的成本（**只记账，不发请求**）。 */
+      const charge = (pt, ct, ms) => {
+        cost.calls += 1;
+        cost.promptTokens += pt;
+        cost.completionTokens += ct;
+        cost.latencyMsTotal += ms;
+      };
+
+      return {
+        state: () => ({
+          sentences: st.sentences.map((x) => ({ ...x })),
+          words: st.words.map((x) => ({ ...x })),
+          rewriteQueue: st.rewriteQueue.map((x) => ({ ...x })),
+        }),
+        startSentence({ chinese }) {
+          // ⚠️ **零模型调用**：起一句只是记下他说的中文（引擎的模型调用只发生在
+          // `submit()`（读这一版）与 `pickTeachPoint()`（改这一版）两处）。
+          sid += 1;
+          draft = '';
+          readDone = false;
+          pickedKey = null;
+          revised = false;
+          finalized = false;
+          for (const k of Object.keys(asked)) delete asked[k];
+          void chinese;
+          return true;
+        },
+        setDraft(text) { draft = String(text ?? ''); return true; },
+        askHint(category) {
+          // ⚠️ 读之前**只能**回空——与引擎同一条闸门（`round.read === null` ⇒ level 0 / text null）
+          if (!readDone) return { level: 0, category, text: null };
+          const tiers = HINTS[category];
+          if (tiers === undefined) return { level: 0, category: null, text: null };
+          const next = Math.min(3, (asked[category] ?? 0) + 1);
+          asked[category] = next;
+          // 台阶的内容来自「读这一版」那一次的产物 ⇒ **不再花一次调用**（引擎有断言钉住这条）
+          return { level: next, category, text: tiers[next] };
+        },
+        submit() {
+          if (draft.trim() === '') {
+            return { ok: false, reason: 'empty_draft', detail: '这一版还是空的：先写出你想说的那句话，再来提交。' };
+          }
+          charge(240, 90, 1400);
+          readDone = true;
+          if (opts.refuseSubmit === true) {
+            return {
+              ok: false,
+              candidates: [],
+              reason: 'cannot_help',
+              detail: '这一版我读不出可以教的地方——它太短了，再写具体一点试试。',
+            };
+          }
+          return { ok: true, candidates: CANDIDATES.map((c) => ({ ...c })), reason: null };
+        },
+        pickTeachPoint(key) {
+          if (!readDone) {
+            return { ok: false, reason: 'not_ready', detail: '还没有挑教点：得先交一次，让他读你这一版。' };
+          }
+          charge(260, 120, 1600);
+          if (opts.refusePick === true) {
+            return { ok: false, issue: null, reason: 'cannot_help', detail: '这一处我没把握，换一个教点试试。' };
+          }
+          const c = CANDIDATES.find((x) => x.key === key);
+          if (c === undefined) {
+            return { ok: false, reason: 'no_such_teach_point', detail: '候选里没有这个教点。' };
+          }
+          pickedKey = key;
+          // `issue.quote` **是 V1 的子串**（现实中它本来就该是从他那一版里挑出来的）
+          return { ok: true, issue: { quote: c.quote, kind: c.kind } };
+        },
+        reviseDraft(text) {
+          if (pickedKey === null) return false;   // 阶段不对 ⇒ false（引擎同款）
+          charge(320, 150, 2100);
+          revised = true;
+          draft = String(text ?? '');
+          return true;
+        },
+        reveal() {
+          if (!revised) return null;              // 没真改过一版 ⇒ null（引擎同款闸门）
+          if (!finalized) {
+            finalized = true;
+            st.sentences.push({
+              id: `s${String(sid)}`,
+              zh: ZH,
+              material: null,
+              draft,                              // ← 英文在 `draft` 里（引擎的字段名）
+              scaffoldLevel: 0,
+              hinted: false,
+              revealed: { system: SYSTEM, why: ['as usual 是固定短语。'] },
+              at: Date.now(),
+            });
+            // 队列项**没有正文**（要按 sessionId 回 sentences 取）；dueAt 是毫秒时间戳。
+            // 12 小时 = 引擎 `REWRITE_INTERVALS_MS.self` 那一档（自己写出来的）。
+            st.rewriteQueue.push({
+              id: `s${String(sid)}-rw`,
+              sessionId: `s${String(sid)}`,
+              dueAt: Date.now() + 12 * 60 * 60 * 1000,
+              intervalMs: 12 * 60 * 60 * 1000,
+              hinted: false,
+              scaffoldLevel: 0,
+              status: 'pending',
+            });
+            save();
+          }
+          return {
+            system: SYSTEM,
+            why: [
+              'as usual 是固定短语（照常、像平常一样），as 后面跟的是名词性的 usual，不是副词 usually。',
+              'have classes 用复数泛指「上课」这件事，比 have class 更自然。',
+            ],
+            simpler: {
+              half: 'Nothing special today. I had classes as usual.',
+              easy: 'I had classes as usual today.',
+            },
+            glosses: [
+              { word: 'classes', pos: 'n.', zh: '课（复数），have classes = 上课' },
+              { word: 'usual', pos: 'adj.', zh: '平常的，as usual = 照常' },
+              { word: 'half', pos: 'det.', zh: '一半的，half a day = 半天' },
+            ],
+          };
+        },
+        addWord(word) {
+          const w = String(word ?? '');
+          const existing = st.words.find((x) => x.word.toLowerCase() === w.toLowerCase());
+          if (existing !== undefined) return { ...existing, hasGloss: existing.zh !== null, added: false };
+          const e = LEX[w.toLowerCase()];
+          const rec = { word: w, zh: e === undefined ? null : e.zh, pos: e === undefined ? null : e.pos };
+          st.words.push(rec);
+          save();
+          return { ...rec, hasGloss: rec.zh !== null, added: true };
+        },
+        wordCard(word) {
+          const e = LEX[String(word ?? '').toLowerCase()];
+          return e === undefined
+            ? { word: String(word ?? ''), zh: null, pos: null, hasGloss: false }
+            : { word: String(word ?? ''), zh: e.zh, pos: e.pos, hasGloss: true };
+        },
+        // 到期与否**由门面判**（界面的本分只是措辞）。刚入队那条 dueAt 在 12 小时后 ⇒ 这里是空的。
+        dueNow: () => st.rewriteQueue
+          .filter((it) => it.status === 'pending' && it.dueAt <= Date.now())
+          .map((it) => ({ ...it })),
+        cost: () => ({ ...cost }),
+        exportState: () => ({ version: 1, ...JSON.parse(JSON.stringify(st)) }),
+        importState: () => true,
+      };
+    }
+
+    /* ═══════════════════════════════════════════════════════════════════════
+       2. 驱动：**全部靠真点/真填**走到目标档（不直接改状态，与生产同一条代码路径）
+       ═══════════════════════════════════════════════════════════════════════ */
+
+    /** 按**精确文案**找唯一一颗按钮（多一颗少一颗都当场抛——判据不许含糊）。 */
+    function button(label) {
+      const hits = [...document.querySelectorAll('#app button')].filter((b) => b.textContent === label);
+      if (hits.length !== 1) {
+        throw new Error(`按钮「${label}」在屏上应恰好一个，实测 ${hits.length} 个`);
+      }
+      return hits[0];
+    }
+
+    /**
+     * 等一次"落定"。
+     * ⚠️ 为什么必须有它：点「写好了」这类按钮会走 `await facade.submit()` 那条异步链，
+     * 而 `HTMLElement.click()` **不返回**那个 Promise。不等落定就往下点，下一颗按钮
+     * 在屏上还没长出来 —— 那是驱动脚本的错，不是界面的错（红线 8 的同族：
+     * 先问"我这个观察有没有更朴素的解释"）。
+     * 每个宏任务之前所有微任务都会跑完，所以几轮 `setTimeout(0)` 足以让整条 await 链落定。
+     */
+    const settle = async () => {
+      for (let i = 0; i < 6; i += 1) await new Promise((r) => { setTimeout(r, 0); });
+    };
+
+    /** 按 `data-in` 填一格输入框（真的派发 input 事件，走生产那条监听），然后等落定。 */
+    async function fill(slot, text) {
+      const box = document.querySelector(`#app [data-in="${slot}"]`);
+      if (box === null) throw new Error(`找不到输入格 [data-in="${slot}"]`);
+      box.value = text;
+      box.dispatchEvent(new Event('input', { bubbles: true }));
+      await settle();
+    }
+
+    /** 点一颗按钮（精确文案），然后等落定。 */
+    async function click(label) {
+      button(label).click();
+      await settle();
+    }
+
+    async function clickWord(word) {
+      const hits = [...document.querySelectorAll(`#app [data-w="${word}"]`)];
+      if (hits.length === 0) throw new Error(`屏上没有可点的词「${word}」`);
+      hits[0].click();
+      await settle();
+    }
+
+    /** 走到某一档。每一步都是真的点/真的填。 */
+    async function drive(name) {
+      if (name === 'source' || name === 'nokey' || name === 'enginemissing') return;
+      await fill('source', ZH);
+      await click('就用这句');
+      if (name === 'draft') return;
+
+      await fill('draft-0', 'Nothing special today.');
+      await click('再加一段');
+      await fill('draft-1', 'I had class as usually for half a day.');
+
+      // ⚠️ 提示的三级台阶**在提交之前拿不到内容**（引擎的 read 只在 submit 里发生）。
+      // 这一档专门演"提交前求提示"会发生什么 —— 屏上必须是一句如实的话，不是假提示。
+      if (name === 'draft-hint-noread') {
+        await click('给点提示');
+        await click('词');
+        return;
+      }
+
+      await click('写好了');
+      if (name === 'refuse-submit') return;
+
+      // 台阶真正可用的窗口：提交之后、挑教点之前（此时引擎的 step 还是 drafting、read 已在）
+      if (name === 'hint1' || name === 'hint3') {
+        await click('给点提示');
+        await click('词');
+        if (name === 'hint3') {
+          await click('再给一点');
+          await click('再给一点');
+        }
+        return;
+      }
+
+      if (name === 'choose') return;
+
+      await click('as usually 该怎么写');
+      if (name === 'refuse-pick') return;
+      if (name === 'marked') return;
+      if (name === 'marked-open') { await click('这一处不地道 · 点开看看'); return; }
+
+      await click('我自己再改一版');
+      if (name === 'revise') return;
+
+      await fill('revise-1', 'I had classes as usual for half a day.');
+      await click('改好了');
+      if (name === 'reveal') return;
+
+      if (name === 'wordcard') { await clickWord('classes'); return; }
+      if (name === 'wordcard-miss') { await clickWord('usually'); return; }
+
+      await click('过几天再写一遍');
+    }
+
+    /** 每一档"到了没有"的判据 = **屏上必须出现的一句标志文案**（与 gallery.html 同口径）。 */
+    const ARRIVED = {
+      source: '用中文说一句',
+      nokey: 'platform.deepseek.com',
+      enginemissing: '引擎还没接上',
+      draft: '一段一段写',
+      'draft-hint-noread': '提示要等系统读过你这一版才有',
+      hint1: HINTS.word[1],
+      hint3: HINTS.word[3],
+      choose: '挑一个你最想弄明白的',
+      marked: '这一处不地道 · 点开看看',
+      'marked-open': '固定短语',
+      revise: '你改的这一版',
+      reveal: '系统版',
+      rewrite: '过几天再写一遍（1）',
+      wordcard: '课（复数）',
+      'wordcard-miss': '没查到',
+      'refuse-submit': '这次接不住',
+      'refuse-pick': '这次接不住',
+    };
+
+    /* ═══════════════════════════════════════════════════════════════════════
+       3. 挂载
+       ═══════════════════════════════════════════════════════════════════════ */
+    try {
+      if (!(scenario in ARRIVED)) {
+        throw new Error(`没有这一档：${scenario}（有的：${Object.keys(ARRIVED).join(' / ')}）`);
+      }
+
+      // Key 环走**内存 Map**：真 localStorage 只给持久化用，`elp.apiKey` 一次都不碰。
+      const mem = new Map([['elp.apiKey', 'sk-gallery-write-not-a-real-key-000000']]);
+      const keyring = createKeyring({
+        storage: {
+          getItem: (k) => (mem.has(k) ? mem.get(k) : null),
+          setItem: (k, v) => { mem.set(k, String(v)); },
+          removeItem: (k) => { mem.delete(k); },
+        },
+      });
+
+      await mountWrite(app, {
+        keyring,
+        // `nokey` 档：Key 环换成一个空的（于是页面走"没配 Key"那一屏的完整引导）。
+        ...(scenario === 'nokey'
+          ? { keyring: createKeyring({ storage: { getItem: () => null, setItem: () => {}, removeItem: () => {} } }) }
+          : {}),
+        // `enginemissing` 档：**不给门面**，并指向一个不存在的模块 ⇒ 页面如实说"引擎还没接上"。
+        ...(scenario === 'enginemissing'
+          ? { engineUrl: './units/write/__absent-in-gallery__.mjs' }
+          : { facade: fakeFacade({
+            refuseSubmit: scenario === 'refuse-submit',
+            refusePick: scenario === 'refuse-pick',
+          }) }),
+      });
+
+      await drive(scenario);
+
+      const arrived = ARRIVED[scenario];
+      if (!app.textContent.includes(arrived)) {
+        throw new Error(`驱动之后屏上没有出现「${arrived}」——走查台与判据对不上，先修走查台`);
+      }
+      document.body.dataset.galleryArrived = scenario;
+    } catch (err) {
+      app.textContent = `走查台没能到那一档：${String(err?.message ?? err)}`;
+      document.body.dataset.galleryError = String(err?.message ?? err);
+      console.error('走查台装载失败：', err);
+    }
+
+    document.body.dataset.galleryReady = 'true';
+  </script>
+</body>
+</html>

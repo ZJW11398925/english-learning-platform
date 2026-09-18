@@ -1,0 +1,921 @@
+/* ══════════════════════════════════════════════════════════════════════════════
+   write.css — 「今天的一句」：从零写一句英文，再把这一句一层层说好
+
+   视觉方向 = **A 手稿**（四版打样里被人裁决为最有潜力的那一版，
+   `web/proto/style.html?variant=A` / `docs/proto-style/`）。
+   打样里 A 用的是**写死的演示内容**；这一份把同一套视觉语言用在**真状态**上：
+   七步、加载、失败、「接不住」、词卡、待重写队列。
+
+   ── 为什么另起一份样式单而不是复用 web/styles.css ─────────────────────────────
+   1. `web/styles.css` 钉的是**旧形态**（相机取词那一套屏），而本页是第三次重定向后的
+      形态——两者共用一个样式单会让「哪一版的视觉在哪一页生效」变成靠类名去猜；
+   2. `web/proto/**` 是**不许改的打样源文件**（任务书第四节），所以也不能把 A 的规则
+      从 `proto/style.css` 里搬走或改成共享——只能**另写一份**；
+   3. `tests/styles.test.mjs` 的 15 条契约只扫 `web/styles.css`，本文件不参与、也不该参与。
+
+   ── 这一份要守的界面纪律（任务书第三节，逐条可机检）──────────────────────────
+   ① 一条不断长的稿纸：换步**不换屏**——已经发生过的段落留在纸上（被取代的那一版划掉
+      淡出），新内容往下接。所以本文件里**没有** `.panel` / `.screen` / `.view` 这类
+      "一块一块的屏"，只有 `.sheet`（那张纸）与它下面的顺排段落。
+      也**没有气泡**：一个 `say-system` / `say-learner` / 对话流类名都不产出。
+   ② 分段写：`.seg` 是一行输入，不是一个大框 —— 手机打英文长句很痛。
+   ③ 标出来不说：`.flag` 只有一条**波浪下划线**，没有任何文字解释；
+      「点开才说」的那句在 `.note-issue` 里，**默认不渲染**（视图按状态决定建不建它，
+      不用 `display:none` 藏 —— 藏着的节点会被测试和读屏器找到）。
+   ④ 离散难度标记：`.eff` 是一行小字，取值**恰四档**（`[data-effort]` = 0/1/2/3）。
+      本文件里**没有** `<progress>`、没有百分比、没有分数。
+   ⑤ 英文逐词可点：`.w` 是"看起来只是文字"的按钮（零边框零底色零内距）。
+   ⑥ 教点 2–3 选一：`.pick` 是内容层的一组选择（每个候选一个按钮，上面写着教什么）。
+   ⑦ 动效只在改写那一处：全文件 `@keyframes` **只有两条**（rw-old / rw-new），
+      `transition` **只有一条**（`.seg:active` 之外的唯一一条挂在 `.do:active` 按压反馈上）。
+   ⑧ 零外部资源：字体栈**全是系统字体**，一个 `@font-face` / `url(` 都没有。
+
+   ── 令牌区与组件区的分界（可机检，与 `web/proto/style.css` 同一条纪律）─────────
+   ASCII 哨兵行以下**不许出现任何色值字面量**（`#hex` / `rgb(` / `hsl(`）。
+   ══════════════════════════════════════════════════════════════════════════════ */
+
+/* ─────────────────────────────────────────────────────────────────────────────
+   1. 令牌
+   ───────────────────────────────────────────────────────────────────────────── */
+:root {
+  /* 字阶：**五档**，相邻跨度 1.18 / 1.23 / 1.375 / 1.45 —— 没有微差档。
+     （与 proto/style.css 同一把尺；那 17 档的旧账见 `web/styles.css` 的注释。）*/
+  --t-1: 0.6875rem; /* 11px 边注 / 出处 / 小字 */
+  --t-2: 0.8125rem; /* 13px 按钮 / 词卡 */
+  --t-3: 1rem;      /* 16px 正文 */
+  --t-4: 1.375rem;  /* 22px 分段输入 / 书名 */
+  --t-5: 2rem;      /* 32px 英文主体（这一版的主角） */
+
+  /* 字重：四档 */
+  --w-n: 400;
+  --w-m: 500;
+  --w-s: 600;
+  --w-b: 700;
+
+  /* 圆角：零容器 ⇒ **全站一个圆角都不用**。四个 0 写出来是为了让"这里刻意没有圆角"
+     变成一条读得出来的声明，而不是"忘了写"。 */
+  --r-none: 0;
+
+  /* 行高 */
+  --lh-tight: 1.2;
+  --lh-body: 1.55;
+  --lh-loose: 1.42; /* 英文主体：行高松 */
+
+  /* 间距 */
+  --s-1: 4px;
+  --s-2: 8px;
+  --s-3: 12px;
+  --s-4: 20px;
+  --s-5: 32px;
+  --s-6: 52px;
+
+  /* 字体栈：只用系统字体。零外部资源（不许 Google Fonts / 不许任何 woff / 不许 CDN）*/
+  --f-serif: Georgia, 'Times New Roman', 'Songti SC', 'SimSun', 'Noto Serif CJK SC', serif;
+  --f-sans: system-ui, -apple-system, 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', sans-serif;
+  --f-mono: ui-monospace, 'Cascadia Mono', Consolas, monospace;
+
+  /* 真机安全区（iPhone 底部横条）：页脚不许被它压住 */
+  --safe-bottom: env(safe-area-inset-bottom, 0px);
+
+  /* 改写动效时长（本文件唯一的动效）*/
+  --rw-out: 420ms;
+  --rw-in: 520ms;
+  --rw-lag: 140ms;
+
+  /* 按压反馈时长（本文件**唯一**的一条 transition 用的时长）：
+     `:active` 期间的一点点下沉 + 变淡。`prefers-reduced-motion: reduce` 下显式关掉。*/
+  --press: 120ms;
+}
+
+/* ── A 手稿：暖纸 · 墨黑 · 红铅笔批注 ──────────────────────────────────────────
+   对比度（在真浏览器里逐处量，见 tmp/probes/write-ui-check.mjs 的输出）：
+   墨黑 15.1 · 软灰 6.8 · 极淡灰 5.07 · 铅笔 4.9（都以暖纸 #fbf9f4 为底）。
+   ⚠️ 极淡灰用 #726a5e 而不是更浅的 #7a7266：后者是 4.51，**贴着 4.5 的线过**，
+   下次改一改就红。这一版留余量。 */
+.sheet {
+  --bg: #fbf9f4;
+  --ink: #1b1a17;
+  --ink-soft: #5c574e;
+  --ink-faint: #726a5e;
+  --rule: #ded7c9;
+  --rule-soft: #ebe5d8;
+  --pencil: #a8562f;
+  --warn: #a8562f;
+  --touch: #f0e9dc;
+  --accent: #1b1a17;
+  --on-accent: #fbf9f4;
+  /* 被取代的那一版淡出到这里为止（「划掉 / 淡出」的「淡出」）*/
+  --old-veil: 0.22;
+}
+
+/* 页脚（成本告知）与门面缺失那一屏：**不在稿纸主区**，所以另挂一层令牌。
+   成本必须看得见，但它是"这一次花了多少"，不是稿纸上的内容。 */
+.page-foot {
+  --ink-faint: #726a5e;
+  --pencil: #a8562f;
+  --rule: #ded7c9;
+}
+.gate {
+  --ink: #1b1a17;
+  --ink-soft: #5c574e;
+  --ink-faint: #726a5e;
+  --pencil: #a8562f;
+  --rule: #ded7c9;
+  --touch: #f0e9dc;
+}
+
+/* ─────────────────────────────────────────────────────────────────────────────
+   2. 组件规则起点（此线以下禁止出现色值字面量：只许 var()）
+   ───────────────────────────────────────────────────────────────────────────── */
+
+/* 上面那条中文标记是给人看的；下面这行**纯 ASCII 哨兵**是给探针切文件用的
+   （中文标记在 Windows 上经不同编码往返容易匹配不上）。
+   哨兵以下不许出现 `#hex`、颜色函数、或任何别的色值字面量。 */
+/* ===== COMPONENT-RULES-BELOW ===== */
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  margin: 0;
+  padding: 0;
+}
+
+body {
+  background: var(--bg);
+  color: var(--ink);
+  font-family: var(--f-sans);
+  font-size: var(--t-3);
+  font-weight: var(--w-n);
+  line-height: var(--lh-body);
+  -webkit-text-size-adjust: 100%;
+  -webkit-tap-highlight-color: transparent;
+}
+
+#app {
+  min-height: 100vh;
+}
+
+/* ── 那张纸：单栏窄列 · 零容器 ─────────────────────────────────────────────────
+   「零容器」= 全页没有一个方块、一条圆角、一层投影。分节只靠**留白**
+   与一条 1px 规则线（`.hair`）。这一条是 A 手稿的版式主张，不是省事：
+   上一次用户的原话是「许多组件和容器明显不高级」——所以这一版**连一个容器都没有**。*/
+.sheet {
+  max-width: 330px;
+  margin: 0 auto;
+  padding: var(--s-5) 0 var(--s-6);
+  background: var(--bg);
+  color: var(--ink);
+}
+
+/* 页脚在纸外（成本告知）*/
+.page-foot {
+  max-width: 330px;
+  margin: 0 auto;
+  padding: 0 0 calc(var(--s-5) + var(--safe-bottom));
+  font-size: var(--t-1);
+  color: var(--ink-faint);
+}
+
+/* ── 页眉：品牌标记 + 字标 ─────────────────────────────────────────────────────
+   标记 = 改稿符号里的**插入号**（一个尖 + 一道短横）。打样里它是内联 SVG；
+   这里用 CSS 画（`.bmk::before` 是一个转过 45° 的方框的两条边 = 一个尖，
+   `.bmk::after` 是那道短横）。为什么不用 SVG：**视图必须能在 Node 的假 DOM 里挂起来**
+   做 mount 测试，而假 DOM 只有 `createElement`、没有 `createElementNS`
+   （`document.createElement('svg')` 在真浏览器里也造不出可渲染的 SVG 元素）。
+   形状比例沿用打样的 20×20 视口（尖顶在 y=3.8、两脚在 y=13.2、横在 y=17）。*/
+.mast {
+  display: flex;
+  align-items: baseline;
+  gap: var(--s-2);
+  color: var(--ink);
+  padding-bottom: var(--s-3);
+}
+
+.bmk {
+  position: relative;
+  display: inline-block;
+  width: 1em;
+  height: 1em;
+  flex: none;
+  align-self: center;
+  color: inherit;
+}
+
+.bmk::before {
+  content: '';
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  width: 0.46em;
+  height: 0.46em;
+  margin: -0.38em 0 0 -0.23em;
+  border-top: 1.8px solid currentColor;
+  border-left: 1.8px solid currentColor;
+  border-top-left-radius: var(--r-none);
+  transform: rotate(45deg);
+}
+
+.bmk::after {
+  content: '';
+  position: absolute;
+  left: 50%;
+  bottom: 0.16em;
+  width: 0.36em;
+  height: 0;
+  margin-left: -0.18em;
+  border-top: 1.8px solid currentColor;
+}
+
+/* A 的书名：像书的半扉页 —— 大字、宽字距 */
+.wordmark {
+  font-size: var(--t-4);
+  font-weight: var(--w-m);
+  letter-spacing: 0.26em;
+}
+
+/* 一条极细的规则线（唯一的分节手段）*/
+.hair {
+  height: 1px;
+  border: 0;
+  margin: 0;
+  background: var(--rule);
+}
+
+/* ── 出处：他说的中文 ──────────────────────────────────────────────────────── */
+.seg-src {
+  padding: var(--s-4) 0 var(--s-4);
+}
+
+.src {
+  margin: 0;
+  font-size: var(--t-2);
+  color: var(--ink-faint);
+  letter-spacing: 0.02em;
+}
+
+/* 贴进来的素材（比出处多一点存在感，但仍然是小字）*/
+.material {
+  margin: var(--s-2) 0 0;
+  font-size: var(--t-1);
+  color: var(--ink-faint);
+  white-space: pre-wrap;
+}
+
+/* 段落小标签（「你写的」/「系统版」）—— 极小、宽字距、不当标题用 */
+.tab {
+  display: block;
+  margin: 0 0 var(--s-2);
+  font-size: var(--t-1);
+  font-weight: var(--w-m);
+  letter-spacing: 0.14em;
+  color: var(--ink-faint);
+}
+
+.seg-block {
+  padding: 0 0 var(--s-4);
+}
+
+/* ── 英文：衬线 · 大 · 行高松。这一版里它是唯一的主角。─────────────────────── */
+.en {
+  margin: 0;
+  font-family: var(--f-serif);
+  font-size: var(--t-5);
+  font-weight: var(--w-n);
+  line-height: var(--lh-loose);
+  letter-spacing: -0.004em;
+  color: var(--ink);
+}
+
+/* 小一号的英文（候选教点的引文、逐词释义、队列里的句子）*/
+.en-sm {
+  font-size: var(--t-4);
+}
+
+/* 逐词可点：词 = 一个**看起来只是文字**的按钮。零边框零底色零内距，
+   只继承周围的一切（字体、字号、字距、颜色）——它在屏上就是文字，不是控件。 */
+.w {
+  display: inline;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: inherit;
+  font: inherit;
+  letter-spacing: inherit;
+  line-height: inherit;
+  text-align: inherit;
+  cursor: pointer;
+  -webkit-appearance: none;
+  appearance: none;
+  border-radius: var(--r-none);
+}
+
+/* 正在被查的那个词：一个即时的高亮（这一处**不是过渡**）*/
+.w[aria-expanded='true'] {
+  background: var(--touch);
+}
+
+/* ── 被标出的那一处：一条波浪细线，**不是一块底色、不带一个字** ──────────────
+   纪律 ③ 的前半截。后半截（"点开才说"）由 `.note-issue` 承担，
+   而它在 `issueOpen` 之前**根本不建节点**。 */
+.flag {
+  text-decoration: underline;
+  text-decoration-style: wavy;
+  text-decoration-thickness: 1px;
+  text-underline-offset: 0.22em;
+  text-decoration-color: var(--warn);
+}
+
+.flag .w {
+  text-decoration: inherit;
+  text-decoration-style: wavy;
+  text-decoration-thickness: 1px;
+  text-underline-offset: 0.22em;
+  text-decoration-color: var(--warn);
+}
+
+/* ── 铅笔边注：系统说的话 = 写在旁边的批注，**不是 UI 卡片** ────────────────────
+   无底 · 无圆角 · 无投影 · 一道 1px 铅笔竖线 · 极小的倾斜。 */
+.note {
+  margin: 0 0 var(--s-4) var(--s-5);
+  max-width: 250px;
+  font-size: var(--t-1);
+  font-weight: var(--w-n);
+  color: var(--pencil);
+  line-height: var(--lh-body);
+  border-left: 1px solid var(--pencil);
+  padding-left: var(--s-3);
+  transform: rotate(-0.4deg);
+  transform-origin: left center;
+}
+
+/* 提示（三级台阶）：色调收一档，因为它不是批注而是"我卡住了"的回声 */
+.note-hint {
+  color: var(--ink-soft);
+  border-left-color: var(--rule);
+}
+
+/* 「这一处不地道」—— 标出来不说。点开之后在同一支铅笔里补上类别。 */
+.note-issue {
+  padding: var(--s-3) 0 var(--s-3) var(--s-3);
+}
+
+.note-issue .issue-open {
+  display: inline;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  border-bottom: 1px dotted currentColor;
+  background: none;
+  color: inherit;
+  font: inherit;
+  letter-spacing: inherit;
+  cursor: pointer;
+  -webkit-appearance: none;
+  appearance: none;
+  border-radius: var(--r-none);
+}
+
+.note-issue .issue-kind {
+  display: block;
+  margin-top: var(--s-2);
+  color: var(--ink-soft);
+}
+
+/* 「这次接不住」—— 不说为什么系统都拦下了，它只是如实说不接。
+   形态上仍是铅笔（系统说的话），但**不做倾斜**：这不是一句轻松的批注。 */
+.note-fail {
+  transform: none;
+  border-left-style: dashed;
+}
+
+/* 每处一句为什么（只有揭开系统版之后才存在）*/
+.why {
+  margin: 0 0 var(--s-4) var(--s-5);
+  padding: 0 0 0 var(--s-3);
+  border-left: 1px solid var(--rule);
+  list-style: none;
+}
+
+.why li {
+  margin: 0 0 var(--s-2);
+  font-size: var(--t-1);
+  color: var(--ink-soft);
+  line-height: var(--lh-body);
+}
+
+/* ── 分段输入 ────────────────────────────────────────────────────────────────
+   纪律 ②：一行一段。视觉上它是一道**稿纸上的横线**，不是一个输入框
+   （零容器：没有边框盒、没有底色、没有圆角 —— 只有一条底线）。
+   字号 22px：既是这一版的主角，也顺带避开 iOS 上 <16px 的自动放大。
+   `field-sizing: content` 让它在支持的浏览器里随内容长高；不支持时是固定两行可滚，
+   **功能不依赖它**（渐进增强，不是必需件）。 */
+.seg {
+  display: block;
+  width: 100%;
+  margin: 0 0 var(--s-3);
+  padding: 0 0 var(--s-1);
+  border: 0;
+  border-bottom: 1px solid var(--rule);
+  border-radius: var(--r-none);
+  background: none;
+  color: var(--ink);
+  font-family: var(--f-serif);
+  font-size: var(--t-4);
+  font-weight: var(--w-n);
+  line-height: var(--lh-loose);
+  resize: none;
+  field-sizing: content;
+  min-height: 2.2em;
+  -webkit-appearance: none;
+  appearance: none;
+}
+
+.seg::placeholder {
+  color: var(--ink-faint);
+  font-style: italic;
+}
+
+/* 分段输入的序号槽（"1 / 2 / 3"）：极小灰字，不抢戏 */
+.seg-no {
+  display: block;
+  font-size: var(--t-1);
+  color: var(--ink-faint);
+  letter-spacing: 0.14em;
+  margin: 0 0 var(--s-1);
+}
+
+/* ── 靠了多大力：**一枚离散标记**，不是进度条、不是分数 ─────────────────────────
+   纪律 ④。取值恰四档（视图按 `[data-effort]` 写 0/1/2/3），每档一句人话写在这里。
+   它是一行 11px 灰字，无框无底无边距装饰 —— 与稿纸同色系，不构成"仪表"。 */
+.eff {
+  margin: 0;
+  padding: 0 0 var(--s-4);
+  font-size: var(--t-1);
+  color: var(--ink-faint);
+  letter-spacing: 0.04em;
+}
+
+.eff::before {
+  content: '你靠了多大力 · ';
+  color: var(--ink-faint);
+}
+
+.eff[data-effort='0']::after {
+  content: '自己写的';
+}
+
+.eff[data-effort='1']::after {
+  content: '自己写的（点了一次提示）';
+}
+
+.eff[data-effort='2']::after {
+  content: '提示帮了一把';
+}
+
+.eff[data-effort='3']::after {
+  content: '提示带着写完的';
+}
+
+/* ── 动作：贴着段落末尾的文字按钮 —— 无实心底色，只有描边（下划线）────────────
+   A 手稿的主操作语言。没有 `.primary` 实心块：这一版里"哪个是主操作"
+   靠字重（700 vs 500）与下划线样式（实线 vs 点线）分，不靠色块。 */
+.acts {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--s-4) var(--s-5);
+  padding: 0 0 var(--s-5);
+}
+
+.do {
+  margin: 0;
+  padding: 0 0 3px;
+  border: 0;
+  border-bottom: 1px solid currentColor;
+  background: none;
+  color: var(--ink-soft);
+  font-family: inherit;
+  font-size: var(--t-2);
+  font-weight: var(--w-m);
+  letter-spacing: 0.04em;
+  cursor: pointer;
+  -webkit-appearance: none;
+  appearance: none;
+  border-radius: var(--r-none);
+  /* 全文件**唯一**的一条 transition：按压反馈。
+     纪律 ⑦ 的后半句"另放开一条 :active 按压反馈"说的就是这一条。 */
+  transition: opacity var(--press) ease-out, transform var(--press) ease-out;
+}
+
+.do-main {
+  color: var(--ink);
+  font-weight: var(--w-b);
+}
+
+.do-alt {
+  border-bottom-style: dotted;
+}
+
+.do:active {
+  opacity: 0.55;
+  transform: translateY(1px);
+}
+
+.do[disabled] {
+  color: var(--ink-faint);
+  border-bottom-color: var(--rule);
+  cursor: default;
+  opacity: 1;
+}
+
+/* 「在想…」——加载态。它**不是**转圈动画（动效只留给改写这一处），
+   就是一行灰字：告诉人系统在动，不是卡死了。 */
+.busy {
+  margin: 0;
+  padding: 0 0 var(--s-4);
+  font-size: var(--t-1);
+  color: var(--ink-faint);
+  letter-spacing: 0.06em;
+}
+
+/* ── 教点 2–3 选一（选择做在**内容层**，不做在"要不要继续"）────────────────────
+   每个候选一颗按钮，按钮上写的就是"教什么"（label），下面挂着他那版里的引文。 */
+.pick {
+  padding: 0 0 var(--s-4);
+}
+
+.pick-item {
+  margin: 0 0 var(--s-4);
+}
+
+.pick-do {
+  display: block;
+  width: 100%;
+  margin: 0;
+  padding: 0 0 var(--s-1);
+  border: 0;
+  border-bottom: 1px solid var(--rule);
+  background: none;
+  color: var(--ink);
+  font-family: inherit;
+  font-size: var(--t-3);
+  font-weight: var(--w-m);
+  text-align: left;
+  cursor: pointer;
+  -webkit-appearance: none;
+  appearance: none;
+  border-radius: var(--r-none);
+}
+
+.pick-quote {
+  display: block;
+  margin: var(--s-2) 0 0;
+  font-family: var(--f-serif);
+  font-size: var(--t-2);
+  font-weight: var(--w-n);
+  color: var(--ink-soft);
+}
+
+/* ── 词卡：一个脚注，不是一个框（零容器）─────────────────────────────────────
+   它挂在**被点的那个词所在的那一段**下面（视图按 `card.block` 决定挂哪儿），
+   所以只有一道 1px 竖线 + 缩进。 */
+.cardwrap {
+  margin: var(--s-3) 0 var(--s-4) var(--s-5);
+  max-width: 250px;
+  padding-left: var(--s-3);
+  border-left: 1px solid var(--rule);
+  color: var(--ink);
+}
+
+.wc {
+  display: block;
+  font-size: var(--t-2);
+  line-height: var(--lh-body);
+}
+
+.wc-w {
+  font-family: var(--f-serif);
+  font-size: var(--t-3);
+  font-weight: var(--w-b);
+  color: var(--pencil);
+}
+
+.wc-pos {
+  font-style: italic;
+  font-size: var(--t-1);
+  opacity: 0.72;
+  margin-left: var(--s-2);
+}
+
+.wc-zh {
+  margin-left: var(--s-2);
+  font-weight: var(--w-m);
+}
+
+/* 「没查到」——纪律 ⑤ 的后半截：**如实**。不做假释义、不留空。
+   （词库没覆盖这个词不是缺陷，是这一版词库的边界；编一个释义才是缺陷。） */
+.wc-miss {
+  display: block;
+  margin-top: var(--s-1);
+  font-size: var(--t-1);
+  color: var(--ink-faint);
+  font-style: italic;
+}
+
+/* 词卡里的两颗小动作：发音 / 加进我要学的 */
+.wc-acts {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--s-3) var(--s-4);
+  margin-top: var(--s-3);
+}
+
+.wc-do {
+  margin: 0;
+  padding: 0 0 2px;
+  border: 0;
+  border-bottom: 1px dotted currentColor;
+  background: none;
+  color: var(--ink-soft);
+  font-family: inherit;
+  font-size: var(--t-1);
+  font-weight: var(--w-m);
+  letter-spacing: 0.04em;
+  cursor: pointer;
+  -webkit-appearance: none;
+  appearance: none;
+  border-radius: var(--r-none);
+}
+
+/* 提示类别（纪律：1 级只问「卡在哪类」）—— 三个词，一行排开 */
+.cats {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--s-2) var(--s-4);
+  margin: var(--s-2) 0 0;
+}
+
+.cat {
+  margin: 0;
+  padding: 0 0 2px;
+  border: 0;
+  border-bottom: 1px solid var(--rule);
+  background: none;
+  color: var(--ink-soft);
+  font-family: inherit;
+  font-size: var(--t-2);
+  font-weight: var(--w-m);
+  letter-spacing: 0.04em;
+  cursor: pointer;
+  -webkit-appearance: none;
+  appearance: none;
+  border-radius: var(--r-none);
+}
+
+/* ── 折叠块：我的句子 / 我的词 / 待重写 ────────────────────────────────────────
+   ⚠️ 折叠体**不是 `display:none` 藏着的**：视图只在展开时建它（关着时节点不存在）。
+   本仓的既有判据（"非活动视图必须卸载，不许 display:none 藏"）在这里同样成立。 */
+.folds {
+  padding: var(--s-5) 0 0;
+}
+
+.fold {
+  display: flex;
+  width: 100%;
+  align-items: baseline;
+  gap: var(--s-2);
+  margin: 0;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--ink-soft);
+  font-family: inherit;
+  font-size: var(--t-1);
+  font-weight: var(--w-m);
+  letter-spacing: 0.06em;
+  text-align: left;
+  cursor: pointer;
+  -webkit-appearance: none;
+  appearance: none;
+  border-radius: var(--r-none);
+}
+
+.fold::before {
+  content: '▸';
+  font-size: var(--t-1);
+  color: var(--ink-faint);
+}
+
+.fold[aria-expanded='true']::before {
+  content: '▾';
+}
+
+.fold-body {
+  padding: var(--s-3) 0 0 var(--s-4);
+  font-size: var(--t-2);
+  color: var(--ink-soft);
+  line-height: var(--lh-body);
+}
+
+/* 块与块之间靠留白分开（`.foldblock` 是"一个折叠块"，`.fold` 是它的标题按钮）*/
+.foldblock + .foldblock {
+  margin-top: var(--s-4);
+}
+
+.mine-s {
+  margin: 0 0 var(--s-3);
+}
+
+.mine-zh {
+  display: block;
+  font-size: var(--t-1);
+  color: var(--ink-faint);
+  margin-bottom: var(--s-1);
+}
+
+/* 队列里的一条：句子 + 一句"过几天再写一遍"的说明 */
+.due-item {
+  margin: 0 0 var(--s-3);
+}
+
+.due-when {
+  display: block;
+  font-size: var(--t-1);
+  color: var(--ink-faint);
+}
+
+/* 空态：如实说"还没有"，不摆一条假记录 */
+.empty {
+  margin: 0;
+  font-size: var(--t-2);
+  color: var(--ink-faint);
+  font-style: italic;
+}
+
+/* 我的词：一排小 chip，衬线、只有底线 */
+.chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--s-3) var(--s-4);
+}
+
+.chip {
+  font-family: var(--f-serif);
+  font-size: var(--t-2);
+  color: var(--ink-soft);
+  border-bottom: 1px solid var(--rule);
+}
+
+/* ── 逐词释义（只有揭开之后才有：它来自 reveal().glosses）───────────────────── */
+.gloss {
+  margin: 0 0 var(--s-2);
+  font-size: var(--t-2);
+  color: var(--ink-soft);
+}
+
+.gloss .gloss-w {
+  font-family: var(--f-serif);
+  font-weight: var(--w-b);
+  color: var(--ink);
+}
+
+.gloss .gloss-pos {
+  font-style: italic;
+  font-size: var(--t-1);
+  opacity: 0.72;
+  margin-left: var(--s-2);
+}
+
+.gloss .gloss-zh {
+  margin-left: var(--s-2);
+}
+
+/* 降难度两档：两条更低台阶的说法。仍然零容器 —— 只有一道竖线（同批注的语言），
+   但颜色是灰不是铅笔色：它是"给你一个更省力的说法"，不是"我指出你错在哪"。 */
+.simpler {
+  margin: 0 0 var(--s-3) var(--s-5);
+  padding: 0 0 0 var(--s-3);
+  border-left: 1px solid var(--rule);
+}
+
+.simpler-lab {
+  display: block;
+  font-size: var(--t-1);
+  color: var(--ink-faint);
+  letter-spacing: 0.1em;
+  margin: 0 0 var(--s-1);
+}
+
+/* ── 全站唯一的动效：改写 ────────────────────────────────────────────────────
+   `@keyframes` **只有两条**：旧版淡出（rw-old）、新版浮现（rw-new）。
+   没有第三条。本文件除此之外**没有** `transition`（唯一那条挂在 `.do:active`）。
+   旧版与新版的**静态终态先写死**（无动画时也是这个样子），动画只是朝它走一遍 ——
+   于是 `prefers-reduced-motion: reduce` 下直接切换的结果与动画结束时逐位相同。 */
+@keyframes rw-old {
+  from {
+    opacity: 1;
+  }
+  to {
+    opacity: 0.22;
+  }
+}
+
+@keyframes rw-new {
+  from {
+    opacity: 0;
+    transform: translateY(8px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.is-old {
+  opacity: var(--old-veil);
+  text-decoration: line-through;
+  text-decoration-thickness: 1px;
+}
+
+.is-new {
+  opacity: 1;
+}
+
+.rw-anim.is-old {
+  animation: rw-old var(--rw-out) ease-out both;
+}
+
+.rw-anim.is-new {
+  animation: rw-new var(--rw-in) ease-out var(--rw-lag) both;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .rw-anim.is-old,
+  .rw-anim.is-new {
+    animation: none;
+  }
+
+  /* 按压反馈：**不删那条 transition**，把它的时长令牌改成 0。
+     这样"全文件恰好一条 transition"这句话在任何偏好下都成立 ——
+     否则 reduce 分支里会多出第二条 `transition: none` 声明，判据就得跟着放宽，
+     而"放宽判据去迁就实现"是本项目明令禁止的（任务书红线 7）。 */
+  :root {
+    --press: 0ms;
+  }
+}
+
+/* ── 门面还没接上 / 没配 Key：两屏"不撞墙"的兜底 ────────────────────────────────
+   纪律 ⑩：没配 Key 时**当场给出完整引导**（为什么需要 / 去哪拿 / `sk-` 形状 /
+   只存本机），不白屏不报错。门面缺失同理：如实说"引擎还没接上"，**不用假数据顶上**。
+   这一层是纸外的一屏，所以允许有自己的边距；但它同样零容器、零圆角、零投影。 */
+.gate {
+  max-width: 330px;
+  margin: 0 auto;
+  padding: var(--s-5) 0 calc(var(--s-6) + var(--safe-bottom));
+  color: var(--ink);
+}
+
+.gate h1 {
+  margin: 0 0 var(--s-4);
+  font-size: var(--t-4);
+  font-weight: var(--w-m);
+  letter-spacing: 0.2em;
+}
+
+.gate p {
+  margin: 0 0 var(--s-3);
+  font-size: var(--t-2);
+  color: var(--ink-soft);
+  line-height: var(--lh-body);
+}
+
+.gate .gate-why {
+  color: var(--ink);
+}
+
+.gate .key-in {
+  display: block;
+  width: 100%;
+  margin: var(--s-2) 0 var(--s-4);
+  padding: var(--s-2) 0;
+  border: 0;
+  border-bottom: 1px solid var(--rule);
+  border-radius: var(--r-none);
+  background: none;
+  color: var(--ink);
+  font-family: var(--f-mono);
+  font-size: var(--t-2);
+  -webkit-appearance: none;
+  appearance: none;
+}
+
+.gate .gate-err {
+  margin: 0 0 var(--s-3);
+  font-size: var(--t-1);
+  color: var(--pencil);
+}

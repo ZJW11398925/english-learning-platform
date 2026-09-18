@@ -1,0 +1,58 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <title>今天的一句 · 从零写一句英文</title>
+  <meta name="description" content="说一句中文，从零把它写成英文；卡住了有一级一级的提示，改完才看见系统版。">
+  <meta name="theme-color" content="#fbf9f4">
+  <meta name="mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <!--
+    内联 data URI 图标：只为消掉浏览器那次 favicon 请求。
+    「零外部资源」在这一页是硬约束（红线：web font / 图标库 / CDN / 图片全不许），
+    而 data: 不是外部资源 —— 它连一次网络请求都不产生（探针里"跨源请求 0"与
+    "连 favicon 请求都没有"两条断言就是钉这个的）。
+    ⚠️ 与 `web/index.html` 一样，本页**只有这一处**内联 data:；其余引用必须是
+       仓库里真的存在的相对路径。
+  -->
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Crect width='16' height='16' rx='4' fill='%23a8562f'/%3E%3C/svg%3E">
+  <link rel="stylesheet" href="./write.css">
+</head>
+<body>
+  <!--
+    ⚠️ 这一页**不链接进首页**（`web/index.html` 一行未动），也**还没有部署**。
+
+    ── 这一页与首页是什么关系 ─────────────────────────────────────────────────
+    首页 = 当前在线的形态（对话式）；本页 = 形态第三次重定向之后的第一版真界面
+    （「从零写一句英文，再把这一句一层层说好」）。第二版首页怎么接，是总控/人的决定，
+    不是这一页自己该做的事 —— 所以本页刻意**不被任何页面引用**。
+
+    ── 界面纪律落在哪儿（逐条能对上代码）──────────────────────────────────────
+    ① 一条不断长的稿纸：`write.view.mjs` 里没有 `.panel` / 换屏逻辑，
+       每一步只是往同一张 `.sheet` 上接内容；旧版留在纸上（划掉淡出）。
+    ② 分段写：`.seg` 是一行一段的输入（'再加一段'）。
+    ③ 标出来不说、点开才说：`.flag` 只有一条波浪线；`note-issue` 在点开前**不建节点**。
+    ④ 离散难度标记：`.eff[data-effort]` 取值恰四档（0/1/2/3），不是进度条不是分数。
+    ⑤ 屏上英文全部可点：每一个 alphabetic token 都是 `button.w`；查不到就说「没查到」。
+    ⑥ 教点 2–3 选一：`.pick` 里的候选按钮写的就是"教什么"。
+    ⑦ 视觉 = A 手稿；动效只在改写那一处（`write.css` 里 `@keyframes` 恰两条）。
+    ⑧ 零外部资源：系统字体栈，无 @font-face、无 url()、无外链。
+    ⑨ 持久化：本机存储（装配层注入 `safeStorage()`，键由引擎定）。
+    ⑩ 没配 Key 不撞墙：`write.view.mjs` 的 `keyScreen()` 当场给完整引导。
+    ⑪ 成本告知在**纸外**的页脚（`.page-foot`），不在稿纸主区。
+
+    ── 引擎还没接上时会发生什么 ───────────────────────────────────────────────
+    `write.mjs` 动态 import `./units/write/index.mjs`，失败就**如实说「引擎还没接上」**
+    并把原因写出来。**绝不用演示数据顶上** —— 屏上出现假的教学内容比什么都不显示更坏。
+    要看这一页每一步长什么样，开走查台 `gallery-write.html`（那里注入的是明确标注的假门面）。
+  -->
+  <main id="app"></main>
+  <script type="module">
+    import { mountWrite } from './write.mjs';
+    // 生产缺省：Key 用真 localStorage（`elp.apiKey`），门面动态 import，
+    // 存储走 `safeStorage()`，发音走浏览器自带的 speechSynthesis。
+    await mountWrite(document.getElementById('app'));
+  </script>
+</body>
+</html>
