@@ -193,7 +193,8 @@ const isTimeoutAbort = (err, signal) => signal?.aborted === true
  *   这两种失败**必须抛出**：返回空候选会看起来像"识物成功但没认出东西"，
  *   把"服务不可用"记成"模型能力不足"（全局约束 3）。
  * @throws {Error} `code === 'response_invalid'`：HTTP 成功但信封/content/候选不合法（移植口径）。
- * @throws {TypeError} `timeoutMs` 非法（例如 NaN）时由 `AbortSignal.timeout` 抛出——
+ * @throws {RangeError} `timeoutMs` 非法（例如 NaN）时由 `AbortSignal.timeout` 抛出——
+ *   实测 `AbortSignal.timeout(NaN)` 抛的是 `RangeError [ERR_OUT_OF_RANGE]`（不是 `TypeError`）；
  *   它在 try 之外发生，不会被包装成一次"请求失败"（参数写错是编程错误，不是用户情形）。
  */
 export async function recognize(blob, {
@@ -240,7 +241,7 @@ export async function recognize(blob, {
     temperature: 0.1,
   };
 
-  // 上限在这里装好（不放进下面的 try）：参数非法要响亮地成为 TypeError，
+  // 上限在这里装好（不放进下面的 try）：参数非法要响亮地成为 RangeError，
   // 而不是被 catch 成"识物请求发不出去"。
   const signal = AbortSignal.timeout(timeoutMs);
   const startedAt = now();

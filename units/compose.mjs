@@ -168,7 +168,8 @@ function pending({ reason, error, detail = null, sentence, word, scene }) {
  *   `ok` 的 `feedback` 是**校验器放行的那个对象本身**（同一引用，原样入库）；
  *   **本函数不抛错**：外界的一切失败都是"这次没拿到反馈"，不是编程错误——它必须变成一条
  *   有出口的 pending（原句保留、可补交），而不是把调用方炸掉。
- * @throws {TypeError} `timeoutMs` 非法（例如 NaN）时由 `AbortSignal.timeout` 抛出——
+ * @throws {RangeError} `timeoutMs` 非法（例如 NaN）时由 `AbortSignal.timeout` 抛出——
+ *   实测 `AbortSignal.timeout(NaN)` 抛的是 `RangeError [ERR_OUT_OF_RANGE]`（不是 `TypeError`）；
  *   它在 try 之外发生，不会被包装成一次"请求失败"（参数写错是编程错误，不是用户情形）。
  */
 export async function submitSentence(
@@ -205,7 +206,7 @@ export async function submitSentence(
   }
 
   const doFetch = fetchImpl ?? globalThis.fetch;
-  // 上限在这里就装好（不放进下面的 try）：参数非法要响亮地成为 TypeError，
+  // 上限在这里就装好（不放进下面的 try）：参数非法要响亮地成为 RangeError，
   // 而不是被 catch 成"这次的反馈没拿到"。
   const signal = AbortSignal.timeout(timeoutMs);
 
