@@ -1,0 +1,283 @@
+// web/units/write/prompt.mjs
+//
+// 这条链路**只有两次模型调用**，两次的提示词都在这里：
+//   ① `buildReadMessages`   —— 「读他这一版」：接不接得住 + 三级台阶的提示 + 2–3 个教点候选；
+//   ② `buildReviseMessages` —— 「改他这一版」：一处不地道的标记 + 系统版 + 每处一句为什么
+//                              + 降难度两档 + 逐词释义。
+//
+// ── 为什么每条行为约束都单独成一个常量 ────────────────────────────────────────
+// 与 `../compose.mjs` 的四条规则同一个理由，而且这里更狠：**"整段提示词里出现过某几个字"
+// 这种断言拦不住"把其中一条删掉"**。拆成常量之后每条都能被单独断言、被变异探针单独钉住。
+// 但**提示词永远是"劝"，不是"保证"**——真正的判定权在 `./validate.mjs`（机械可校验的三条）
+// 与 `./parse.mjs`（形状）。本模块的一句纪律：**凡是能写成机械判据的约束，
+// 提示词里写一遍、校验器里再写一遍**；只写在提示词里的那些，报告里必须如实标注"无机械护栏"。
+//
+// ── 两次调用各自看得见什么（这一节是产品口径，不是排版）────────────────────────
+// ① 看得见：中文原话 / 素材 / 他写的这一版 / 三级台阶要按三类给（想不起词·不会搭结构·没想好怎么说）。
+// ② 看得见：**他挑中的那个教点**（`pickedTeachPoint`）。这是本形态与旧形态的关键分野：
+//    教点什么由程序交出去、他挑了哪一个由程序收回来、再作为 ② 的输入发出去——
+//    若挑了不影响 ②，这个选择就是装饰性的（旧形态正是因为做了假选择被真实用户否掉）。
+//
+// ── 长度与语言口径 ────────────────────────────────────────────────────────────
+// 学习者是中文母语的成人初学者：`why`（为什么）与 `glosses.zh`（词义）用中文；
+// `system`（系统版）与 `simpler.half`/`simpler.easy`（降难度两档）是**英文**——
+// 那是给他"照着说一遍"的示范句，翻成中文就没有示范作用了。
+//
+// 纯逻辑模块：零 import、零浏览器 API、零副作用——可在 Node 中直接测。
+// `/v1/chat/completions` 的请求头、超时、失败分档都在 `./client.mjs`，本模块**不碰网络**。
+
+/** 提示词版本号（`w1`）。改提示词就改它——成本账与效果账都要能区分"哪一代提示词"。 */
+export const PROMPT_VERSION = 'w1';
+
+// ─────────────────────────── ① 「读这一版」───────────────────────────
+
+/** 角色与总口径：这是一个"读一版初稿"的动作，不是判分（不说分数/等级/进度是硬约束之一）。 */
+export const READ_ROLE = [
+  'You are an English writing coach for an adult Chinese learner.',
+  'The learner is writing English FROM SCRATCH: first they said what they wanted to say in Chinese,',
+  'then they wrote an English version by themselves. You are reading THAT draft.',
+  'You are NOT a grader. Never mention scores, levels, grades, CEFR bands or progress.',
+].join('\n');
+
+/** 行为约束四类之一：**不得编造**他没说过的人、事、词（V2 的机械护栏在 `./validate.mjs`）。 */
+export const READ_RULE_NO_INVENTION = [
+  'INVENTION IS FORBIDDEN: use only the people, things, places, times and numbers that appear',
+  'in the Chinese text, the material, or the learner\'s own draft.',
+  'Never add a name, a city, a date, an amount, a company or a person that is not already there.',
+].join('\n');
+
+/** 行为约束之二：教点必须能在**他写的那一版**里逐字找到（V1 的机械护栏在 `./validate.mjs`）。 */
+export const READ_RULE_TRACEABLE = [
+  'Every "quote" you output MUST be copied character-for-character from the learner\'s draft.',
+  'Copy the smallest span that shows the problem. Never paraphrase, never fix the spelling,',
+  'never invent a quote. If you cannot copy it exactly, drop that teach point entirely.',
+].join('\n');
+
+/** 行为约束之三：**只挑最值得改的两三处**，而且必须只针对他真正写下的东西。 */
+export const READ_RULE_PICK_FEW = [
+  'Output 2 or 3 teach points, ordered by how much they would improve this sentence.',
+  'Judge ONLY what the learner actually wrote. Do not teach something the draft never attempts.',
+].join('\n');
+
+/** 行为约束之四：**接不住就说不接**（V3：程序绝不补内容，见 `./engine.mjs` / `./flow.mjs`）。 */
+export const READ_RULE_REFUSE = [
+  'Be honest about what you can do with THIS draft.',
+  'If you cannot help with this draft (for example it is empty, it is not English, it is off the',
+  'topic, or it is already good enough that any edit would be noise), set "canHelp" to false,',
+  'give a short "reason" in Chinese, and leave "hint" and "teachPoints" empty.',
+  'Refusing is a correct answer. Never invent a problem just to have something to say.',
+].join('\n');
+
+/** 三级台阶的**类目**（与 `./flow.mjs` 的 `HINT_CATEGORIES` 同一组，见那里的说明）。 */
+export const READ_RULE_HINT_TIERS = [
+  'The learner can ask for help in three steps. Prepare ALL THREE, one per category:',
+  '- "word": they cannot recall the English word they need.',
+  '- "structure": they know the words but not how to build the sentence.',
+  '- "content": they have not worked out what to say yet.',
+  'Each category needs an ordered escalation of exactly three steps:',
+  '  step 1 = the smallest nudge (a question or a hint, NOT the answer).',
+  '  step 2 = a stronger hint (a pattern, a first word, a frame with a blank).',
+  '  step 3 = the full word or the full sentence they were reaching for.',
+  'Step 3 must actually contain the English they need. Steps 1 and 2 must NOT give it away.',
+].join('\n');
+
+/**
+ * ① 的输出形状（严格 JSON）。字段名是**契约**：`./parse.mjs` 按它归一，`./validate.mjs` 按它判。
+ */
+export const READ_OUTPUT_SHAPE = [
+  'Return STRICT JSON only, no prose, in exactly this shape:',
+  '{"canHelp":true,"reason":null,',
+  ' "hint":{"word":{"1":"…","2":"…","3":"…"},"structure":{"1":"…","2":"…","3":"…"},"content":{"1":"…","2":"…","3":"…"}},',
+  ' "teachPoints":[{"key":"tp1","label":"短中文标签","quote":"从他这一版里逐字复制的一段","kind":"grammar"}]}',
+  'Rules for the fields:',
+  '- "canHelp": boolean. When false, "reason" MUST be a short Chinese sentence and the other two fields stay empty.',
+  '- "reason": null when "canHelp" is true.',
+  '- "hint": the three categories described above; each is {"1":…,"2":…,"3":…}.',
+  '- "teachPoints": 2 or 3 items.',
+  '  · "key": a short stable id (tp1, tp2, tp3).',
+  '  · "label": a SHORT Chinese phrase naming what to work on (this is what the learner picks from).',
+  '  · "quote": copied character-for-character from the learner\'s draft.',
+  '  · "kind": one of "word", "grammar", "collocation", "structure", "meaning".',
+  '- Never add extra fields or commentary outside the JSON object.',
+].join('\n');
+
+/**
+ * 组装「读这一版」的 messages。
+ *
+ * @param {object} input
+ *   - `chinese`：他说/写的中文原话。**必给**——这是"他要说什么"的唯一来源。
+ *   - `material`：可选素材（他贴的一段中文、一段英文、或任何上下文）。为 null 时不上行该行。
+ *   - `draft`：他写的那一版（**当前这一版的原文，原样上行**：模型看到的必须是他真正写下的东西，
+ *     不做 trim、不做纠错——纠错是 ② 的产物，不是 ① 的输入）。
+ * @returns {Array<{role: string, content: string}>} OpenAI 形状的两条消息
+ */
+export function buildReadMessages({ chinese, material = null, draft = '' } = {}) {
+  const lines = [`中文原话：${text(chinese)}`];
+  if (material !== null && material !== undefined && text(material) !== '') {
+    lines.push(`素材：${text(material)}`);
+  }
+  lines.push('他写的英文这一版（原样，未纠错）：');
+  lines.push(text(draft) === '' ? '（他还没写出任何东西——这一版是空的）' : text(draft));
+  return [
+    {
+      role: 'system',
+      content: [
+        READ_ROLE,
+        '',
+        READ_RULE_NO_INVENTION,
+        '',
+        READ_RULE_TRACEABLE,
+        '',
+        READ_RULE_PICK_FEW,
+        '',
+        READ_RULE_REFUSE,
+        '',
+        READ_RULE_HINT_TIERS,
+        '',
+        READ_OUTPUT_SHAPE,
+      ].join('\n'),
+    },
+    { role: 'user', content: lines.join('\n') },
+  ];
+}
+
+// ─────────────────────────── ② 「改这一版」───────────────────────────
+
+/** 角色与总口径（不说分数/等级/进度）。 */
+export const REVISE_ROLE = [
+  'You are an English writing coach for an adult Chinese learner who writes English from scratch.',
+  'You are now rewriting the draft they wrote, so they can compare it with their own version.',
+  'You are NOT a grader. Never mention scores, levels, grades, CEFR bands or progress.',
+].join('\n');
+
+/** 核心纪律之一：**只标最值得改的一处**，不逐条挑错。 */
+export const REVISE_RULE_ONE_ISSUE = [
+  'Mark EXACTLY ONE issue in "issue": the single most useful thing to fix in this draft.',
+  'Not two, not a list. Everything else, leave alone — even if you can see other problems.',
+  'If there is genuinely nothing worth fixing, set "canTeach" to false and say so in "reason".',
+].join('\n');
+
+/** 核心纪律之二：**不说为什么**——"为什么"要等他改完才揭开。 */
+export const REVISE_RULE_NO_SPOILER = [
+  'The learner has not revised yet. So in this response:',
+  '- "issue.quote" and "issue.kind" only. Do NOT explain the problem anywhere.',
+  '- Do NOT write any hint, coaching sentence or explanation outside the fields listed below.',
+  '- "system" is the improved version. It will be shown to them LATER, not now.',
+].join('\n');
+
+/** 核心纪律之三：**只有两档降难度，不能一次给到底**。 */
+export const REVISE_RULE_TWO_STEPS_DOWN = [
+  'Give exactly TWO easier versions, never more and never a shortcut to the bottom:',
+  '- "simpler.half": the same meaning in noticeably simpler English.',
+  '- "simpler.easy": the same meaning in the simplest English you can manage.',
+  'Both must still be something the learner could actually say out loud.',
+  '"half" must not be as simple as "easy" — the two must be visibly different steps.',
+].join('\n');
+
+/** 核心纪律之四：**逐词释义只解释系统版里真出现过的词**（V5 的机械护栏在 `./validate.mjs`）。 */
+export const REVISE_RULE_GLOSS = [
+  'For "glosses", list the words in YOUR "system" version that this learner is most likely not to know.',
+  'Every "word" you list MUST appear character-for-character inside your "system" version.',
+  'Never gloss a word you did not use. Order them the way they appear in "system".',
+].join('\n');
+
+/** 核心纪律之五：不得编造他没说过的人、事、词（与 ① 同一条，机械护栏在 `./validate.mjs`）。 */
+export const REVISE_RULE_NO_INVENTION = [
+  'INVENTION IS FORBIDDEN: keep exactly the learner\'s own meaning, people, things, places,',
+  'times and numbers. Never add a name, a city, a date, an amount or a company that is not there.',
+  'You may fix the English. You may NOT add facts.',
+].join('\n');
+
+/** ② 的输出形状（严格 JSON）。 */
+export const REVISE_OUTPUT_SHAPE = [
+  'Return STRICT JSON only, no prose, in exactly this shape:',
+  '{"canTeach":true,"reason":null,',
+  ' "issue":{"quote":"从他这一版里逐字复制的一段","kind":"grammar"},',
+  ' "system":"the improved English version of his sentence",',
+  ' "why":["一句中文，说清这一处为什么要改"],',
+  ' "simpler":{"half":"…","easy":"…"},',
+  ' "glosses":[{"word":"…","pos":"v.","zh":"中文释义"}]}',
+  'Rules for the fields:',
+  '- "canTeach": boolean. When false, "reason" MUST be a short Chinese sentence; the rest stay empty/null.',
+  '- "reason": null when "canTeach" is true.',
+  '- "issue": exactly one object, or null when "canTeach" is false.',
+  '  · "quote": copied character-for-character from the learner\'s draft.',
+  '  · "kind": one of "word", "grammar", "collocation", "structure", "meaning".',
+  '- "system": the improved English version. Same facts as his draft, better English.',
+  '- "why": 1 to 3 short Chinese sentences, one per change you made in "system".',
+  '- "simpler": exactly two easier English versions as described above.',
+  '- "glosses": 0 to 8 items; "pos" may be null; "zh" is a short Chinese meaning.',
+  '- Never add extra fields or commentary outside the JSON object.',
+].join('\n');
+
+/**
+ * 组装「改这一版」的 messages。
+ *
+ * @param {object} input
+ *   - `chinese` / `material`：与 ① 同源（② 需要它们来判断"他要说的是不是这个意思"）。
+ *   - `draft`：他这一版（原样上行）。
+ *   - `pickedTeachPoint`：**他挑中的那个教点**（`{key,label,quote,kind}` 或一句标签字符串）。
+ *     为 null/空时留一行"他没挑"——**不编一个**（编一个就是替他做决定）。
+ * @returns {Array<{role: string, content: string}>}
+ */
+export function buildReviseMessages({
+  chinese = null, material = null, draft, pickedTeachPoint = null,
+} = {}) {
+  const lines = [];
+  if (text(chinese) !== '') lines.push(`中文原话：${text(chinese)}`);
+  if (material !== null && material !== undefined && text(material) !== '') {
+    lines.push(`素材：${text(material)}`);
+  }
+  lines.push('他写的英文这一版（原样，未纠错）：');
+  lines.push(text(draft) === '' ? '（空）' : text(draft));
+  lines.push('他挑中的教点（他本人选的，改这一版时优先处理它）：');
+  lines.push(describeTeachPoint(pickedTeachPoint));
+  return [
+    {
+      role: 'system',
+      content: [
+        REVISE_ROLE,
+        '',
+        REVISE_RULE_ONE_ISSUE,
+        '',
+        REVISE_RULE_NO_SPOILER,
+        '',
+        REVISE_RULE_TWO_STEPS_DOWN,
+        '',
+        REVISE_RULE_GLOSS,
+        '',
+        REVISE_RULE_NO_INVENTION,
+        '',
+        REVISE_OUTPUT_SHAPE,
+      ].join('\n'),
+    },
+    { role: 'user', content: lines.join('\n') },
+  ];
+}
+
+// ─────────────────────────── 内部小工具 ───────────────────────────
+
+/** 任何东西 → 字符串（null/undefined → 空串）。只用于拼提示词，绝不用于"补内容"。 */
+function text(v) {
+  if (v === null || v === undefined) return '';
+  return typeof v === 'string' ? v : String(v);
+}
+
+/**
+ * 把一个教点渲染成提示词里的一行。
+ * 对象带着 `quote` 时**连原句片段一起给它**——教点是"对着他写的这几个字"说的，
+ * 只给一个中文标签，模型得自己猜是哪几个字（那正是答非所问的起点）。
+ */
+function describeTeachPoint(picked) {
+  if (picked === null || picked === undefined) return '（他没有挑——请不要假设他挑了某个，按你自己的判断改）';
+  if (typeof picked === 'string') return text(picked).trim() === '' ? '（他没有挑）' : text(picked);
+  const label = text(picked.label).trim();
+  const quote = text(picked.quote).trim();
+  const kind = text(picked.kind).trim();
+  if (label === '' && quote === '') return '（他没有挑）';
+  const parts = [];
+  if (label !== '') parts.push(label);
+  if (quote !== '') parts.push(`原句片段：「${quote}」`);
+  if (kind !== '') parts.push(`类型：${kind}`);
+  return parts.join('　');
+}
