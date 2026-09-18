@@ -56,6 +56,7 @@ import {
   renderWrite, emptySnapshot, segmentsToText, textToSegments,
 } from './write.view.mjs';
 import { createKeyring } from './units/keyring.mjs';
+import { APP_FAIL_REASONS } from './units/write/index.mjs';
 
 /** 门面的落地位置（`createWriteApp`）。**任务书冻结**：界面只许消费这一个门面。 */
 export const ENGINE_URL = './units/write/index.mjs';
@@ -434,19 +435,26 @@ export async function mountWrite(root, deps = {}) {
 
   /**
    * 提示拿不到内容时的那一句人话。
-   * ⚠️ 引擎的三级台阶**内容来自"读这一版"那一次的产物**，而那次读**只在 `submit()` 里发生**
-   * （实读 `flow.mjs`：`askHint` 要求 `s.round.read !== null`，`noteRead` 只有 `index.mjs`
-   * 的 `submit()` 一处调用点）。所以**提交之前求提示，引擎只能回 `level 0 / text null`**。
-   * 这不是缺陷，是这一版引擎的接线顺序；界面必须把这件事**说出来**，而不是装作提示坏了。
+   *
+   * ⚠️ **订正（这一版修掉了 D1）**：这里原先写着「提示要等系统读过你这一版才有：先按「写好了」
+   * 交一次，再回来点提示」—— 那是把引擎当时的接线顺序（① 只在 `submit()` 里发生）
+   * **当成了产品行为写进界面**，而形态的全部价值就在"卡住时给最小帮助"这一格。
+   * 现在引擎在**求 2/3 级提示时当场读 ①**（读的是他当前这一版，一个字都没写也合法），
+   * 所以这句话**已经变成假话**，必须删掉。
+   *
+   * 剩下的两种"没有内容"必须分开说（本项目的铁律：不把两件事说成一件）：
+   *   · `canHelp === false` ⇒ 模型说了**它接不住这一版**（那是教学判断，照实转述）；
+   *   · `canHelp === true` ⇒ 模型接得住、但这个类目**没有更深的一级了**（台阶到顶/只有一级）。
    */
   function noHintNotice() {
-    let readDone = false;
+    let canHelp = null;
     try {
-      readDone = facade !== null && facade.state()?.canHelp !== null && facade.state()?.canHelp !== undefined;
-    } catch { readDone = false; }
-    return readDone
-      ? '这一类暂时没有更多提示了。'
-      : '提示要等系统读过你这一版才有：先按「写好了」交一次，再回来点提示。';
+      const st = facade === null ? null : facade.state();
+      if (st !== null && typeof st === 'object' && typeof st.canHelp === 'boolean') canHelp = st.canHelp;
+    } catch { canHelp = null; }
+    if (canHelp === false) return '系统说这一版它接不住，所以也给不出提示。';
+    if (canHelp === null) return '这一类暂时没有更多提示了。';
+    return '这一类暂时没有更多提示了（系统没给更深的一级，不是提示坏了）。';
   }
 
   const ACTIONS = {
@@ -501,10 +509,20 @@ export async function mountWrite(root, deps = {}) {
       await run(async () => {
         try {
           await pushDraft();
-          const r = await facade.askHint(cat);          if (r === null || typeof r !== 'object') { refuse('门面没给出提示'); return; }
+          const r = await facade.askHint(cat);
+          if (r === null || typeof r !== 'object') { refuse('门面没给出提示'); return; }
+          // ⚠️ 门面会**如实报失败**（没 Key / 网络 / 校验不过）——那与"模型说了没有"是两件事，
+          // 拿同一句话糊过去就会把真正的原因藏起来（所以先认 ok，再看 content）。
+          if (r.ok !== true) {
+            snap.hint = null;
+            snap.hintOpen = false;
+            ui.hintCategory = null;
+            refuse(new Error(whyOf(r, '提示没拿到')));
+            return;
+          }
           // ⚠️ 引擎**明确会**回 `{level: 0, category, text: null}` —— 它的注释写着
           // "`text: null` 且**不是**编出来的内容——界面据此显示'这一类暂时没有更多提示'"。
-          // 所以这里**不把它当成错误**，也不编一句提示：如实说这一句，并指出下一步。
+          // 所以这里**不把它当成错误**，也不编一句提示：如实说这一句。
           if (typeof r.text !== 'string' || r.text.trim() === '') {
             snap.hint = null;
             snap.hintOpen = false;
@@ -539,7 +557,19 @@ export async function mountWrite(root, deps = {}) {
           if (ok === false) { refuse('这一版没能交进引擎（它说现在不是写草稿的阶段）'); return; }
           const r = await facade.submit();
           if (r === null || typeof r !== 'object') { refuse('门面没有回话'); return; }
-          if (r.ok !== true) { refuse(whyOf(r, '它没给理由')); return; }
+          if (r.ok !== true) {
+            // ⚠️ **"这一步跳过了"不是"接不住"**（门面把两者分开报，界面必须分开说）：
+            // 他先求过提示（那次 ① 读的是草稿 A）、之后又改了字（现在交的是草稿 B），
+            // 缓存里那几个教点在他这一版里一个都逐字找不到 ⇒ 跳过挑教点，直接标出一处。
+            // 拿 "这次接不住" 糊过去就是**把两件事说成一件**，而那件事根本不是失败。
+            if (r.reason === APP_FAIL_REASONS.NO_TRACEABLE_TEACH_POINT) {
+              snap.version1 = text;
+              await ACTIONS.pickSkip(whyOf(r, '这一次没有东西可挑'));
+              return;
+            }
+            refuse(whyOf(r, '它没给理由'));
+            return;
+          }
           const cands = Array.isArray(r.candidates) ? r.candidates : [];
           if (cands.length === 0) { refuse('它没有给出可以挑的教点'); return; }
           snap.version1 = text;
@@ -569,6 +599,35 @@ export async function mountWrite(root, deps = {}) {
           ui.failReason = null;
         } catch (err) { refuse(err); }
       });
+    },
+
+    /**
+     * **跳过挑教点**：一个候选都没有剩下时，② 以 `pickedTeachPoint = null` 跑
+     * （引擎的 `pickTeachPoint(null)`，只在候选真的是空的时候合法），② 只做
+     * "标出最值得改的一处"。
+     *
+     * 为什么不做成"没候选就自动往下走"：那会让"他挑了哪一个"这件事凭空消失。
+     * 他把这一步**看见**（屏上如实写着为什么没有东西可挑），比悄悄替他决定要好。
+     * 它**不自己开一个 `run()`**：调用方（`draftDone`）已经在 `run()` 里了，
+     * 再套一层会让同一次动作重画两遍。
+     */
+    async pickSkip(why = '') {
+      try {
+        const r = await facade.pickTeachPoint(null);
+        if (r === null || typeof r !== 'object') { refuse('门面没有回话'); return; }
+        if (r.ok !== true) { refuse(whyOf(r, '它没给理由')); return; }
+        const issue = r.issue;
+        if (issue === null || issue === undefined || typeof issue.quote !== 'string' || issue.quote === '') {
+          refuse('它没有说清要标哪一处');
+          return;
+        }
+        snap.picked = null;
+        snap.issue = { quote: issue.quote, kind: issue.kind };
+        snap.issueOpen = false;
+        snap.step = 'marked';
+        ui.failReason = null;
+        ui.notice = why === '' ? null : why;
+      } catch (err) { refuse(err); }
     },
 
     /* ── 第 4 步：标出来、不说；点开才说 ────────────────────────────────── */

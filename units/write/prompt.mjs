@@ -53,7 +53,33 @@ export const READ_RULE_TRACEABLE = [
   'never invent a quote. If you cannot copy it exactly, drop that teach point entirely.',
 ].join('\n');
 
-/** 行为约束之三：**只挑最值得改的两三处**，而且必须只针对他真正写下的东西。 */
+/**
+ * 行为约束之三：**只挑最值得改的两三处**，而且必须只针对他真正写下的东西。
+ *
+ * ⚠️ 这一条**按草稿分岔**（函数而不是常量，这是本模块唯一的例外，理由见下）：
+ * 教点必须逐字锚在他写过的字上（V1），而"他一个字都还没写"时**无处可锚** ——
+ * 那时逼模型给出 2–3 个教点是**在逼它编**（编出来的 quote 会被 V1 拦下，整份 ① 作废，
+ * 于是"他还没写就点提示"这条路永远走不通）。所以空白草稿要求 `teachPoints: []`。
+ * 非空草稿那条**逐字不变**。
+ *
+ * @param {unknown} draft 他这一版（原样；只有"归一空白后是不是空的"这一个判断）
+ * @returns {string} 提示词里那一段
+ */
+export function readRulePickFew(draft) {
+  const empty = text(draft).replace(/\s+/g, '') === '';
+  return empty
+    ? [
+      'The learner has not written anything yet, so there is nothing to anchor a teach point on.',
+      'Output an EMPTY "teachPoints" array ([]). Do not invent a teach point, and do not quote',
+      'the Chinese text as if it were their English.',
+    ].join('\n')
+    : [
+      'Output 2 or 3 teach points, ordered by how much they would improve this sentence.',
+      'Judge ONLY what the learner actually wrote. Do not teach something the draft never attempts.',
+    ].join('\n');
+}
+
+/** 非空草稿那一档的原文（有测试逐字钉住它，免得"分岔"顺手把旧口径改掉）。 */
 export const READ_RULE_PICK_FEW = [
   'Output 2 or 3 teach points, ordered by how much they would improve this sentence.',
   'Judge ONLY what the learner actually wrote. Do not teach something the draft never attempts.',
@@ -79,6 +105,10 @@ export const READ_RULE_HINT_TIERS = [
   '  step 2 = a stronger hint (a pattern, a first word, a frame with a blank).',
   '  step 3 = the full word or the full sentence they were reaching for.',
   'Step 3 must actually contain the English they need. Steps 1 and 2 must NOT give it away.',
+  'The learner may ask for these BEFORE writing anything (they got stuck at the first word).',
+  'So never anchor a hint on their English when they have written nothing yet:',
+  'anchor it on what they already said in Chinese (and on the material), and aim it at the',
+  'English they are reaching for. A hint for an empty draft is still a hint, not a refusal.',
 ].join('\n');
 
 /**
@@ -93,7 +123,7 @@ export const READ_OUTPUT_SHAPE = [
   '- "canHelp": boolean. When false, "reason" MUST be a short Chinese sentence and the other two fields stay empty.',
   '- "reason": null when "canHelp" is true.',
   '- "hint": the three categories described above; each is {"1":…,"2":…,"3":…}.',
-  '- "teachPoints": 2 or 3 items.',
+  '- "teachPoints": 2 or 3 items — or an EMPTY array when the learner has written nothing yet.',
   '  · "key": a short stable id (tp1, tp2, tp3).',
   '  · "label": a SHORT Chinese phrase naming what to work on (this is what the learner picks from).',
   '  · "quote": copied character-for-character from the learner\'s draft.',
@@ -109,6 +139,9 @@ export const READ_OUTPUT_SHAPE = [
  *   - `material`：可选素材（他贴的一段中文、一段英文、或任何上下文）。为 null 时不上行该行。
  *   - `draft`：他写的那一版（**当前这一版的原文，原样上行**：模型看到的必须是他真正写下的东西，
  *     不做 trim、不做纠错——纠错是 ② 的产物，不是 ① 的输入）。
+ *     **可以是空的**：他从零写、卡在第一个词上就点提示，是很正常的一步（那是本形态最要紧的一格）。
+ *     空白草稿时唯一的分岔是"教点一栏留空"（`readRulePickFew`），提示那一栏照给——
+ *     而且锚在**中文原话/素材**上，不是锚在他的英文上（他还没有英文可锚）。
  * @returns {Array<{role: string, content: string}>} OpenAI 形状的两条消息
  */
 export function buildReadMessages({ chinese, material = null, draft = '' } = {}) {
@@ -128,7 +161,7 @@ export function buildReadMessages({ chinese, material = null, draft = '' } = {})
         '',
         READ_RULE_TRACEABLE,
         '',
-        READ_RULE_PICK_FEW,
+        readRulePickFew(draft),
         '',
         READ_RULE_REFUSE,
         '',

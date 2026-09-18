@@ -5,26 +5,32 @@
 // 也就不可能绕过某一层（例如"绕过校验直接把模型的话贴到屏上"）。
 //
 // ── 门面替界面扛下的四件事 ────────────────────────────────────────────────────
-//   1. **一个回合 ≤2 次调用**：`read`（①）与 `revise`（②）各**恰好一次**。
-//      "求提示 → 提交"这条路上 ① 只发一次（求提示不调用，提交时才是 ①）；
-//      "提交前又改了字"⇒ 作废缓存重发（否则模型读的不是他真正交上来的那一版）。
+//   1. **一个回合 ≤2 次调用**：`read`（①）与 `revise`（②）各**最多一次**，且 ① **总共只发一次**。
+//      "求提示"这条路第一次要给的 2/3 级内容**来自 ①**，所以它当场发一次（并发完就缓存）；
+//      "提交时又改了字"**不重发** ① —— 那是本回合的第二次调用，超预算。
+//      改了字之后怎么办：把缓存那份 `teachPoints` 按 V1 的**逐字可追溯**口径向新草稿过滤
+//      （幸存 ≥1 ⇒ 照旧挑；幸存 0 ⇒ 跳过挑这一步，② 以 `pickedTeachPoint = null` 跑）。
 //   2. **挑教点插在提交与标出之间**：`submit()` 只到"拿到候选"为止；
 //      `pickTeachPoint(key)` 才触发 ②，并把**他挑中的那个教点**作为输入发出去。
 //      于是"挑"不是装饰性的——它真的改变了 ② 看到的东西（旧形态正是死在这里）。
 //   3. **成本账**：`cost()` 的 `calls` 是**程序持有的计数**（引擎里数），不是界面的自觉。
+//      ⚠️ 求提示那一次 ① **真的计费** ⇒ 它必须出现在 `cost().calls` 里（它是本回合两次之一）。
 //   4. **持久化**：每次状态推进后落盘一次，写失败不影响这一回合（代价见 `./store.mjs`）。
 //
 // ── 失败一律**原样上抛**，绝不补内容 ──────────────────────────────────────────
 // `submit()` 在 `canHelp === false` 时返回 `reason: 'cannot_help'`，`detail` 就是模型给的
 // `reason`（原样，不翻译、不润色、不补一个教点）。`pickTeachPoint()` 同理。
+// `askHint()` 的失败**不伪装成"这一类没有更多提示"**：它照样上抛 `{ok:false, reason, detail}`，
+// 因为"模型没答上来"与"模型说了没有"是两件事（前者要重试/看 Key，后者是教学判断）。
 // 界面的责任是把它**显示成"接不住"**，而不是替它编一句——`./flow.mjs` 的
 // `candidates: []` 已经把"没有东西可挑"这件事说清楚了。
 //
 // 纯逻辑模块：零 DOM、零浏览器 API（`callModel` / `storage` / `now` 全是注入点）。
-import { createFlow } from './flow.mjs';
+import { createFlow, HINT_CATEGORIES } from './flow.mjs';
 import { createEngine } from './engine.mjs';
 import { loadState, saveState } from './store.mjs';
 import { callModel as defaultCallModel } from './client.mjs';
+import { quoteIsTraceable } from './validate.mjs';
 
 /** 门面自己的失败档（与引擎/客户端的档**分开**：这三档是"流程层面没到那一步"）。 */
 export const APP_FAIL_REASONS = Object.freeze({
@@ -36,6 +42,15 @@ export const APP_FAIL_REASONS = Object.freeze({
   NO_SUCH_TEACH_POINT: 'no_such_teach_point',
   /** 模型说接不住（`canHelp === false`）——程序**不补内容**，原样透出它的 reason。 */
   CANNOT_HELP: 'cannot_help',
+  /**
+   * **一个候选都没剩下**：他先求了提示（那次 ① 读的是草稿 A），之后又改过（现在交的是草稿 B），
+   * 而缓存里那几个教点的 `quote` **在 B 里一个都逐字找不到**。
+   *
+   * 为什么不是 `cannot_help`：模型**接得住**（`canHelp === true`，提示那一栏照给），
+   * 只是"教点该锚在哪几个字上"这件事随着他改了字而失效了。这两件事在界面上要分开说。
+   * 处置：跳过挑教点这一步（`pickTeachPoint(null)`），② 以 `pickedTeachPoint = null` 跑。
+   */
+  NO_TRACEABLE_TEACH_POINT: 'no_traceable_teach_point',
 });
 
 /** 非空字符串才算"给了"。 */
@@ -130,13 +145,18 @@ export function createWriteApp({ callModel = defaultCallModel, storage = null, n
   }
 
   /**
-   * 保证 ① 已经跑过（跑过就复用缓存）。
-   * **恰好一次**的落点就在这里：缓存命中时不调用模型，只有草稿变了才重发。
+   * 保证 ① 已经跑过。
+   *
+   * **一个回合 ① 总共只发一次**——这是预算纪律的落点，也是本文件最容易写错的一处：
+   *   · 缓存里有东西 ⇒ **直接复用，不再调用**，哪怕他现在手里的草稿已经不是缓存读的那一版；
+   *     草稿变了怎么办由调用方决定（`submit()` 会按可追溯过滤候选，见那里），
+   *     但**绝不能靠再发一次 ① 来解决**（那就是第 3 次调用，超预算）。
+   *   · 缓存是空的 ⇒ 发这一次 ①，把"它读的是哪一版"一起记进缓存。
    */
   async function ensureRead() {
     syncRound();
-    if (cache !== null && cache.draft === flow.state().draft) {
-      return { ok: true, read: cache.read, cached: true };
+    if (cache !== null) {
+      return { ok: true, read: cache.read, cached: true, readDraft: cache.draft };
     }
     const before = snapshot(engine);
     const res = await engine.read({
@@ -150,16 +170,33 @@ export function createWriteApp({ callModel = defaultCallModel, storage = null, n
     if (!res.ok) return { ok: false, reason: res.reason, detail: res.detail };
     recordUsage(res.usage);
     cache = { draft: flow.state().draft, read: res.read };
-    return { ok: true, read: res.read, cached: false };
+    return {
+      ok: true, read: res.read, cached: false, readDraft: cache.draft,
+    };
+  }
+
+  /**
+   * 把一份 ① 的产物向**当前这一版草稿**过滤：只留 `quote` 逐字可追溯的教点。
+   *
+   * 判据直接复用 V1 那一把尺子（`./validate.mjs` 的 `quoteIsTraceable`，归一空白、大小写不敏感）——
+   * 自己再写一份"差不多"的比对就是给同一个问题造第二个出处，两边迟早会漂移。
+   * 编造的 quote（模型自己造的）与"他后来把那段字改掉了"在这里是**同一种**处置：都不留。
+   */
+  function traceableTo(read, draft) {
+    const points = Array.isArray(read?.teachPoints) ? read.teachPoints : [];
+    return { ...read, teachPoints: points.filter((tp) => quoteIsTraceable(tp?.quote, draft)) };
   }
 
   /** ② 的结果缓存：同一份草稿 + 同一个教点只发一次（读结果被重新交进来时不会重复扣钱）。 */
   let reviseCache = null;
 
-  /** 保证 ② 已经跑过（**只在挑完教点之后**才可能跑）。 */
+  /** 保证 ② 已经跑过（**挑教点这一步走过之后**才可能跑）。 */
   async function ensureRevise() {
     const st = flow.state();
-    if (st.pickedKey === null) {
+    // 闸门是 `pickDecided`（这一步走过了），不是 `pickedKey !== null`：
+    // "跳过挑教点"那条路径上 `pickedKey` 本来就是 null，那时 ② 照样要跑
+    // （`pickedTeachPoint: null` ⇒ 它只做"标出最值得改的一处"）。
+    if (st.pickDecided !== true) {
       return { ok: false, reason: APP_FAIL_REASONS.NOT_READY, detail: '还没有挑教点：② 要吃他挑中的那个教点。' };
     }
     if (reviseCache !== null && reviseCache.draft === st.draft && reviseCache.key === st.pickedKey) {
@@ -208,10 +245,37 @@ export function createWriteApp({ callModel = defaultCallModel, storage = null, n
     setDraft(text) {
       return flow.setDraft(text);
     },
-    askHint(category = null) {
-      // **零模型调用**：1 级只是"问一句卡在哪类"，内容全在 ① 的产物里（`./flow.mjs` 的 askHint）。
+    /**
+     * 点「给点提示」。
+     *
+     * ⚠️ **入口先分流，这一条是预算纪律的落点**（订正见报告：任务书第三节①把 1 级写成
+     * "零模型调用"，第三节①又要求 2/3 级当场读一次 ① —— 两者只有在**1 级根本不需要读**
+     * 时才同时成立）：
+     *   · `category === null`（他刚点「给点提示」，界面只问"卡在哪一类？"）⇒ **一次调用都不发**，
+     *     直接把 `./flow.mjs` 的 1 级答案交回去（内容就是那句问话，界面上是那三个类目按钮）。
+     *   · 给了类目 ⇒ 2/3 级的内容来自 ①（"读这一版"），**这时才读**：读的是**他当前这一版草稿**
+     *     （半句也行、一个字都没有也行，`./validate.mjs` 的 `validateRead` 对空白草稿有专门一条）。
+     *     读到了就缓存：**一个回合 ① 只发这一次**，提交时复用，绝不再发第二次（超预算）。
+     *
+     * 失败**不伪装成"没有更多提示"**：读不回来（没 Key / 网络 / 校验不过）时返回
+     * `{ok:false, reason, detail}`，原样透上传给界面——"模型没答上来"与"模型说了没有"
+     * 是两件事，混成一句会让真正的原因看不见。
+     *
+     * @returns {Promise<{ok:true, level:number, category:string|null, text:string|null}
+     *   | {ok:false, reason:string, detail:string}>}
+     */
+    async askHint(category = null) {
+      syncRound();
+      if (!HINT_CATEGORIES.includes(category)) {
+        // 1 级：只问一句"卡在哪一类"，零调用、零 ① 依赖（详见 `./flow.mjs` 的 askHint）。
+        return { ok: true, ...flow.askHint(null) };
+      }
+      const got = await ensureRead();
+      if (!got.ok) return { ok: false, reason: got.reason, detail: got.detail };
+      flow.noteRead(got.read);
+      persist();
       const hint = flow.askHint(category);
-      return Promise.resolve(hint);
+      return { ok: true, ...hint };
     },
     async submit() {
       syncRound();
@@ -222,15 +286,34 @@ export function createWriteApp({ callModel = defaultCallModel, storage = null, n
       const got = await ensureRead();
       if (!got.ok) return { ok: false, reason: got.reason, detail: got.detail };
 
-      flow.noteRead(got.read);
+      // 缓存那份 ① 读的是哪一版？**只有对不上才过滤**——同一版就原样交进去，
+      // 免得把"他自己挑的教点"在一条本该完全无变化的路径上重新算一遍（口径只留一处）。
+      const changed = got.readDraft !== draft;
+      const read = changed ? traceableTo(got.read, draft) : got.read;
+      flow.noteRead(read);
       persist();
       // **接不住就说不接**：程序一个教点都不补，原样透出模型给的 reason。
-      if (got.read.canHelp !== true) {
+      if (read.canHelp !== true) {
         return {
           ok: false,
           candidates: [],
           reason: APP_FAIL_REASONS.CANNOT_HELP,
-          detail: str(got.read.reason) ?? '模型说这一版它接不住，但没给理由。',
+          detail: str(read.reason) ?? '模型说这一版它接不住，但没给理由。',
+        };
+      }
+      // 候选是空的时候**如实报"这一步要跳过"**，不报 ok:true ——
+      // 报成功的话界面会画一张空候选表，而他看到的是"没有东西可挑"却说不出为什么。
+      // （空候选只有两种来源：草稿是空的、或过滤之后一个不剩，两者都不是"接得住"。）
+      if (flow.candidates().length === 0) {
+        return {
+          ok: false,
+          candidates: [],
+          reason: APP_FAIL_REASONS.NO_TRACEABLE_TEACH_POINT,
+          detail: changed
+            ? '系统读的是你先前那一版，那一版里标出的几个教点在你现在这一版里一个都对不上了，'
+              + '所以这一次没有东西可挑——本回合不会再读一遍（读一遍就是多花一次钱），'
+              + '直接标出最值得改的一处。'
+            : '这一次系统没有给出可以挑的教点，直接标出最值得改的一处。',
         };
       }
       return { ok: true, candidates: flow.candidates(), reason: null };

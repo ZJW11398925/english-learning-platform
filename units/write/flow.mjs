@@ -13,14 +13,16 @@
 // 旧形态里"模型决定教什么、怎么教、下一步做什么，程序只负责把文本贴到屏幕上"，
 // 于是它答非所问、且**没有任何一处程序可以负责**。这里每一个状态转移都由本模块说了算。
 //
-// ── 四条**产品纪律**，每条都有断言（不是界面礼貌）──────────────────────────────
+// ── 五条**产品纪律**，每条都有断言（不是界面礼貌）──────────────────────────────
 //   1. **改完才揭开**：`reveal()` 在他没 `reviseDraft` 之前返回 `null`。
 //   2. **只许暴露一处不地道**：`noteIssue` 之后 `state().issue` 里**只有 quote 与 kind**；
 //      系统版/为什么/降难度**一个都不许进 state**（它们只活在闭包里，等 `reveal()`）。
 //   3. **接不住就说不接**：`canHelp===false` 时**什么候选都不给**（`candidates: []`，
 //      `canHelp` 保持 false）；绝不替他编一个教点（编出来的那个"教点"会变成他要挑的东西）。
-//   4. **三级台阶只升不降**：同一次提问里 1→2→3 单调；`category===null` 只到 1 级；
-//      1 级**零模型调用**（它只是"问一句卡在哪类"，内容全在本地）。
+//   4. **三级台阶只升不降**：同一次提问里 1→2→3 单调；`category===null` 只到 1 级。
+//   5. **没有候选时跳过"挑教点"这一步**（`pickTeachPoint(null)`）：`pickedKey` 保持 `null`，
+//      但 `pickDecided` 变 true ⇒ ② 以 `pickedTeachPoint = null` 跑，只做"标出最值得改的一处"。
+//      ⚠️ 跳过**不等于**接不住：`canHelp` 仍是 true，提示那一栏照给（两者混起来界面就没法分开说）。
 //
 // ── `REWRITE_INTERVALS_MS` 的数字是**凭空发明**的（如实登记）────────────────────
 // 共识只写了"自适应"，**没有给数**（`DEC-…db.192` 第四处冻结明确要求"写成单一常量表 +
@@ -126,6 +128,15 @@ export function createFlow({ now = null, engine = null } = {}) {
     readReason: null,
     candidates: [],
     pickedKey: null,
+    /**
+     * 「挑教点这一步**走过了**」——`pickedKey === null` 有两种完全不同的意思，
+     * 必须分开（这是本模块最容易错的一处判定）：
+     *   · `pickDecided === false` ⇒ **还没挑**（② 不该跑，跑了就是拿一个没人提过的教点去改）；
+     *   · `pickDecided === true && pickedKey === null` ⇒ **挑这一步被跳过了**，
+     *     因为按可追溯过滤之后一个候选都没剩下（见 `./index.mjs` 的 `submit()`）。
+     *     这时 ② 以 `pickedTeachPoint = null` 跑：它只做"标出最值得改的一处"。
+     */
+    pickDecided: false,
     issue: null,
     reviseReason: null,
     revisionDueAt: null,
@@ -181,6 +192,7 @@ export function createFlow({ now = null, engine = null } = {}) {
     reviseReason: s.round.reviseReason,
     candidates: s.round.candidates.map((tp) => ({ ...tp })),
     pickedKey: s.round.pickedKey,
+    pickDecided: s.round.pickDecided,
     pickedTeachPoint: s.round.pickedKey === null
       ? null
       : { ...s.round.candidates.find((tp) => tp.key === s.round.pickedKey) },
@@ -299,21 +311,44 @@ export function createFlow({ now = null, engine = null } = {}) {
    *   · 给类目 ⇒ 在这一类自己的台阶上往上走一级（没上过就是 1 级，问过 1 级就是 2 级…）；
    *   · 到 3 级封顶，**不换门再给一次答案**——换个类目重新从 1 级起是允许的（那是另一个角度
    *     的提示，不是同一个答案），但每个类目各只有三级，所以总共能拿到的帮助有上限。
-   * **1 级零模型调用**：它只是"问一句卡在哪一类"，内容取自本地（`./flow.mjs` 不调模型，
-   * 有断言钉住 1 级前后 `callsThisRound` 不变）。
+   *
+   * ⚠️ **台阶的内容来自 ①（"读这一版"）的产物，而 ① 是把草稿交进本模块的人负责发的**
+   * （`./index.mjs` 的 `askHint` 会先 `ensureRead()` 再 `noteRead()`）。所以：
+   *   · 本模块**自己不调模型**（零浏览器 API、零网络，见文件头）；
+   *   · 本模块**也不判"要不要读"**——它只判"读了没有"（`s.round.read === null`）。
+   *     把"要不要花这一次钱"放在流程层会多出一个判据来源，预算就说不清了。
+   *
+   * ⚠️ **1 级（`category === null`）零模型调用，而且不需要 ① 已经发生过**：
+   * 它的全部内容就是"卡在哪一类？"这**一句问话**（界面上那三个类目按钮，`./write.view.mjs`
+   * 的 `paintHintNotes`）——那不需要模型产一个字，所以它**不必**先有一次 ①。
+   * 代价与口径一起写清楚：`askHint(null)` 回的 `text` **就是 `null`**（除问话外没有内容可给），
+   * 界面照样只画那句问话。**2/3 级则必须有 ① 的产物**，而 ① 是把草稿交进本模块的人负责发的
+   * （`./index.mjs` 的 `askHint` 会先 `ensureRead()` 再 `noteRead()`）——所以本模块里
+   * "有类目、但还没读" ⇒ 如实回 `level 0`（那是接线错，不是"这个类目没提示"）。
    *
    * @returns {{level: 0|1|2|3, category: string|null, text: string|null}}
-   *   `level: 0` = 这一步没给任何东西（还没起句 / 还没读 / 该类目到此为止），
+   *   `level: 0` = 这一步没给任何东西（还没起句 / 该类目还没有 ① 的产物 / 该类目到此为止），
    *   `text: null` 且**不是**编出来的内容——界面据此显示"这一类暂时没有更多提示"。
    */
   function askHint(category = null) {
     const cat = HINT_CATEGORIES.includes(category) ? category : null;
-    if (s.step !== 'drafting' || s.round.read === null || s.round.read.canHelp !== true) {
+    if (s.step !== 'drafting') return { level: 0, category: cat, text: null };
+
+    // 1 级：只问一句"卡在哪一类"，**零模型调用、零 ① 依赖**（内容就是那句问话本身）。
+    if (cat === null) {
+      s.hintLevel = 1;
+      s.hintCategory = null;
+      s.hintText = null;
+      if (s.scaffoldLevel < 1) s.scaffoldLevel = 1;
+      return { level: 1, category: null, text: null };
+    }
+
+    if (s.round.read === null || s.round.read.canHelp !== true) {
       return { level: 0, category: cat, text: null };
     }
 
-    const next = cat === null ? 1 : Math.min(levelOf(cat) + 1, 3);
-    if (cat !== null && next <= levelOf(cat)) {
+    const next = Math.min(levelOf(cat) + 1, 3);
+    if (next <= levelOf(cat)) {
       // 这一类已经到顶：如实回它现在在哪一级，**不再给新东西**（也不换门偷偷给）。
       return { level: levelOf(cat), category: cat, text: hintAt(levelOf(cat), cat) };
     }
@@ -324,10 +359,8 @@ export function createFlow({ now = null, engine = null } = {}) {
     s.hintLevel = next;
     s.hintCategory = cat;
     s.hintText = text;
-    if (cat !== null) {
-      s.categoryLevels[cat] = next;
-      if (!s.categoriesUsed.includes(cat)) s.categoriesUsed.push(cat);
-    }
+    s.categoryLevels[cat] = next;
+    if (!s.categoriesUsed.includes(cat)) s.categoriesUsed.push(cat);
     // 脚手架深度 = 他得到过的**最高**一级（0..3）。它决定延迟重写走哪一档（REWRITE_INTERVALS_MS）。
     if (next > s.scaffoldLevel) s.scaffoldLevel = next;
     return { level: next, category: cat, text };
@@ -342,6 +375,11 @@ export function createFlow({ now = null, engine = null } = {}) {
    * `canHelp` 保持 false、`readReason` 原样留着。程序**绝不补一个教点**给他挑——
    * 那正是旧形态"做了假选择"的翻版：他以为自己在挑，其实挑的是程序编的。
    *
+   * ⚠️ **`teachPoints: []` 与"接不住"是两件事**（本模块按 `canHelp` 分流，不看候选数）：
+   * 草稿还是空的、或者按可追溯过滤之后一个都没剩下时，`canHelp` 仍然是 `true`
+   * （提示那一栏照给），只是**没有可挑的教点** ⇒ `pickTeachPoint(null)` 跳过挑这一步。
+   * 把这两种情况混成一种，界面就没法把"它接不住"与"这一步跳过了"分开说。
+   *
    * 同一份结果重复交进来是**幂等**的（缓存复用路径会这么走），但已经挑过教点之后
    * 再换一份读结果是拒绝的（那会让"他挑中的那个"指向不存在的候选）。
    *
@@ -350,7 +388,7 @@ export function createFlow({ now = null, engine = null } = {}) {
   function noteRead(read) {
     if (!usableRead(read)) return false;
     if (s.step !== 'drafting') return false;
-    if (s.round.pickedKey !== null) return false;
+    if (s.round.pickDecided) return false;
 
     const canHelp = read.canHelp === true;
     const teachPoints = canHelp ? arr(read.teachPoints) : [];
@@ -371,12 +409,26 @@ export function createFlow({ now = null, engine = null } = {}) {
   /**
    * 挑一个教点。挑中的 `key` **必须真的在候选里**——不在就拒绝（返回 `false`），
    * 不把界面传来的任意字符串当成一个教点（那样 ② 会拿一个没人提过的教点去改）。
+   *
+   * **`key === null` 是"跳过挑这一步"，不是"挑了空的"**：它只在**候选本来就空**时合法
+   * （按可追溯过滤之后一个不剩，见 `./index.mjs` 的 `submit()`）。这时 `pickedKey` 保持
+   * `null`，但 `pickDecided` 变成 `true` ⇒ ② 可以以 `pickedTeachPoint = null` 跑。
+   * 候选非空时传 `null` 一律拒绝：那等于"没挑就开跑"，而他明明有东西可挑。
+   *
+   * @returns {boolean} 这一步走过了吗
    */
   function pickTeachPoint(key) {
     if (s.step !== 'drafting' || s.round.read === null) return false;
-    if (s.round.pickedKey !== null) return false; // 这一版只挑一次
+    if (s.round.pickDecided) return false; // 这一版只挑一次
+    if (key === null) {
+      if (s.round.candidates.length > 0) return false;
+      s.round.pickDecided = true;
+      s.step = 'choosing';
+      return true;
+    }
     if (typeof key !== 'string' || !s.round.candidates.some((tp) => tp.key === key)) return false;
     s.round.pickedKey = key;
+    s.round.pickDecided = true;
     s.step = 'choosing';
     return true;
   }
@@ -400,7 +452,10 @@ export function createFlow({ now = null, engine = null } = {}) {
     // 若先判 `step !== 'choosing'`，同一份结果再交一次会被当成"阶段不对"而返回 null——
     // 那会让 `./index.mjs` 的缓存复用路径（同一份 ② 结果交两次）拿不到那一处标记。
     if (s.round.issue !== null) return { ...s.round.issue };
-    if (s.step !== 'choosing' || s.round.pickedKey === null) return null;
+    // 闸门判的是 **`pickDecided`**（挑这一步走过了），不是 `pickedKey !== null`：
+    // 挑教点被跳过的路径上 `pickedKey` 本来就是 null（没有候选可挑），
+    // 若拿它当闸门，那条路径上的 ② 结果会被静默丢掉——界面上就是"标不出来"。
+    if (s.step !== 'choosing' || !s.round.pickDecided) return null;
 
     if (revise.canTeach !== true) {
       sealed = null;

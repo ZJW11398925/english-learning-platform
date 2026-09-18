@@ -8,7 +8,10 @@
 // ── 五条判据（前三条判 ①「读这一版」，后两条判 ②「改这一版」）──────────────────
 //   V1 每条教点的 `quote` **逐字可追溯**到他写的那一版（归一空白后是它的子串）
 //   V2 输出里不得出现原句没有的**大写词/数字**（句外的人事词）
-//   V3 `canHelp` / `canTeach === false` 时**原样透出 reason、程序绝不补内容**
+//   V3 `canHelp` / `canTeach === false` 时**原样透出 reason、程序绝不补内容**；
+//      反过来 `canHelp === true` 时必须**真的给出东西**（提示那一栏非空）——
+//      ⚠️ 唯一的例外：**草稿归一空白时允许 `teachPoints` 为空**（一个字都没写 ⇒ 无处可锚，
+//      见 `validateRead` 里那条）。"他还没写"不是"接不住"，也不是"模型可以编一个教点"。
 //   V4 `issue` **恰好一处**
 //   V5 `glosses` 的 `word` 必须**逐字出现在 `system` 里**
 //
@@ -170,7 +173,14 @@ export function validateRead(read, source) {
   if (tiers.length === 0) {
     violations.push('V3: canHelp===true 却一个类目的提示都没有（"接得住"必须体现在内容上）');
   }
-  if (read.teachPoints.length === 0) {
+  // ⚠️ **教点这一条对"一个字都没写"的草稿要放宽**（这是 ① 可以被"求提示"提前调用的前提）：
+  // 教点必须锚在他写过的字上（V1）——草稿归一空白时**无处可锚**，逼模型给出教点只会得到
+  // 编造的 quote（然后被 V1 拦下），于是"他还没写就点提示"这条路永远走不通。
+  // 空白草稿的 `hint` 锚在**他的中文原话/素材**上（提示词里写死了，见 `./prompt.mjs`），
+  // 那一栏仍然必须非空（上面那条管着）。草稿非空时**旧规则一字不变**：给了 canHelp:true
+  // 就必须给出教点。
+  const draftEmpty = collapseWhitespace(source) === '';
+  if (read.teachPoints.length === 0 && !draftEmpty) {
     violations.push('V3: canHelp===true 却一个教点都没有（他无从挑起）');
   }
 

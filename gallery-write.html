@@ -23,8 +23,11 @@
       · 「我的句子」的英文在 **`draft`** 字段里（不是 `en`）；`zh` 是他说的中文；
       · 「我的词」是对象 `{word, zh, pos}`（不是字符串）；
       · 队列项**没有正文**（要按 `sessionId` 回 `sentences` 里取），`dueAt` 是毫秒时间戳；
-      · **`askHint` 在"读这一版"发生之前只能回 `{level:0, text:null}`**（引擎的 `askHint`
-        要求 `round.read !== null`，而那次读**只在 `submit()` 里发生**）；
+      · **`askHint(null)`（1 级：只问一句"卡在哪一类"）零调用**，回 `{level:1, text:null}`；
+        `askHint(category)`（2/3 级）**当场发一次 ①**（本假门面把这次"读"记进 `cost`），
+        内容来自那一次的产物；一个回合里 ① 只发一次；
+      · 提交时若草稿与 ① 读的那一版不同 ⇒ **不重读**，把教点按可追溯向新草稿过滤；
+        一个不剩时 `submit()` 回 `{ok:false, reason:'no_traceable_teach_point'}`（跳过挑教点这一步）；
       · `reveal()` 在**没真改过一版**之前返回 `null`；
       · `setDraft` / `reviseDraft` 在阶段不对时返回 `false`；`addWord` 回 `{added}`。
     自洽性（任务书第六节）：教点的 `quote` 与 `issue.quote` **都是 v1 的子串**；
@@ -146,8 +149,11 @@
 
       const cost = { calls: 0, promptTokens: 0, completionTokens: 0, latencyMsTotal: 0 };
       let draft = '';
-      let readDone = false;    // ← 「读这一版」发生过没有（提示与挑教点的闸门）
+      let draftAtRead = null;  // ← ① 读的是哪一版（与真引擎的 cache.draft 同一个东西）
+      let readDone = false;    // ← 「读这一版」发生过没有（2/3 级台阶与挑教点的闸门）
+      let kept = null;         // ← 提交那一刻过滤之后**真的可挑**的候选（引擎同款口径）
       let pickedKey = null;
+      let pickDecided = false; // ← 挑教点这一步**走过了**没有（跳过的路径上 `pickedKey` 是 null）
       let revised = false;     // ← 「他真改过一版」发生过没有（揭开的闸门）
       let finalized = false;
       let sid = st.sentences.length;
@@ -169,11 +175,14 @@
         }),
         startSentence({ chinese }) {
           // ⚠️ **零模型调用**：起一句只是记下他说的中文（引擎的模型调用只发生在
-          // `submit()`（读这一版）与 `pickTeachPoint()`（改这一版）两处）。
+          // "求 2/3 级提示"、"提交"、"挑教点"三处）。
           sid += 1;
           draft = '';
+          draftAtRead = null;
           readDone = false;
+          kept = null;
           pickedKey = null;
+          pickDecided = false;
           revised = false;
           finalized = false;
           for (const k of Object.keys(asked)) delete asked[k];
@@ -182,21 +191,25 @@
         },
         setDraft(text) { draft = String(text ?? ''); return true; },
         askHint(category) {
-          // ⚠️ 读之前**只能**回空——与引擎同一条闸门（`round.read === null` ⇒ level 0 / text null）
-          if (!readDone) return { level: 0, category, text: null };
+          // 1 级（`category === null`）：只问一句"卡在哪一类" —— **零调用、零 ① 依赖**
+          // （内容就是那句问话，界面上是那三个类目按钮）。与真引擎逐条对齐。
+          if (!['word', 'structure', 'content'].includes(category)) {
+            return { ok: true, level: 1, category: null, text: null };
+          }
+          // 2/3 级：内容来自「读这一版」那一次的产物 ⇒ **没读过就当场读一次**，
+          // 读的是**他当前这一版草稿**（半句也行、一个字都没有也行）。
+          if (!readDone) { charge(240, 90, 1400); readDone = true; draftAtRead = draft; }
           const tiers = HINTS[category];
-          if (tiers === undefined) return { level: 0, category: null, text: null };
           const next = Math.min(3, (asked[category] ?? 0) + 1);
           asked[category] = next;
-          // 台阶的内容来自「读这一版」那一次的产物 ⇒ **不再花一次调用**（引擎有断言钉住这条）
-          return { level: next, category, text: tiers[next] };
+          return { ok: true, level: next, category, text: tiers[next] };
         },
         submit() {
           if (draft.trim() === '') {
             return { ok: false, reason: 'empty_draft', detail: '这一版还是空的：先写出你想说的那句话，再来提交。' };
           }
-          charge(240, 90, 1400);
-          readDone = true;
+          // ① 已经发过（他求过提示）⇒ **不重发**：把缓存那份候选按可追溯向当前草稿过滤。
+          if (!readDone) { charge(240, 90, 1400); readDone = true; draftAtRead = draft; }
           if (opts.refuseSubmit === true) {
             return {
               ok: false,
@@ -205,26 +218,53 @@
               detail: '这一版我读不出可以教的地方——它太短了，再写具体一点试试。',
             };
           }
-          return { ok: true, candidates: CANDIDATES.map((c) => ({ ...c })), reason: null };
+          // V1 那把尺子（归一空白、大小写不敏感）——与 `web/units/write/validate.mjs` 同一口径。
+          const traceable = (quote, source) => {
+            const q = String(quote ?? '').replace(/\s+/g, ' ').trim();
+            const s = String(source ?? '').replace(/\s+/g, ' ').trim();
+            return q !== '' && s !== '' && s.includes(q);
+          };
+          const changed = draftAtRead !== draft;
+          kept = changed ? CANDIDATES.filter((c) => traceable(c.quote, draft)) : CANDIDATES;
+          if (kept.length === 0) {
+            return {
+              ok: false,
+              candidates: [],
+              reason: 'no_traceable_teach_point',
+              detail: '系统读的是你先前那一版，那一版里标出的几个教点在你现在这一版里一个都对不上了，'
+                + '所以这一次没有东西可挑——本回合不会再读一遍（读一遍就是多花一次钱），直接标出最值得改的一处。',
+            };
+          }
+          return { ok: true, candidates: kept.map((c) => ({ ...c })), reason: null };
         },
         pickTeachPoint(key) {
-          if (!readDone) {
-            return { ok: false, reason: 'not_ready', detail: '还没有挑教点：得先交一次，让他读你这一版。' };
+          // 候选非空时不许传 null（引擎同款：那等于"没挑就开跑"）。
+          if (key === null && kept !== null && kept.length > 0) {
+            return { ok: false, reason: 'no_such_teach_point', detail: '候选里没有这个教点。' };
           }
           charge(260, 120, 1600);
           if (opts.refusePick === true) {
             return { ok: false, issue: null, reason: 'cannot_help', detail: '这一处我没把握，换一个教点试试。' };
           }
+          // **跳过挑教点**：没有候选可挑时 ② 以 `pickedTeachPoint = null` 跑（只标出最值得改的一处）。
+          // ⚠️ 这一处必须是他**现在这一版**里逐字有的（V4/V1 的口径：标出来的那一处锚在他写过的字上）——
+          // 拿旧候选的 quote（`as usually`）顶上去会画出**现实中不可能出现的状态**（走查台失真）。
+          if (key === null) {
+            pickDecided = true;
+            pickedKey = null;
+            return { ok: true, issue: { quote: 'by bus', kind: '搭配' } };
+          }
           const c = CANDIDATES.find((x) => x.key === key);
           if (c === undefined) {
             return { ok: false, reason: 'no_such_teach_point', detail: '候选里没有这个教点。' };
           }
+          pickDecided = true;
           pickedKey = key;
           // `issue.quote` **是 V1 的子串**（现实中它本来就该是从他那一版里挑出来的）
           return { ok: true, issue: { quote: c.quote, kind: c.kind } };
         },
         reviseDraft(text) {
-          if (pickedKey === null) return false;   // 阶段不对 ⇒ false（引擎同款）
+          if (!pickDecided) return false;   // 阶段不对 ⇒ false（引擎同款）
           charge(320, 150, 2100);
           revised = true;
           draft = String(text ?? '');
@@ -358,11 +398,17 @@
       await click('再加一段');
       await fill('draft-1', 'I had class as usually for half a day.');
 
-      // ⚠️ 提示的三级台阶**在提交之前拿不到内容**（引擎的 read 只在 submit 里发生）。
-      // 这一档专门演"提交前求提示"会发生什么 —— 屏上必须是一句如实的话，不是假提示。
-      if (name === 'draft-hint-noread') {
+      // ⚠️ **写草稿这一屏才是"卡住了点提示"真正该管用的时候**（D1 修完之后）：
+      // 1 级只问"卡在哪一类"（零调用），点了类目 ⇒ 引擎当场读一次 ① ⇒ 屏上是**真的提示内容**。
+      if (name === 'draft-hint' || name === 'draft-hint-change') {
         await click('给点提示');
         await click('词');
+        if (name === 'draft-hint-change') {
+          // 拿到提示之后他改了字（把 `for half a day` 与 `as usually` 都改掉了）**再提交**：
+          // 一个候选都不剩 ⇒ 跳过挑教点这一步（**不是**"接不住"）。
+          await fill('draft-1', 'I went to school by bus this morning.');
+          await click('写好了');
+        }
         return;
       }
 
@@ -406,7 +452,8 @@
       nokey: 'platform.deepseek.com',
       enginemissing: '引擎还没接上',
       draft: '一段一段写',
-      'draft-hint-noread': '提示要等系统读过你这一版才有',
+      'draft-hint': HINTS.word[1],
+      'draft-hint-change': '一个都对不上了',
       hint1: HINTS.word[1],
       hint3: HINTS.word[3],
       choose: '挑一个你最想弄明白的',
