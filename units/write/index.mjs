@@ -10,6 +10,8 @@
 //      "提交时又改了字"**不重发** ① —— 那是本回合的第二次调用，超预算。
 //      改了字之后怎么办：把缓存那份 `teachPoints` 按 V1 的**逐字可追溯**口径向新草稿过滤
 //      （幸存 ≥1 ⇒ 照旧挑；幸存 0 ⇒ 跳过挑这一步，② 以 `pickedTeachPoint = null` 跑）。
+//      ⚠️ **失败也占这一次的预算**（D2：实弹里 topic-1 因此被发了 3 次）——"尝试过"与
+//      "成功过"分开记（`readAttempt` / `cache`），失败之后要再读只能由**他主动点一下**。
 //   2. **挑教点插在提交与标出之间**：`submit()` 只到"拿到候选"为止；
 //      `pickTeachPoint(key)` 才触发 ②，并把**他挑中的那个教点**作为输入发出去。
 //      于是"挑"不是装饰性的——它真的改变了 ② 看到的东西（旧形态正是死在这里）。
@@ -123,7 +125,18 @@ export function createWriteApp({ callModel = defaultCallModel, storage = null, n
   /** 本回合 ① 的结果缓存。`draftAtRead` 是"这份结果读的是哪一版"——对不上就作废重发。 */
   let cache = null;
 
-  const clearCache = () => { cache = null; };
+  /**
+   * 本回合 ① 的**失败**记录：`{draft, reason, detail}`。
+   *
+   * ⚠️ **它与 `cache` 是两件事，必须分开记**（D2 修的那一格）：
+   *   · `cache !== null`    ⇒ ① **成功过**，这一份读结果可以复用；
+   *   · `readAttempt !== null` ⇒ ① **尝试过**（可能失败）。失败也算花过钱，
+   *     所以它一样占掉本回合的"读"预算——不许因为"没缓存"就再发一次。
+   * 判据：`ensureRead()` 只在**本回合没读过这一版**时才真的发请求。
+   */
+  let readAttempt = null;
+
+  const clearCache = () => { cache = null; readAttempt = null; };
 
   /**
    * 回合边界：新句子（`sessionId` 变了）或揭开之后（`done`）⇒ 账与缓存都从头。
@@ -151,25 +164,55 @@ export function createWriteApp({ callModel = defaultCallModel, storage = null, n
    *   · 缓存里有东西 ⇒ **直接复用，不再调用**，哪怕他现在手里的草稿已经不是缓存读的那一版；
    *     草稿变了怎么办由调用方决定（`submit()` 会按可追溯过滤候选，见那里），
    *     但**绝不能靠再发一次 ① 来解决**（那就是第 3 次调用，超预算）。
-   *   · 缓存是空的 ⇒ 发这一次 ①，把"它读的是哪一版"一起记进缓存。
+   *   · 本回合**试过但失败** ⇒ **如实回同一条失败，不再发第二次**（D2）。
+   *     旧写法在这里漏了一格：失败不写缓存 ⇒ 下一次 `ensureRead()` 看见 `cache === null`
+   *     就当成"还没读过"再发一次——于是"求提示失败 + 提交"这条路上一个回合发了 3 次
+   *     （实弹 topic-1 实测），而学习者什么都没拿到。**失败也是花过钱的一次**，
+   *     所以"尝试过"必须和"成功过"一样占预算。
+   *   · 其余情况（本回合还没读过这一版）⇒ 发这一次 ①，把"它读的是哪一版"记下来。
+   *
+   * @param {object} [options]
+   *   - `retryFailed`：**他主动点了一下**（界面上的「给点提示」）⇒ 允许把本回合那条失败作废、
+   *     真的再读一次。**只有显式动作能重读**——`submit()` / `pickTeachPoint()` 一律不带它，
+   *     所以那条路上永远不会出现静默的第 3 次调用。重读的代价（一次计费调用）在屏上看得见：
+   *     界面把它表现为他点的那颗按钮。
+   * @returns {Promise<{ok:true, read:object, cached:boolean, readDraft:string}
+   *   | {ok:false, reason:string, detail:string, alreadyFailed?:boolean}>}
    */
-  async function ensureRead() {
+  async function ensureRead({ retryFailed = false } = {}) {
     syncRound();
+    const draft = flow.state().draft;
     if (cache !== null) {
       return { ok: true, read: cache.read, cached: true, readDraft: cache.draft };
+    }
+    if (readAttempt !== null && readAttempt.draft === draft) {
+      if (retryFailed !== true) {
+        // 本回合这一版已经读过一次、且没成功。原样把那次失败交回去（**不再发请求**）。
+        return {
+          ok: false,
+          reason: readAttempt.reason,
+          detail: readAttempt.detail,
+          alreadyFailed: true,
+        };
+      }
+      readAttempt = null; // 他主动点了：这次才允许真的重读
     }
     const before = snapshot(engine);
     const res = await engine.read({
       chinese: flow.state().chinese,
       material: flow.state().material,
-      draft: flow.state().draft,
+      draft,
       apiKey: apiKeyOf(),
     });
     cost.calls += Math.max(0, snapshot(engine).calls - before.calls);
     last = snapshot(engine);
-    if (!res.ok) return { ok: false, reason: res.reason, detail: res.detail };
+    if (!res.ok) {
+      // **失败也记账**：他这一回合的"读"预算已经用掉了（见 `readAttempt` 的说明）。
+      readAttempt = { draft, reason: res.reason, detail: res.detail };
+      return { ok: false, reason: res.reason, detail: res.detail };
+    }
     recordUsage(res.usage);
-    cache = { draft: flow.state().draft, read: res.read };
+    cache = { draft, read: res.read };
     return {
       ok: true, read: res.read, cached: false, readDraft: cache.draft,
     };
@@ -270,13 +313,23 @@ export function createWriteApp({ callModel = defaultCallModel, storage = null, n
         // 1 级：只问一句"卡在哪一类"，零调用、零 ① 依赖（详见 `./flow.mjs` 的 askHint）。
         return { ok: true, ...flow.askHint(null) };
       }
-      const got = await ensureRead();
+      // ⚠️ `retryFailed: true` = **他主动点了这一下**。这是本回合唯一允许"把上一条 ① 失败
+      // 作废、真的再读一次"的入口（D2）：`submit()` / `pickTeachPoint()` 都走缺省（不许重读），
+      // 所以在那些路上**永远不会**出现静默的第 3 次调用。代价（一次计费调用）就在他点的这一下上。
+      const got = await ensureRead({ retryFailed: true });
       if (!got.ok) return { ok: false, reason: got.reason, detail: got.detail };
       flow.noteRead(got.read);
       persist();
       const hint = flow.askHint(category);
       return { ok: true, ...hint };
     },
+    /**
+     * 交这一版。
+     *
+     * ⚠️ **本回合 ① 已经失败过一次时，这里不再自动重读**（D2）：`ensureRead()` 会原样把
+     * 那次失败交回来（`reason` 不变），于是"求提示失败 + 提交"这条路上**不会有静默的第 3 次调用**。
+     * 要再读只有一个入口——**他主动点「给点提示」**（`askHint`，见那里的 `retryFailed`）。
+     */
     async submit() {
       syncRound();
       const draft = flow.state().draft;
@@ -284,7 +337,15 @@ export function createWriteApp({ callModel = defaultCallModel, storage = null, n
         return { ok: false, reason: APP_FAIL_REASONS.EMPTY_DRAFT, detail: '这一版还是空的：先写出你想说的那句话，再来提交。' };
       }
       const got = await ensureRead();
-      if (!got.ok) return { ok: false, reason: got.reason, detail: got.detail };
+      if (!got.ok) {
+        return {
+          ok: false,
+          reason: got.reason,
+          detail: got.detail,
+          // 如实标出"这是本回合早先那次读的失败、没有重发请求"——界面据此说清"再试一次要你自己点"。
+          readFailedEarlier: got.alreadyFailed === true,
+        };
+      }
 
       // 缓存那份 ① 读的是哪一版？**只有对不上才过滤**——同一版就原样交进去，
       // 免得把"他自己挑的教点"在一条本该完全无变化的路径上重新算一遍（口径只留一处）。

@@ -231,6 +231,12 @@ export async function mountWrite(root, deps = {}) {
     hintCategory: null,
     /** 「这次接不住」的话（下一次成功的调用会清掉它）。 */
     failReason: null,
+    /**
+     * 失败底下那句"下一步怎么办"。
+     * ⚠️ **只在门面明说"这是本回合早先那次读的失败、没有重发请求"（`readFailedEarlier`）时才有值**——
+     * 那是 D2 的成本不变式在屏上的落点：钱不会再自己花一次，**要再读得他点一下**。
+     */
+    failHint: null,
     /** 一句短暂的回执（「加进我的词了」之类）。 */
     notice: null,
     /** 本机存储写不进去时的如实提示。 */
@@ -242,6 +248,7 @@ export async function mountWrite(root, deps = {}) {
       ...snap,
       busy: ui.busy,
       fail: ui.failReason === null ? null : { reason: ui.failReason },
+      failHint: ui.failReason === null ? null : ui.failHint,
       notice: ui.storageWarn ?? ui.notice,
     }, { doc, on: handle });
     snap.anim = false;   // 动效类只在那一次重画里存在
@@ -414,6 +421,7 @@ export async function mountWrite(root, deps = {}) {
    */
   function refuse(err) {
     ui.failReason = String(err?.message ?? err ?? '它没给理由');
+    ui.failHint = null;
     ui.notice = null;
   }
 
@@ -518,6 +526,11 @@ export async function mountWrite(root, deps = {}) {
             snap.hintOpen = false;
             ui.hintCategory = null;
             refuse(new Error(whyOf(r, '提示没拿到')));
+            // D2：**他刚点的这一下就是重试动作**（门面 `askHint` 带 `retryFailed`）。
+            // 它要是又失败了，就必须说清"这次真的又发了一次、钱又花了一次"——
+            // 否则他会以为"点了没反应"，然后一直点。
+            ui.failHint = '刚才这一下已经重新读了一次，还是没读到。'
+              + '再点一次「给点提示」就是再花一次钱，先看看 Key 或网络。';
             return;
           }
           // ⚠️ 引擎**明确会**回 `{level: 0, category, text: null}` —— 它的注释写着
@@ -568,6 +581,13 @@ export async function mountWrite(root, deps = {}) {
               return;
             }
             refuse(whyOf(r, '它没给理由'));
+            // D2：门面说"这是本回合早先那次读的失败、**没有重发请求**"时，把"下一步"也说清。
+            // 不说这句，学习者看到的就是"没反应"（实弹里正是如此：点提示什么也没有，
+            // 而这一回合其实已经花掉两次钱）。成本不变式必须在屏上看得见。
+            if (r.readFailedEarlier === true) {
+              ui.failHint = '这一回合不会再自动重读一遍（再读一次就多花一次钱）。'
+                + '想再试一次，点「给点提示」——那一下会重新读一次。';
+            }
             return;
           }
           const cands = Array.isArray(r.candidates) ? r.candidates : [];

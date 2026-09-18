@@ -26,8 +26,8 @@
 // 纯逻辑模块：零 import、零浏览器 API、零副作用——可在 Node 中直接测。
 // `/v1/chat/completions` 的请求头、超时、失败分档都在 `./client.mjs`，本模块**不碰网络**。
 
-/** 提示词版本号（`w1`）。改提示词就改它——成本账与效果账都要能区分"哪一代提示词"。 */
-export const PROMPT_VERSION = 'w1';
+/** 提示词版本号（`w1` → `w2`：D4 收紧 1 级提示；改提示词就改它，成本账与效果账要能区分"哪一代提示词"）。 */
+export const PROMPT_VERSION = 'w2';
 
 // ─────────────────────────── ① 「读这一版」───────────────────────────
 
@@ -105,6 +105,14 @@ export const READ_RULE_HINT_TIERS = [
   '  step 2 = a stronger hint (a pattern, a first word, a frame with a blank).',
   '  step 3 = the full word or the full sentence they were reaching for.',
   'Step 3 must actually contain the English they need. Steps 1 and 2 must NOT give it away.',
+  // ⚠️ D4（实弹 1/5 命中）：上面那句 "must NOT give it away" 还不够硬——模型试过
+  // 「…英文你想用哪个动词？**它和 surprise 是一家**」，而 3 级给的正是 `surprise`。
+  // 所以这里把"最小"写成**可机械检查**的样子（判据在 `./validate.mjs` 的 `hintAnswerLeak`）：
+  'A step-1 hint MUST NOT contain any English word that also appears in the step-3 answer.',
+  'In step 1 ask a QUESTION or point at the direction. Never name the word, never give its',
+  'first letters, never say what it rhymes with or what family it belongs to ("it is related to',
+  'X", "it starts like Y"). Naming the target, or pointing at the word they should have used,',
+  'is the step-3 answer — it is not a nudge.',
   'The learner may ask for these BEFORE writing anything (they got stuck at the first word).',
   'So never anchor a hint on their English when they have written nothing yet:',
   'anchor it on what they already said in Chinese (and on the material), and aim it at the',

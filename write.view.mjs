@@ -56,6 +56,8 @@
 //   due          [{en,when}]
 //   cost         {calls,promptTokens,completionTokens,latencyMsTotal}
 //   fail         null|{reason}
+//   failHint     null|string  失败底下那句**"下一步怎么办"**（D2：本回合不再自动重读 ⇒
+//                            要再读只能他主动点「给点提示」。这一句就是那个动作的可见化）
 //   notice       null|string
 //   busy         boolean
 //   fold         null|'s'|'w'|'due'
@@ -167,6 +169,7 @@ export function emptySnapshot(over = {}) {
     due: [],
     cost: { calls: 0, promptTokens: 0, completionTokens: 0, latencyMsTotal: 0 },
     fail: null,
+    failHint: null,
     notice: null,
     busy: false,
     fold: null,
@@ -760,6 +763,14 @@ function foldsSeg(doc, snapshot, handlers) {
     note.setAttribute('data-layer', 'fail');
     note.textContent = `这次接不住：${String(snapshot.fail.reason ?? '它没给理由')}`;
     sec.append(note);
+    // 「下一步怎么办」——**只在门面明说"这是本回合早先那次读的失败、没有重发请求"时才画**。
+    // 它把 D2 那条成本不变式变成屏上看得见的东西：钱不会再自己花一次，要再读**得他点一下**。
+    if (typeof snapshot.failHint === 'string' && snapshot.failHint !== '') {
+      const how = el(doc, 'p', 'note note-fail-hint');
+      how.setAttribute('data-layer', 'fail-hint');
+      how.textContent = snapshot.failHint;
+      sec.append(how);
+    }
   }
   if (typeof snapshot.notice === 'string' && snapshot.notice !== '') {
     const note = el(doc, 'p', 'note note-hint');
