@@ -1,0 +1,1482 @@
+/* ══════════════════════════════════════════════════════════════════════════════
+   style.css — 视觉打样：同一屏 · 同一份内容 · 四种**版式结构**
+
+   A「手稿」    单栏窄列 · 零容器 · 留白 + 极细规则线 · 段落末尾文字按钮
+   B「工作台」  上下两区 · 编号 + 等宽标签 · 常驻底部工具区 · 成组按钮
+   C「对照」    恒定的上下两块 · 细轴 + 居中胶囊 · 下面那块从空到有地生长
+   D「暖笔记本」一张浮在暖台面上的圆角纸 · Apple 字阶 · 分段控件 + 右对齐胶囊
+
+   ── 这份样式单要治的六条病（上一版实测）────────────────────────────────────
+   ① 没有字阶：17 个字号（0.62 → 1.5rem，含 0.02rem 级微差）、2 个字重
+      ⇒ 现在全站只有 **5 档字号**、**4 档字重**，且**组件规则里不许写裸字号**
+        （只许 `var(--t-*)`）。
+   ② 容器套容器：面板里再套浅灰卡
+      ⇒ 现在**全站零 box-shadow、零圆角卡片**；A 一版连一层容器都没有，
+        D 是「一层台面 + 一张纸」，纸里面不再套第二个内容容器。
+   ③ 零动效（transition 1 次 / @keyframes 0 / animation 0）
+      ⇒ 现在 **transition 0 条**，`@keyframes` 恰好 3 条，**全部属于「改写」这一处**。
+   ④ 三件套重复（小标题 + 说明 + 内容）
+      ⇒ 四版的信息层级各不相同（见每一版段首的注释），不是同一套换皮。
+   ⑤ 无特色（拆掉文字看不出是什么产品）
+      ⇒ 四样特色四版都有：改写过程本身 / 英文当主角 / 铅笔边注 / 品牌标记。
+   ⑥ 颜色没令牌化（713 行里 32 处裸十六进制）
+      ⇒ 色值**全部**收在令牌区，组件规则里零色值字面量。
+
+   ── 令牌区与组件区的分界（可机检）──────────────────────────────────────────
+   标记行以下**不许出现任何色值字面量**（`#hex` / `rgb(` / `hsl(`）。
+   探针 `tmp/probes/proto-style-browser-check.mjs` 按这个标记切开文件逐半扫描。
+   ══════════════════════════════════════════════════════════════════════════════ */
+
+/* ─────────────────────────────────────────────────────────────────────────────
+   1. 令牌
+   ───────────────────────────────────────────────────────────────────────────── */
+:root {
+  /* 字阶：全站只有 5 档，相邻跨度 1.18 / 1.23 / 1.375 / 1.45 —— 没有微差档。
+     上一版是 17 档（含 0.02rem 级的差别），那等于没有字阶。
+     D 要的 Apple 五档（LargeTitle / Title3 / Body / Footnote / Caption）就映射在这
+     五档上，一一对应，不额外造档：Caption 11 / Footnote 13 / Body 16 / Title3 22 /
+     LargeTitle 32。 */
+  --t-1: 0.6875rem; /* 11px */
+  --t-2: 0.8125rem; /* 13px */
+  --t-3: 1rem;      /* 16px */
+  --t-4: 1.375rem;  /* 22px */
+  --t-5: 2rem;      /* 32px */
+
+  /* 字重：全站 4 档（A/B/C 用 400/500/700，D 按 Apple 只用 400/600/700）*/
+  --w-n: 400;
+  --w-m: 500;
+  --w-s: 600;
+  --w-b: 700;
+
+  /* 圆角：**全站只有 3 档**（12 / 20 / 999），其余一律 0。
+     D 的三档需求就是这三档；B 的按钮从 2px 收到 0 —— 2px 是「第 4 种圆角」，
+     留着它这套体系就不止 3 档，而它在屏上看起来与直角无异。 */
+  --r-1: 12px;
+  --r-2: 20px;
+  --r-3: 999px;
+
+  /* 行高 */
+  --lh-tight: 1.2;
+  --lh-body: 1.55;
+  --lh-loose: 1.42; /* A 的英文：行高松 */
+
+  /* 间距 */
+  --s-1: 4px;
+  --s-2: 8px;
+  --s-3: 12px;
+  --s-4: 20px;
+  --s-5: 32px;
+  --s-6: 52px;
+
+  /* 字体栈：只用系统字体。零外部资源（不许 Google Fonts / 不许任何 woff） */
+  --f-serif: Georgia, 'Times New Roman', 'Songti SC', 'SimSun', 'Noto Serif CJK SC', serif;
+  --f-sans: system-ui, -apple-system, 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', sans-serif;
+  --f-mono: ui-monospace, 'Cascadia Mono', Consolas, monospace;
+
+  /* 底部切换条会占掉的高度：任何一版的主操作都不许被它压住。
+     `env(safe-area-inset-bottom)`：真机（iPhone 底部横条）上再垫一层安全区。 */
+  --switch-safe: 88px;
+  --safe-bottom: env(safe-area-inset-bottom, 0px);
+
+  /* 改写动效时长（全站唯一的动效）*/
+  --rw-out: 420ms;
+  --rw-in: 520ms;
+  --rw-lag: 140ms;
+
+  /* 页面自身的兜底色（`body` 拿它当底；各版的变量挂在各自的根节点上，不会往上冒）*/
+  --bg: #fbf9f4;
+  --ink: #1b1a17;
+}
+
+/* ── A 手稿：暖纸 · 墨黑 · 红铅笔批注 ──────────────────────────────────────────
+   对比度（探针在真浏览器里逐处量，全部 ≥4.5:1）：墨黑 15.1 · 软灰 6.8 · 极淡灰 5.07
+   · 铅笔 4.9。⚠️ 极淡灰从 #7a7266 调到 #726a5e：调之前是 4.51（贴着线过），
+   贴线过等于下次改一改就红 —— 这一版留出余量。 */
+.v-a {
+  --bg: #fbf9f4;
+  --ink: #1b1a17;
+  --ink-soft: #5c574e;
+  --ink-faint: #726a5e;
+  --rule: #ded7c9;
+  --rule-soft: #ebe5d8;
+  --pencil: #a8562f;
+  --warn: #a8562f;
+  --touch: #f0e9dc;
+  --accent: #1b1a17;
+  --on-accent: #fbf9f4;
+  /* 旧版淡出到这里为止（「划掉 / 淡出」的「淡出」）*/
+  --old-veil: 0.22;
+}
+
+/* ── B 工作台：冷调 · 稿纸白 · 技术蓝 ────────────────────────────────────────
+   对比度（探针逐处量）：墨黑 16.9 · 软灰 5.6 · 极淡灰 5.20 · 蓝 6.1 */
+.v-b {
+  --bg: #f4f5f6;
+  --panel: #ffffff;
+  --ink: #14171a;
+  --ink-soft: #5b636b;
+  --ink-faint: #5f686f;
+  --rule: #dfe3e6;
+  --rule-soft: #eef1f3;
+  --pencil: #8a5a2b;
+  --warn: #b45309;
+  --touch: #eef1f3;
+  --paper-line: #e7ebee; /* 稿纸上的横格：只比底色深一点，是纸不是表格 */
+  --accent: #1d4ed8;
+  --on-accent: #ffffff;
+  /* 旧版在编号序列里留着，只压暗不消失（「留在版本日志里」）*/
+  --old-veil: 0.45;
+}
+
+/* ── C 对照：上块中立 · 下块带绿（会长出来的那一块）· 深绿重音 ────────────────
+   对比度（探针逐处量）：墨黑 15.4 · 软灰 6.4 · 极淡灰 5.09 · 深绿 5.0
+   ⚠️ C 的极淡灰比 A/B 更暗是**必须的**，不是口味：它压在**有底色**的两块上
+   （#f2f0ec / #eaf0ea 比页面底色 #faf9f7 暗），实测第一版 4.38 —— 红了，故调深。 */
+.v-c {
+  --bg: #faf9f7;
+  --up: #f2f0ec;
+  --down: #eaf0ea;
+  --ink: #1c1b18;
+  --ink-soft: #5f5b53;
+  --ink-faint: #6a655b;
+  --rule: #d8d3c9;
+  --rule-soft: #e7e2d8;
+  --pencil: #8a6a3a;
+  --warn: #8a4a2a;
+  --touch: #e6e2d9;
+  --accent: #2f6b4f;
+  --on-accent: #ffffff;
+  /* C 不动旧版：上块恒亮（改写动效只发生在下块的「生长」上）*/
+  --old-veil: 1;
+}
+
+/* ── D 暖笔记本：暖台面 + 一张纸 · Apple 字阶 · 胶囊控件 ──────────────────────
+   对比度（探针逐处量）：墨黑 16.2 · 软灰 7.28 · 极淡灰 5.20 · 铅笔 5.1
+   主按钮实心赭底上的白字 4.73（≥4.5 —— 实心按钮上的字也得算）。*/
+.v-d {
+  --desk: #ece4d8; /* 台面：比纸略深 —— 深度靠这个，不靠投影 */
+  --paper: #fdfbf7;
+  --paper-edge: #e0d6c5;
+  --ink: #1c1a17;
+  --ink-soft: #59544b;
+  --ink-faint: #6f6a5f;
+  --rule: #e6ded0;
+  --rule-soft: #f0eade;
+  --pencil: #a8562f;
+  --warn: #a8562f;
+  --touch: #f2ebdf;
+  --seg-thumb: #f0e8da;
+  --accent: #b4552d;
+  --on-accent: #fffaf4;
+  /* 旧版在纸上被划掉并淡出（比 A 留得多一点：它还看得清是「原来那句」）*/
+  --old-veil: 0.3;
+}
+
+/* ── 切换条与浮层：**不属于被评的设计** ──────────────────────────────────────
+   故意用四版都没有的语言：纯黑底 + 白色等宽字 + 虚线外框。它必须一眼就看得出
+   是「打样工具」，不能被误当成产品的一部分。 */
+.sw {
+  --sw-bg: #000000;
+  --sw-fg: #ffffff;
+  --sw-dim: #a3a3a3;
+  --sw-edge: #ffffff;
+  --sw-veil: rgba(255, 255, 255, 0.45);
+}
+.pop {
+  --pop-bg: #ffffff;
+  --pop-ink: #16181b;
+  --pop-line: #16181b;
+  --pop-dim: #5a5f66;
+}
+
+/* ─────────────────────────────────────────────────────────────────────────────
+   2. 组件规则起点（此线以下禁止出现色值字面量：只许 var()）
+   ───────────────────────────────────────────────────────────────────────────── */
+
+/* 上面那条中文标记是给人看的；下面这行**纯 ASCII 哨兵**是给探针切文件用的
+   （中文标记在 Windows 上经不同编码往返容易匹配不上）。
+   哨兵以下不许出现 `#hex`、颜色函数、或任何别的色值字面量。 */
+/* ===== COMPONENT-RULES-BELOW ===== */
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+[hidden] {
+  display: none !important;
+}
+
+html,
+body {
+  margin: 0;
+  padding: 0;
+}
+
+body {
+  background: var(--bg);
+  color: var(--ink);
+  font-family: var(--f-sans);
+  font-size: var(--t-3);
+  font-weight: var(--w-n);
+  line-height: var(--lh-body);
+  -webkit-text-size-adjust: 100%;
+  -webkit-tap-highlight-color: transparent;
+}
+
+#app {
+  min-height: 100vh;
+}
+
+.v {
+  min-height: 100vh;
+  background: var(--bg);
+  color: var(--ink);
+  padding-bottom: calc(var(--switch-safe) + var(--safe-bottom));
+}
+
+/* 英文逐词可点：词 = 一个**看起来只是文字**的按钮（视觉语言四版各自成立）*/
+.w {
+  display: inline;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: inherit;
+  font: inherit;
+  letter-spacing: inherit;
+  text-align: inherit;
+  cursor: pointer;
+  -webkit-appearance: none;
+  appearance: none;
+  border-radius: 0;
+}
+
+/* 被标出的那一处：一条细线，不是一块底色 */
+.flag {
+  text-decoration: underline;
+  text-decoration-thickness: 1px;
+  text-underline-offset: 0.22em;
+}
+
+/* 正在被查的那个词：一个即时的高亮（**不是过渡** —— 全站零 transition）*/
+.w[aria-expanded='true'] {
+  background: var(--touch);
+}
+
+/* 铅笔边注：系统说的话 = 写在旁边的批注，**不是 UI 卡片**。
+   共用手法 = 无底 · 无圆角 · 无投影 · 一道 1px 铅笔竖线 · 极小的倾斜。
+   四版各自决定它**挂在哪里**（A 缩进句下 / B 吊在右廊 / C 挂上轴 / D 纸内缩进）。*/
+.note {
+  margin: 0;
+  font-size: var(--t-1);
+  font-weight: var(--w-n);
+  color: var(--pencil);
+  line-height: var(--lh-body);
+  border-left: 1px solid var(--pencil);
+  padding-left: var(--s-3);
+  transform: rotate(-0.4deg);
+  transform-origin: left center;
+}
+
+/* 词卡：极简三件（词性 + 中文 + 这一句里的用法）*/
+.wc {
+  display: block;
+  font-size: var(--t-2);
+  line-height: var(--lh-body);
+}
+
+.wc-w {
+  font-family: var(--f-serif);
+  font-size: var(--t-3);
+  font-weight: var(--w-b);
+}
+
+.wc-pos {
+  font-style: italic;
+  font-size: var(--t-1);
+  opacity: 0.72;
+  margin-left: var(--s-2);
+}
+
+.wc-zh {
+  margin-left: var(--s-2);
+  font-weight: var(--w-m);
+}
+
+.wc-use {
+  display: block;
+  margin-top: var(--s-1);
+  font-size: var(--t-1);
+  color: var(--ink-soft);
+}
+
+/* 页眉：品牌标记 + 字标。四版共用同一个标记，只换站位与字面。 */
+.mast {
+  display: flex;
+  align-items: baseline;
+  gap: var(--s-2);
+}
+
+.bmk {
+  width: 1em;
+  height: 1em;
+  align-self: center;
+  flex: none;
+}
+
+.wordmark {
+  font-size: var(--t-1);
+  font-weight: var(--w-m);
+  letter-spacing: 0.2em;
+}
+
+.hair {
+  height: 1px;
+  border: 0;
+  margin: 0;
+  background: var(--rule);
+}
+
+/* 出处：他的中文原话 = 极小的灰字，只做「这句话是从哪来的」*/
+.src {
+  margin: 0;
+  font-size: var(--t-1);
+  color: var(--ink-faint);
+  letter-spacing: 0.02em;
+}
+
+/* 折叠块（四版共用标签文案，形态各自不同）*/
+.fold {
+  display: flex;
+  width: 100%;
+  align-items: baseline;
+  gap: var(--s-2);
+  margin: 0;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--ink-soft);
+  font-family: inherit;
+  font-size: var(--t-1);
+  font-weight: var(--w-m);
+  letter-spacing: 0.06em;
+  text-align: left;
+  cursor: pointer;
+}
+
+.fold::before {
+  content: '▸';
+  font-size: var(--t-1);
+  color: var(--ink-faint);
+}
+
+.fold[aria-expanded='true']::before {
+  content: '▾';
+}
+
+.fold-body {
+  font-size: var(--t-1);
+  color: var(--ink-soft);
+  line-height: var(--lh-body);
+}
+
+/* ═════════════════════════════════════════════════════════════════════════════
+   3. 全站唯一的动效：改写
+   ─────────────────────────────────────────────────────────────────────────────
+   三条 keyframes **全部**只服务于「同一句被一层层改写」这一件事：
+     rw-out  旧版淡出（A / D 用；D 的终态留得多一点）
+     rw-log  B 专用：旧版留在编号序列里，只压暗
+     rw-in   新版浮现（带一点点位移）
+   没有第四条。`transition` 全站 0 条 —— 按钮、折叠、分段控件、切换条都不做过渡。
+   ═════════════════════════════════════════════════════════════════════════════ */
+
+@keyframes rw-out {
+  from {
+    opacity: 1;
+  }
+  to {
+    opacity: 0.22;
+  }
+}
+
+@keyframes rw-log {
+  from {
+    opacity: 1;
+  }
+  to {
+    opacity: 0.45;
+  }
+}
+
+@keyframes rw-in {
+  from {
+    opacity: 0;
+    transform: translateY(8px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+/* 旧版：**静态终态先写死**（无动画时也是这个样子），动画只是朝它走一遍。
+   这样 `prefers-reduced-motion: reduce` 下直接切换的结果与动画结束时逐位相同。 */
+.is-old {
+  opacity: var(--old-veil);
+  text-decoration: line-through;
+  text-decoration-thickness: 1px;
+}
+
+.is-new {
+  opacity: 1;
+}
+
+.rw-anim.is-old {
+  animation: rw-out var(--rw-out) ease-out both;
+}
+
+.rw-anim.is-old-log {
+  animation: rw-log var(--rw-out) ease-out both;
+}
+
+.rw-anim.is-new {
+  animation: rw-in var(--rw-in) ease-out var(--rw-lag) both;
+}
+
+/* 尊重系统偏好：不做动画，直接切换（终态不变，见上）*/
+@media (prefers-reduced-motion: reduce) {
+  .rw-anim.is-old,
+  .rw-anim.is-old-log,
+  .rw-anim.is-new {
+    animation: none;
+  }
+}
+
+/* ═════════════════════════════════════════════════════════════════════════════
+   A ──「手稿」Manuscript
+   ─────────────────────────────────────────────────────────────────────────────
+   版式      单栏窄列（内容 330px，左右留白各 30px），**零容器**：分节只靠留白
+             与一条 1px 规则线；全页没有一个方块、一条圆角、一层投影。
+   信息层级  他的中文 = 极小灰字（出处）> 英文 = 2rem 衬线、行高 1.42、占版面
+             绝对主导 > 系统批注 = 11px 铅笔色、缩进在句子下方、微微倾斜。
+   主操作    贴着段落末尾的**文字按钮**：无实心底色，只有描边（下划线）。
+   ═════════════════════════════════════════════════════════════════════════════ */
+
+.v-a .col {
+  max-width: 330px;
+  margin: 0 auto;
+  padding: var(--s-5) 0 var(--s-6);
+}
+
+.v-a .mast {
+  color: var(--ink);
+  padding-bottom: var(--s-3);
+}
+
+/* A 的书名：像书的半扉页 —— 大字、宽字距。B/C/D 的字标保持 11–13px（密度不同）*/
+.v-a .wordmark {
+  font-size: var(--t-4);
+  font-weight: var(--w-m);
+  letter-spacing: 0.26em;
+}
+
+.v-a .seg-src {
+  padding: var(--s-5) 0 var(--s-4);
+}
+
+.v-a .seg-say {
+  padding: var(--s-2) 0 var(--s-5);
+}
+
+/* 英文主体：衬线 · 大 · 行高松。这一版里它是唯一的主角。 */
+.v-a .en {
+  margin: 0;
+  font-family: var(--f-serif);
+  font-size: var(--t-5);
+  font-weight: var(--w-n);
+  line-height: var(--lh-loose);
+  letter-spacing: -0.004em;
+  color: var(--ink);
+}
+
+/* 旧的、被划掉的版本：划掉 + 淡出，留在新版上方当「改过这一笔」的痕迹。
+   新版与旧版**同字号**：它们是同一句的两种状态，不是「主要」与「次要」。 */
+.v-a .say + .say {
+  margin-top: var(--s-4);
+  padding-top: var(--s-4);
+  border-top: 1px solid var(--rule-soft);
+}
+
+.v-a .w:active {
+  background: var(--touch);
+}
+
+.v-a .flag {
+  text-decoration-style: wavy;
+  text-decoration-color: var(--warn);
+}
+
+.v-a .flag .w {
+  text-decoration: inherit;
+  text-decoration-style: wavy;
+  text-decoration-color: var(--warn);
+}
+
+.v-a .notes {
+  padding: var(--s-4) 0 var(--s-5);
+}
+
+/* A 的批注：缩进在句子下方，像铅笔写在页边 */
+.v-a .note {
+  margin: 0 0 var(--s-4) var(--s-5);
+  max-width: 240px;
+}
+
+.v-a .note-hint {
+  color: var(--ink-soft);
+  border-left-color: var(--rule);
+}
+
+/* A 的词卡：一个脚注，不是一个框（零容器）*/
+.v-a .cardwrap {
+  margin: 0 0 var(--s-4) var(--s-5);
+  max-width: 250px;
+  padding-left: var(--s-3);
+  border-left: 1px solid var(--rule);
+  color: var(--ink);
+}
+
+.v-a .wc-w {
+  color: var(--pencil);
+}
+
+/* 靠了多大力：一行极小的灰字，无框无底 */
+.v-a .eff {
+  margin: 0;
+  padding: 0 0 var(--s-4);
+  font-size: var(--t-1);
+  color: var(--ink-faint);
+  letter-spacing: 0.04em;
+}
+
+/* 主操作：贴着段落末尾的文字按钮 —— 无实心底色，只有下划线 */
+.v-a .acts {
+  display: flex;
+  gap: var(--s-5);
+  padding: 0 0 var(--s-5);
+}
+
+.v-a .do {
+  margin: 0;
+  padding: 0 0 3px;
+  border: 0;
+  border-bottom: 1px solid currentColor;
+  background: none;
+  font-family: inherit;
+  font-size: var(--t-2);
+  letter-spacing: 0.04em;
+  cursor: pointer;
+}
+
+.v-a .do-main {
+  color: var(--ink);
+  font-weight: var(--w-b);
+}
+
+.v-a .do-alt {
+  color: var(--ink-soft);
+  font-weight: var(--w-m);
+  border-bottom-style: dotted;
+}
+
+.v-a .do[disabled] {
+  color: var(--ink-faint);
+  border-bottom-color: var(--rule);
+  cursor: default;
+}
+
+.v-a .folds {
+  padding: var(--s-5) 0 0;
+}
+
+.v-a .fold + .fold-body {
+  padding: var(--s-3) 0 0 var(--s-4);
+}
+
+.v-a .fold + .fold-body + .fold {
+  margin-top: var(--s-5);
+}
+
+.v-a .mine-s {
+  margin: 0 0 var(--s-2);
+}
+
+.v-a .mine-d {
+  color: var(--ink-faint);
+  margin-right: var(--s-3);
+}
+
+.v-a .chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--s-3) var(--s-4);
+}
+
+.v-a .chip {
+  font-family: var(--f-serif);
+  font-size: var(--t-2);
+  color: var(--ink-soft);
+  border-bottom: 1px solid var(--rule);
+}
+
+/* ═════════════════════════════════════════════════════════════════════════════
+   B ──「工作台」Workbench
+   ─────────────────────────────────────────────────────────────────────────────
+   版式      上下两区。上区 = 稿纸（编号 + 等宽标签的版程序列，细线分隔）；下区 =
+             **常驻工具区**，贴底、有明确边界（1px 顶线 + 自己的底），里面装：
+             靠了多大力 / 我的词 / 我的句子 / 动作按钮组。
+   信息层级  编号 `01 你说的` / `02 你写的` / `03 系统版` 是骨架；等宽字只用在
+             编号与标签上；英文 1.375rem 衬线。第三行**吃掉剩下的高度**，它下面
+             那片空白不是「没排满」，而是**等着被写上的稿纸**（极淡横格）。
+   主操作    底栏里成组的按钮：主按钮实心、次按钮描边，**固定可达**。
+   ═════════════════════════════════════════════════════════════════════════════ */
+
+.v-b {
+  display: flex;
+  flex-direction: column;
+  /* 底部预留交给工具区自己（见 .v-b .tool）——否则贴底的工具区上方会多出一段空 */
+  padding-bottom: 0;
+}
+
+.v-b .sheet {
+  flex: 1 1 auto;
+  display: flex;
+  flex-direction: column;
+  padding: var(--s-5) var(--s-4) var(--s-4);
+}
+
+.v-b .mast {
+  padding-bottom: var(--s-3);
+  color: var(--ink);
+}
+
+.v-b .row {
+  display: grid;
+  grid-template-columns: 30px 1fr;
+  column-gap: var(--s-3);
+  padding: var(--s-4) 0;
+  border-top: 1px solid var(--rule);
+}
+
+.v-b .row:first-of-type {
+  border-top: 0;
+}
+
+.v-b .row[data-row='03'] {
+  flex: 1 1 auto;
+}
+
+.v-b .row[data-row='03'] .rbody {
+  display: flex;
+  flex-direction: column;
+}
+
+.v-b .blank {
+  flex: 1 1 auto;
+  min-height: var(--s-5);
+  margin-top: var(--s-3);
+  border-top: 1px solid var(--rule-soft);
+  background-image: repeating-linear-gradient(
+    to bottom,
+    var(--bg) 0 27px,
+    var(--paper-line) 27px 28px
+  );
+}
+
+.v-b .num {
+  font-family: var(--f-mono);
+  font-size: var(--t-1);
+  font-weight: var(--w-n);
+  color: var(--ink-faint);
+  letter-spacing: 0.04em;
+  line-height: 1.7;
+}
+
+.v-b .rbody {
+  min-width: 0;
+}
+
+/* 等宽字标签：只用于骨架标注，不用于内容 */
+.v-b .tag {
+  display: block;
+  font-family: var(--f-mono);
+  font-size: var(--t-1);
+  font-weight: var(--w-m);
+  color: var(--ink-soft);
+  letter-spacing: 0.14em;
+  margin-bottom: var(--s-2);
+}
+
+.v-b .en {
+  margin: 0;
+  font-family: var(--f-serif);
+  font-size: var(--t-4);
+  line-height: 1.5;
+  color: var(--ink);
+}
+
+.v-b .flag {
+  text-decoration-style: solid;
+  text-decoration-thickness: 2px;
+  text-decoration-color: var(--warn);
+  text-underline-offset: 0.18em;
+}
+
+.v-b .flag .w {
+  text-decoration: inherit;
+}
+
+.v-b .w:active {
+  background: var(--touch);
+}
+
+/* B 的批注：吊在右廊（不打断编号序列的左对齐），窄、倾斜 */
+.v-b .gutter {
+  display: flex;
+  justify-content: flex-end;
+  padding-top: var(--s-3);
+}
+
+.v-b .note {
+  max-width: 62%;
+  border-left: 0;
+  border-right: 1px solid var(--pencil);
+  padding-left: 0;
+  padding-right: var(--s-3);
+  text-align: right;
+  transform: rotate(0.4deg);
+  transform-origin: right center;
+}
+
+.v-b .note-hint {
+  color: var(--ink-soft);
+  border-right-color: var(--rule);
+}
+
+.v-b .pending {
+  margin: 0;
+  font-size: var(--t-1);
+  color: var(--ink-faint);
+  letter-spacing: 0.04em;
+}
+
+.v-b .row.is-filled .pending {
+  display: none;
+}
+
+.v-b .row .en-sys {
+  margin: 0;
+  font-family: var(--f-serif);
+  font-size: var(--t-4);
+  line-height: 1.5;
+  color: var(--accent);
+}
+
+/* 常驻工具区：贴底、有边界、自己的密度 */
+.v-b .tool {
+  position: sticky;
+  bottom: 0;
+  flex: none;
+  z-index: 2;
+  background: var(--panel);
+  border-top: 1px solid var(--ink);
+  padding-bottom: calc(var(--switch-safe) + var(--safe-bottom));
+}
+
+.v-b .trow {
+  display: grid;
+  grid-template-columns: 62px 1fr;
+  column-gap: var(--s-3);
+  align-items: baseline;
+  padding: var(--s-3) var(--s-4);
+  border-bottom: 1px solid var(--rule-soft);
+}
+
+.v-b .tlab {
+  font-family: var(--f-mono);
+  font-size: var(--t-1);
+  color: var(--ink-faint);
+  letter-spacing: 0.1em;
+}
+
+.v-b .tval {
+  font-size: var(--t-2);
+  color: var(--ink-soft);
+}
+
+.v-b .trow.foldrow {
+  display: block;
+  padding: 0;
+}
+
+.v-b .trow.foldrow .fold {
+  padding: var(--s-3) var(--s-4);
+}
+
+.v-b .trow.foldrow .fold-body {
+  padding: 0 var(--s-4) var(--s-3) var(--s-4);
+}
+
+.v-b .mine-s {
+  margin: 0 0 var(--s-2);
+}
+
+.v-b .mine-d {
+  font-family: var(--f-mono);
+  color: var(--ink-faint);
+  margin-right: var(--s-3);
+}
+
+.v-b .chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--s-2);
+}
+
+.v-b .chip {
+  font-family: var(--f-mono);
+  font-size: var(--t-1);
+  color: var(--ink-soft);
+  border-bottom: 1px solid var(--rule);
+}
+
+/* B 的词卡：挤在工具区里，用工具区自己的密度 */
+.v-b .cardrow {
+  display: block;
+  padding: var(--s-3) var(--s-4);
+  border-bottom: 1px solid var(--rule-soft);
+  background: var(--rule-soft);
+}
+
+.v-b .wc-w {
+  color: var(--accent);
+}
+
+/* 底栏按钮组：主实心 / 次描边，固定可达 */
+.v-b .btnbar {
+  display: flex;
+  gap: var(--s-3);
+  padding: var(--s-3) var(--s-4) var(--s-4);
+}
+
+.v-b .btn {
+  flex: 1 1 0;
+  margin: 0;
+  padding: var(--s-3) var(--s-2);
+  border-radius: 0;
+  font-family: inherit;
+  font-size: var(--t-2);
+  font-weight: var(--w-m);
+  letter-spacing: 0.04em;
+  cursor: pointer;
+}
+
+.v-b .btn-main {
+  border: 1px solid var(--accent);
+  background: var(--accent);
+  color: var(--on-accent);
+  font-weight: var(--w-b);
+}
+
+.v-b .btn-alt {
+  border: 1px solid var(--ink);
+  background: none;
+  color: var(--ink);
+}
+
+.v-b .btn[disabled] {
+  border-color: var(--rule);
+  background: var(--rule-soft);
+  color: var(--ink-faint);
+  cursor: default;
+}
+
+/* ═════════════════════════════════════════════════════════════════════════════
+   C ──「对照」Parallel
+   ─────────────────────────────────────────────────────────────────────────────
+   版式      「他写的」与「更地道的」**从一开始就并置为恒定的两块**，窄屏上下各占
+             一半（flex:1 1 0，两块绝对等重）。**下面那块一开始是空的**，只有一句
+             灰字。两块之间是一条细轴。
+   信息层级  两块**同等视觉重量**（同字号、同留白、同内边距）；他那一块里被标出的
+             那一处是**细虚线下划线（可点）**；「靠了多大力」= 两块之间的那条细轴。
+   主操作    两块之间的一个**居中胶囊**（「再改一版」）。
+   ═════════════════════════════════════════════════════════════════════════════ */
+
+.v-c {
+  display: flex;
+  flex-direction: column;
+  padding-bottom: calc(var(--switch-safe) + var(--safe-bottom));
+}
+
+.v-c .mast {
+  padding: var(--s-4) var(--s-4) var(--s-3);
+  color: var(--ink);
+}
+
+.v-c .blk {
+  flex: 1 1 0;
+  /* ⚠️ 这里**故意不写** `min-height: 0`：写了的话，两块会被死死压到 844 的均分高度，
+     内容一旦超出就从盒子里溢出来压到轴上。留 `min-height: auto`（= 内容最小高度）⇒
+     有富余时两块严格等重，没富余时容器长过 100vh、页面滚动，绝不裁切。 */
+  padding: var(--s-4);
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-2);
+}
+
+.v-c .blk-up {
+  background: var(--up);
+}
+
+.v-c .blk-down {
+  background: var(--down);
+}
+
+.v-c .blab {
+  font-family: var(--f-mono);
+  font-size: var(--t-1);
+  font-weight: var(--w-m);
+  letter-spacing: 0.16em;
+  color: var(--ink-soft);
+}
+
+.v-c .en {
+  margin: 0;
+  font-family: var(--f-serif);
+  font-size: var(--t-4);
+  line-height: 1.5;
+}
+
+.v-c .blk-up .en {
+  color: var(--ink);
+}
+
+/* 下块一开始是空的：只有一句灰字 */
+.v-c .empty {
+  margin: 0;
+  font-size: var(--t-2);
+  color: var(--ink-faint);
+}
+
+.v-c .ver {
+  margin: 0;
+  font-family: var(--f-serif);
+  font-size: var(--t-4);
+  line-height: 1.5;
+  color: var(--accent);
+}
+
+/* 第二次改写：一层层里的第二层。字号降一档，一眼看出这是「又过了一遍」*/
+.v-c .ver-2 {
+  font-size: var(--t-3);
+}
+
+.v-c .w:active {
+  background: var(--touch);
+}
+
+/* 被标出的那一处：**细虚线下划线**，可点 */
+.v-c .flag {
+  text-decoration-style: dashed;
+  text-decoration-thickness: 1px;
+  text-decoration-color: var(--warn);
+  text-underline-offset: 0.24em;
+}
+
+.v-c .flag .w {
+  text-decoration: inherit;
+  text-decoration-style: dashed;
+  text-decoration-color: var(--warn);
+}
+
+/* 细轴：两块之间。它本身就是「靠了多大力」。 */
+.v-c .axis {
+  flex: none;
+  padding: var(--s-3) var(--s-4);
+  background: var(--bg);
+}
+
+.v-c .rail {
+  display: flex;
+  align-items: center;
+  gap: var(--s-3);
+}
+
+.v-c .rail::before,
+.v-c .rail::after {
+  content: '';
+  flex: 1 1 0;
+  height: 1px;
+  background: var(--rule);
+}
+
+.v-c .axis-eff {
+  font-size: var(--t-1);
+  color: var(--ink-faint);
+  letter-spacing: 0.04em;
+  white-space: nowrap;
+}
+
+.v-c .axis-mid {
+  display: flex;
+  justify-content: center;
+  padding: var(--s-3) 0 var(--s-2);
+}
+
+.v-c .again {
+  margin: 0;
+  padding: var(--s-2) var(--s-5);
+  border: 1px solid var(--accent);
+  border-radius: var(--r-3);
+  background: var(--accent);
+  color: var(--on-accent);
+  font-family: inherit;
+  font-size: var(--t-2);
+  font-weight: var(--w-b);
+  letter-spacing: 0.06em;
+  cursor: pointer;
+}
+
+.v-c .again[disabled] {
+  border-color: var(--rule);
+  background: none;
+  color: var(--ink-faint);
+  cursor: default;
+}
+
+/* C 的批注：挂在上轴上（被标出的那一处就在它上面）*/
+.v-c .axis-note {
+  display: flex;
+  gap: var(--s-4);
+  padding-top: var(--s-1);
+}
+
+.v-c .axis-note .note {
+  flex: 1 1 0;
+  min-width: 0;
+  max-width: 56%;
+}
+
+.v-c .note-hint {
+  color: var(--ink-soft);
+  border-left-color: var(--rule);
+}
+
+.v-c .cfoot {
+  display: flex;
+  gap: var(--s-3);
+  padding: 0 var(--s-4) var(--s-4);
+  background: var(--bg);
+}
+
+.v-c .qbtn {
+  margin: 0;
+  padding: var(--s-2) var(--s-4);
+  border: 1px solid var(--rule);
+  border-radius: var(--r-3);
+  background: none;
+  color: var(--ink-soft);
+  font-family: inherit;
+  font-size: var(--t-1);
+  font-weight: var(--w-m);
+  letter-spacing: 0.06em;
+  cursor: pointer;
+}
+
+.v-c .qbtn-main {
+  border-color: var(--ink);
+  color: var(--ink);
+  font-weight: var(--w-b);
+}
+
+.v-c .qbtn[disabled] {
+  color: var(--ink-faint);
+  border-color: var(--rule-soft);
+  cursor: default;
+}
+
+/* C 的两个折叠块：放在页脚下方（两块地界不动，档案开在附录里）*/
+.v-c .cfolds {
+  padding: 0 var(--s-4) var(--s-4);
+  background: var(--bg);
+}
+
+.v-c .cfolds .fold + .fold-body {
+  padding: var(--s-2) 0 var(--s-3) var(--s-4);
+}
+
+.v-c .cfolds .mine-s {
+  margin: 0 0 var(--s-2);
+}
+
+.v-c .cfolds .mine-d {
+  font-family: var(--f-mono);
+  color: var(--ink-faint);
+  margin-right: var(--s-3);
+}
+
+.v-c .cfolds .chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--s-3) var(--s-4);
+}
+
+.v-c .cfolds .chip {
+  font-family: var(--f-serif);
+  font-size: var(--t-2);
+  color: var(--ink-soft);
+  border-bottom: 1px solid var(--rule);
+}
+
+.v-c .cfolds .fold-body {
+  color: var(--ink-soft);
+}
+
+/* C 的词卡：贴着被点的那个词弹出来的一层（用浮层的一版）*/
+.pop {
+  position: fixed;
+  z-index: 9;
+  max-width: 268px;
+  padding: var(--s-3) var(--s-4);
+  border: 1px solid var(--pop-line);
+  background: var(--pop-bg);
+  color: var(--pop-ink);
+}
+
+.pop .wc-use {
+  /* 用实色令牌而不是 opacity：**半透明会让对比度算不准**，这一条是可量的 */
+  color: var(--pop-dim);
+}
+
+.pop .wc-w {
+  color: var(--pop-ink);
+}
+
+/* ═════════════════════════════════════════════════════════════════════════════
+   D ──「暖笔记本」Warm Notebook
+   ─────────────────────────────────────────────────────────────────────────────
+   版式      **一张浮在暖色台面上的圆角「纸」**：四周留出台面，深度靠「台面比纸
+             略深」+ 纸内那一条 hairline —— **零投影、零边框盒子**。
+             这不是容器套容器：**恰好一层台面 + 一层纸**，纸里面不再套第二个内容容器
+             （分段控件的轨道刻意**不填底**，只描一道细线，就是为了不变成第二层）。
+   信息层级  **Apple 字阶**：LargeTitle（今天的一句，32/700/紧字距）> Title3（英文段
+             22/400/行高 1.66 —— 靠**更大字号 + 更松行高**当主角，不靠粗体）>
+             Body 16 > Footnote 13（元信息）> Caption 11（出处）。字重只用 400/600/700。
+   主操作    **纸的下沿、右对齐的胶囊按钮组**（与 A 的「贴段落」、B 的「底栏」、
+             C 的「两栏之间」都不同）。触控高度 ≥44px。
+   ═════════════════════════════════════════════════════════════════════════════ */
+
+.v-d {
+  background: var(--desk);
+  /* 台面四周留边；底部把切换条 + 真机安全区一起让出来 */
+  padding: 14px 12px calc(var(--switch-safe) + var(--safe-bottom));
+}
+
+.v-d .paper {
+  background: var(--paper);
+  border-radius: var(--r-2);
+  /* 纸至少占满台面（`100vh` 减去上下留边），但内容长了就跟着长、页面滚动 */
+  min-height: calc(100vh - 14px - var(--switch-safe) - var(--safe-bottom));
+  padding: var(--s-5) var(--s-4) var(--s-4);
+  display: flex;
+  flex-direction: column;
+}
+
+/* 品牌标识：左上一个小标记 + 一行小字（克制）*/
+.v-d .dbrand {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--s-2);
+  font-size: var(--t-1);
+  color: var(--ink-faint);
+  letter-spacing: 0.08em;
+}
+
+.v-d .dbrand .bmk {
+  width: 1.05em;
+  height: 1.05em;
+  color: var(--pencil);
+}
+
+/* LargeTitle：粗 · 紧字距 · 无衬线 */
+.v-d .dtitle {
+  margin: var(--s-2) 0 0;
+  font-family: var(--f-sans);
+  font-size: var(--t-5);
+  font-weight: var(--w-b);
+  letter-spacing: -0.022em;
+  line-height: var(--lh-tight);
+  color: var(--ink);
+}
+
+/* Footnote：靠了多大力 */
+.v-d .dmeta {
+  margin: var(--s-1) 0 0;
+  font-size: var(--t-2);
+  color: var(--ink-faint);
+}
+
+.v-d .dhair {
+  margin: var(--s-4) 0 0;
+}
+
+.v-d .dbody {
+  padding: var(--s-4) 0 0;
+}
+
+/* 英文段：Title3 + 行高 1.66。主角感来自字号与留白，不来自粗体。 */
+.v-d .en {
+  margin: var(--s-2) 0 0;
+  font-family: var(--f-serif);
+  font-size: var(--t-4);
+  font-weight: var(--w-n);
+  line-height: 1.66;
+  color: var(--ink);
+}
+
+.v-d .say + .say {
+  margin-top: var(--s-3);
+}
+
+.v-d .w:active {
+  background: var(--touch);
+}
+
+/* D 标出那一处的手法：一小块暖色底 + 一条细线（像 iOS 里被划重点的一段）*/
+.v-d .flag {
+  background: var(--touch);
+  text-decoration-color: var(--warn);
+}
+
+.v-d .flag .w {
+  text-decoration: inherit;
+}
+
+/* D 的批注：纸内缩进，**不倾斜**（Apple 的克制；倾斜那一手留给 A/B）*/
+.v-d .note {
+  margin: var(--s-4) 0 0;
+  max-width: 264px;
+  transform: none;
+}
+
+.v-d .note-hint {
+  color: var(--ink-soft);
+  border-left-color: var(--rule);
+}
+
+/* 分段控件：切换「我的句子 / 我的词」。**轨道不填底**，只描一道细线 + 一枚滑块。 */
+.v-d .dseg {
+  display: flex;
+  gap: 2px;
+  margin: var(--s-5) 0 0;
+  padding: 2px;
+  border: 1px solid var(--paper-edge);
+  border-radius: var(--r-3);
+}
+
+.v-d .dsegbtn {
+  flex: 1 1 0;
+  min-height: 44px; /* 触控高度 */
+  margin: 0;
+  padding: 0 var(--s-3);
+  border: 0;
+  border-radius: var(--r-3);
+  background: none;
+  color: var(--ink-soft);
+  font-family: inherit;
+  font-size: var(--t-2);
+  font-weight: var(--w-m);
+  letter-spacing: 0.02em;
+  cursor: pointer;
+}
+
+.v-d .dsegbtn[aria-selected='true'] {
+  background: var(--seg-thumb);
+  color: var(--ink);
+  font-weight: var(--w-s);
+}
+
+.v-d .dsegbtn:active {
+  background: var(--touch);
+}
+
+.v-d .dsegbody {
+  padding: var(--s-3) 0 0;
+  font-size: var(--t-2);
+  color: var(--ink-soft);
+}
+
+.v-d .dsegbody .mine-s {
+  margin: 0 0 var(--s-2);
+  font-family: var(--f-serif);
+  font-size: var(--t-3);
+  line-height: var(--lh-body);
+}
+
+.v-d .dsegbody .mine-d {
+  font-family: var(--f-sans);
+  font-size: var(--t-1);
+  color: var(--ink-faint);
+  margin-right: var(--s-3);
+}
+
+.v-d .dsegbody .chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--s-2) var(--s-4);
+}
+
+.v-d .dsegbody .chip {
+  font-family: var(--f-serif);
+  font-size: var(--t-3);
+  color: var(--ink);
+  border-bottom: 1px solid var(--rule);
+}
+
+/* 主操作：纸的下沿、右对齐的胶囊按钮组 */
+.v-d .dacts {
+  display: flex;
+  justify-content: flex-end;
+  gap: var(--s-3);
+  margin-top: auto; /* 推到纸的下沿 */
+  padding-top: var(--s-5);
+}
+
+.v-d .pill {
+  min-height: 44px; /* 触控高度 */
+  margin: 0;
+  padding: 0 var(--s-4);
+  border: 1px solid transparent;
+  border-radius: var(--r-3);
+  font-family: inherit;
+  font-size: var(--t-2);
+  font-weight: var(--w-s);
+  letter-spacing: 0.02em;
+  cursor: pointer;
+}
+
+.v-d .pill-alt {
+  border-color: var(--paper-edge);
+  background: var(--touch);
+  color: var(--ink);
+}
+
+.v-d .pill-main {
+  background: var(--accent);
+  color: var(--on-accent);
+  font-weight: var(--w-b);
+}
+
+.v-d .pill[disabled] {
+  border-color: var(--rule);
+  background: none;
+  color: var(--ink-faint);
+  cursor: default;
+}
+
+/* 按压反馈：**即时**的缩放/变暗 —— 不加 transition，因为动效只留给改写 */
+.v-d .pill:not([disabled]):active {
+  transform: scale(0.97);
+}
+
+.v-d .pill-main:not([disabled]):active {
+  background: var(--ink);
+}
+
+/* D 的词卡：iOS 手感的圆角浮层（12px，全站圆角三档里的第一档）*/
+.v-d .pop {
+  --pop-bg: var(--paper);
+  --pop-ink: var(--ink);
+  --pop-line: var(--paper-edge);
+  --pop-dim: var(--ink-soft);
+  border-radius: var(--r-1);
+  padding: var(--s-3) var(--s-4);
+}
+
+/* ═════════════════════════════════════════════════════════════════════════════
+   4. 切换条（**不属于被评的设计**，故意用另一套语言）
+   ─────────────────────────────────────────────────────────────────────────────
+   ⚠️ 一处**有意偏离**上游 prototype skill：它要求「生产构建里隐藏切换条」，但本项目
+   没有 dev/prod 构建，而且用户必须在手机上翻着看 ⇒ 切换条**不隐藏**。理由写在报告里。
+   它做成高对比黑胶囊 + 虚线外框 + 等宽字，就是为了让人一眼认出「这不是设计的一部分」。
+   ═════════════════════════════════════════════════════════════════════════════ */
+
+.sw {
+  position: fixed;
+  left: 50%;
+  bottom: 10px;
+  transform: translateX(-50%);
+  z-index: 20;
+  display: flex;
+  align-items: center;
+  gap: var(--s-2);
+  padding: var(--s-1);
+  border: 1px solid var(--sw-edge);
+  outline: 1px dashed var(--sw-veil);
+  outline-offset: 3px;
+  border-radius: var(--r-3);
+  background: var(--sw-bg);
+  color: var(--sw-fg);
+  font-family: var(--f-mono);
+  font-size: var(--t-1);
+}
+
+.sw-btn {
+  margin: 0;
+  width: 34px;
+  height: 30px;
+  border: 0;
+  border-radius: var(--r-3);
+  background: none;
+  color: var(--sw-fg);
+  font-family: inherit;
+  font-size: var(--t-2);
+  line-height: 1;
+  cursor: pointer;
+}
+
+.sw-btn:active {
+  background: var(--sw-dim);
+  color: var(--sw-bg);
+}
+
+.sw-label {
+  min-width: 116px;
+  text-align: center;
+  letter-spacing: 0.06em;
+}
+
+.sw-dim {
+  color: var(--sw-dim);
+}
+
+/* ═════════════════════════════════════════════════════════════════════════════
+   5. 划掉（旧版）
+   ─────────────────────────────────────────────────────────────────────────────
+   `text-decoration` **不会穿过自带装饰的后代**：屏上每个词都是一个按钮，而标出的
+   那一处自己还带着波浪线 / 虚线 / 底色。所以「一条连续的删除线」必须逐层显式写一遍，
+   否则会出现「词上有线、词间空格没线」的断续效果。
+   放在文件最后 = 同特异度时按源序压过前面各版的 `text-decoration-*`。
+   ═════════════════════════════════════════════════════════════════════════════ */
+
+.is-old,
+.is-old .w,
+.is-old .flag,
+.is-old .flag .w {
+  text-decoration: line-through;
+  text-decoration-style: solid;
+  text-decoration-thickness: 1px;
+  text-decoration-color: currentColor;
+}

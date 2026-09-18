@@ -1,0 +1,55 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <title>视觉打样 · 三版结构对照（A 手稿 / B 工作台 / C 对照）</title>
+  <meta name="description" content="同一屏、同一份内容、三种版式结构。零依赖、零外部资源、零模型调用。">
+  <meta name="theme-color" content="#fbf9f4">
+  <meta name="mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <!-- 内联 data URI 图标：只为消掉浏览器那次 favicon 请求（零外部资源：没有外站文件可 404）。
+       与 web/index.html / web/proto/flow.html 同一口径。图形与页眉里的品牌标记同一个：
+       一个「插入号」（尖 + 短横）＝把这一句改得更好。 -->
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 20 20'%3E%3Crect width='20' height='20' rx='4' fill='%231b1a17'/%3E%3Cpath d='M5 12.8 L10 6 L15 12.8' fill='none' stroke='%23fbf9f4' stroke-width='1.9' stroke-linecap='round' stroke-linejoin='round'/%3E%3Cpath d='M7 16 H13' fill='none' stroke='%23fbf9f4' stroke-width='1.9' stroke-linecap='round'/%3E%3C/svg%3E">
+  <link rel="stylesheet" href="./style.css">
+</head>
+<body>
+  <!--
+    **视觉打样**：同一路由、同一屏、同一份内容，三种**版式结构**。
+    `?variant=A|B|C` 切换（默认 A）；底部切换条或 ←/→ 换版，循环。
+
+    ── 这一页要回答的唯一问题 ──────────────────────────────────────────────────
+    用户看过上一版原型后的判词是「许多组件和容器明显不高级，视觉美感设计、特色设计
+    也缺失」，并且**拒绝选气质方向**，原话是「先打样，只说，我不知道你能做出的实际
+    水平几何」。所以这一页不是讨论稿，是**能在他手机上翻着看的真页面**。
+
+    ── 三版为什么必须真的不一样 ────────────────────────────────────────────────
+    判据是**结构**，不是配色：A 是单栏流式（零容器）／B 是编号网格 + 贴底工具区／
+    C 是两块等重的分屏 + 中轴。若三版只是「换字体换配色」，这一轮就等于没做
+    （报告里有一条专门的自检）。
+
+    ── 与已上线产品、与上一轮原型的关系 ────────────────────────────────────────
+    本页**新增**，不改 `web/index.html`、`web/dialogue.mjs`、`web/app.mjs`、`web/units/**`、
+    `web/data/**`、`web/styles.css`，也不改上一轮已验收的 `web/proto/flow.*`；未链接进首页。
+
+    ── 内容来源 ────────────────────────────────────────────────────────────────
+    屏上这几句英文/中文**逐字照用**任务书给的字串（见 `style.js` 顶部的 `C`）。
+    自撰的部分只有三处，都登记在报告的「明知未验」里：提示语、B 的第三行空态、
+    「我的句子」里另外两句演示数据。
+  -->
+  <main id="app"></main>
+
+  <!-- 切换条：◀ / 标签 / ▶ 三件构成。它**不属于被评的设计** —— 纯黑高对比胶囊 +
+       虚线外框 + 等宽字，三版谁都不用这套语言，一眼就该看出它是「打样工具」。
+       ⚠️ 上游 prototype skill 要求「生产构建里隐藏切换条」，这里是**有意偏离**：
+       本项目没有 dev/prod 构建，而用户必须在手机上翻着看 ⇒ 不隐藏。 -->
+  <nav class="sw" aria-label="版式切换（打样工具，不属于被评的设计）">
+    <button class="sw-btn sw-prev" type="button" aria-label="上一版">◀</button>
+    <span class="sw-label" id="swLabel" aria-live="polite">A（手稿）</span>
+    <button class="sw-btn sw-next" type="button" aria-label="下一版">▶</button>
+  </nav>
+
+  <script type="module" src="./style.js"></script>
+</body>
+</html>
