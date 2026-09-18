@@ -34,9 +34,8 @@ const C = {
   note: '这一处再想想', // 系统批注：只指一处，不说为什么
   effort: '自己写的 · 提示 0 次', // 靠了多大力
   effort1: '自己写的 · 提示 1 次',
-  done: '改好了',
+  done: '改好了', // 四版**共用同一个提交标签**：C 的这颗在两块之间的中轴上
   hintBtn: '给点提示',
-  again: '再改一版', // C 的中轴按钮
   foldS: '我的句子 (3)',
   foldW: '我的词 (7)',
   empty: '这里会长出更地道的说法', // C 的下块一开始只有这一句灰字
@@ -254,6 +253,10 @@ function viewB(st) {
 
 /* ═════════════════════════════════════════════════════════════════════════════
    C ──「对照」：恒定的两块（上=他写的 · 下=更地道的，一开始是空的）+ 一条细轴
+
+   ⚠️ **C 恰好只有一个主操作，它在两块之间的中轴上**（本版的结构特征）。
+   页脚只有次要动作（「给点提示」）。曾经页脚还有一颗「改好了」——它与中轴那颗
+   走的是**同一个动作**，两个标签指一件事，等于没有主次。已删（只在轴心留一颗）。
    ═════════════════════════════════════════════════════════════════════════════ */
 function viewC(st) {
   const anim = st.step > 0 && st.anim ? ' rw-anim' : '';
@@ -270,7 +273,7 @@ function viewC(st) {
     <div class="axis">
       <div class="rail"><span class="axis-eff">${H(st.hint ? C.effort1 : C.effort)}</span></div>
       <div class="axis-mid">
-        <button type="button" class="again" data-act="again"${st.step >= 2 ? ' disabled' : ''}>${H(C.again)}</button>
+        <button type="button" class="submit" data-act="done"${st.step >= 2 ? ' disabled' : ''}>${H(C.done)}</button>
       </div>
       <div class="axis-note">
         <p class="note" data-layer="note">${H(C.note)}</p>
@@ -283,7 +286,6 @@ function viewC(st) {
       ${st.step >= 2 ? ver(2) : ''}
     </section>
     <div class="cfoot">
-      <button type="button" class="qbtn qbtn-main" data-act="done"${st.step > 0 ? ' disabled' : ''}>${H(C.done)}</button>
       <button type="button" class="qbtn" data-act="hint"${st.hint ? ' disabled' : ''}>${H(C.hintBtn)}</button>
     </div>
     <div class="cfolds">${foldBlock('s')}${foldBlock('w')}</div>
@@ -415,7 +417,10 @@ function doAct(a) {
     if (state.hint) return;
     state.hint = true;
     state.anim = false; // 提示是**直接出现**的，不做动画（动效只留给改写）
-  } else if (a === 'done' || a === 'again') {
+  } else if (a === 'done') {
+    // ⚠️ 这里曾经是 `a === 'done' || a === 'again'` —— 两个动作名走同一条分支，
+    // 于是屏上出现了「同一个动作两个标签」（C 的中轴 + C 的页脚）。动作别名已删；
+    // 一个 `data-act` 值在**整页**只对应一颗按钮，这条由探针钉住。
     if (state.step >= 2) return;
     state.step += 1;
     state.anim = motionOk(); // prefers-reduced-motion: reduce ⇒ 不加动画类，直接切换

@@ -14,7 +14,10 @@
       ⇒ 现在**全站零 box-shadow、零圆角卡片**；A 一版连一层容器都没有，
         D 是「一层台面 + 一张纸」，纸里面不再套第二个内容容器。
    ③ 零动效（transition 1 次 / @keyframes 0 / animation 0）
-      ⇒ 现在 **transition 0 条**，`@keyframes` 恰好 3 条，**全部属于「改写」这一处**。
+      ⇒ 现在 **`@keyframes` 恰好 3 条**，**全部属于「改写」这一处**；`transition`
+         **恰好 1 条**，只服务 D 胶囊的 `:active` 按压反馈（组件区 D 段，令牌 `--press`）。
+         「有 1 条 transition」本身不是病：上一版那 1 条是按钮换底色的通用过渡、
+         与动效叙事无关；这一条是「按下去有回弹」的触感，且只在 `:active` 期间存在。
    ④ 三件套重复（小标题 + 说明 + 内容）
       ⇒ 四版的信息层级各不相同（见每一版段首的注释），不是同一套换皮。
    ⑤ 无特色（拆掉文字看不出是什么产品）
@@ -78,10 +81,15 @@
   --switch-safe: 88px;
   --safe-bottom: env(safe-area-inset-bottom, 0px);
 
-  /* 改写动效时长（全站唯一的动效）*/
+  /* 改写动效时长（这一处是全站唯一的 `@keyframes` 动效）*/
   --rw-out: 420ms;
   --rw-in: 520ms;
   --rw-lag: 140ms;
+
+  /* 按压反馈时长（全站**唯一**的一条 `transition` 用的时长）：只服务 D 胶囊的
+     `:active`。`scale(0.97)` 与变暗若是**即时**的，手感比真 iOS 生硬 —— 这是本轮
+     唯一放开的一处过渡，`prefers-reduced-motion: reduce` 下显式关掉（见组件区 D 段）。*/
+  --press: 120ms;
 
   /* 页面自身的兜底色（`body` 拿它当底；各版的变量挂在各自的根节点上，不会往上冒）*/
   --bg: #fbf9f4;
@@ -260,7 +268,8 @@ body {
   text-underline-offset: 0.22em;
 }
 
-/* 正在被查的那个词：一个即时的高亮（**不是过渡** —— 全站零 transition）*/
+/* 正在被查的那个词：一个即时的高亮（**这一处不是过渡** —— 全站唯一那条 transition
+   只挂在 D 胶囊的 `:active` 上，不在这里）*/
 .w[aria-expanded='true'] {
   background: var(--touch);
 }
@@ -389,7 +398,8 @@ body {
      rw-out  旧版淡出（A / D 用；D 的终态留得多一点）
      rw-log  B 专用：旧版留在编号序列里，只压暗
      rw-in   新版浮现（带一点点位移）
-   没有第四条。`transition` 全站 0 条 —— 按钮、折叠、分段控件、切换条都不做过渡。
+   没有第四条。`@keyframes` 之外，全站**只有 1 条 `transition`**：D 胶囊的 `:active`
+   按压反馈（组件区 D 段）。按钮、折叠、分段控件、切换条本身都不做过渡。
    ═════════════════════════════════════════════════════════════════════════════ */
 
 @keyframes rw-out {
@@ -911,7 +921,8 @@ body {
              灰字。两块之间是一条细轴。
    信息层级  两块**同等视觉重量**（同字号、同留白、同内边距）；他那一块里被标出的
              那一处是**细虚线下划线（可点）**；「靠了多大力」= 两块之间的那条细轴。
-   主操作    两块之间的一个**居中胶囊**（「再改一版」）。
+   主操作    两块之间的一个**居中胶囊**（「改好了」）—— **C 恰好只有这一颗主操作**，
+              页脚只有次要动作（「给点提示」）。
    ═════════════════════════════════════════════════════════════════════════════ */
 
 .v-c {
@@ -1035,7 +1046,10 @@ body {
   padding: var(--s-3) 0 var(--s-2);
 }
 
-.v-c .again {
+/* C 的**唯一**主操作：两块之间的实心强调胶囊（「改好了」）。
+   ⚠️ 页脚曾经还有一颗 `.qbtn-main`「改好了」，与这颗走同一个动作 —— 同一个动作
+   两个标签，已删；页脚只剩次要的「给点提示」。主操作**恰好一颗**由探针钉住。 */
+.v-c .submit {
   margin: 0;
   padding: var(--s-2) var(--s-5);
   border: 1px solid var(--accent);
@@ -1049,7 +1063,7 @@ body {
   cursor: pointer;
 }
 
-.v-c .again[disabled] {
+.v-c .submit[disabled] {
   border-color: var(--rule);
   background: none;
   color: var(--ink-faint);
@@ -1081,6 +1095,9 @@ body {
   background: var(--bg);
 }
 
+/* C 的页脚：**只有次要动作**（「给点提示」）—— 主操作在轴心，不在这里。
+   这里曾经还有 `.qbtn-main`（页脚的「改好了」）：它与轴心那颗是同一个动作，
+   两条规则印同一件事，已随按钮一起删。 */
 .v-c .qbtn {
   margin: 0;
   padding: var(--s-2) var(--s-4);
@@ -1095,12 +1112,7 @@ body {
   cursor: pointer;
 }
 
-.v-c .qbtn-main {
-  border-color: var(--ink);
-  color: var(--ink);
-  font-weight: var(--w-b);
-}
-
+/* 页脚那颗唯一的按钮自己的禁用态（提示已经给过 ⇒ 变灰）*/
 .v-c .qbtn[disabled] {
   color: var(--ink-faint);
   border-color: var(--rule-soft);
@@ -1386,13 +1398,27 @@ body {
   cursor: default;
 }
 
-/* 按压反馈：**即时**的缩放/变暗 —— 不加 transition，因为动效只留给改写 */
+/* 按压反馈：缩放 + 变暗，**全站唯一的一条 `transition`**（时长走令牌 `--press`）。
+   它只挂在 `:active` 上：按下去有 120ms 的回弹，松手即回到静态 —— 静态观感一个
+   像素都没变。「改写」仍是全站唯一的 `@keyframes` 动效；这一条不是第二条动效叙事，
+   是触感（原先即时缩放/变暗，按起来比真 iOS 生硬）。
+   `prefers-reduced-motion: reduce` 下由**紧跟其后**那段关掉。 */
 .v-d .pill:not([disabled]):active {
   transform: scale(0.97);
+  transition: transform var(--press) ease-out, background-color var(--press) ease-out;
 }
 
 .v-d .pill-main:not([disabled]):active {
   background: var(--ink);
+}
+
+/* reduce：**关掉那条 transition**（`transition-property: none` —— 不写第二条
+   `transition` 声明，全站仍然只有 1 条）。⚠️ 必须写在上面那条之后：同特异度下
+   媒体查询里没有额外权重，靠的是源序。 */
+@media (prefers-reduced-motion: reduce) {
+  .v-d .pill:not([disabled]):active {
+    transition-property: none;
+  }
 }
 
 /* D 的词卡：iOS 手感的圆角浮层（12px，全站圆角三档里的第一档）*/
