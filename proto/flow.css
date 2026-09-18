@@ -1,0 +1,713 @@
+/* web/proto/flow.css
+ *
+ * 一屏原型（Task 17）的样式。**零外部资源**：字族全取系统（不许 @import / 不许字体 CDN），
+ * 图标一个都不用（页头那个"原型"标记是文字，不是图标）。
+ *
+ * ── 与产品样式的关系 ─────────────────────────────────────────────────────────
+ * 令牌值**照抄 `web/styles.css`**（暖纸 / 暖黑 / 深青重音 / 同一套圆角与间距），
+ * 这样这一屏与产品站是同一个视觉世界；但本文件**不链它**：
+ * `web/styles.css` 的规则是为对话流的 DOM 写的，而这一屏的形状（步骤轨 + 动作面板 +
+ * 列表）与它不同源；链进去会得到一份"半套样式生效"的界面，反而说不清这一屏长什么样。
+ * ⇒ 原型自带一份样式，**产品那份一个字都没改**（任务书允许链，但没有要求链）。
+ *
+ * ── 三条设计决定 ─────────────────────────────────────────────────────────────
+ * 1. **一屏装得下**：`#app` 高 = 视口高，纵向 flex；面板区自己滚，页面不滚
+ *    （手机上一屏就是一个动作，滚动交给面板内部）。
+ * 2. **要学的英文用系统衬线**（`--font-word`），中文界面用无衬线——产品里唯一的排版个性，
+ *    在这一屏上同时是"这个词可以点"的视觉线索（点得到的词有虚线下划线 + 衬线）。
+ * 3. **卡片 = 底色 + 发丝边，浮层 = 阴影**；重音只给主操作与"点对了"那一处绿。
+ */
+
+:root {
+  --bg: #faf8f5;
+  --surface: #ffffff;
+  --surface-sunken: #f3f0eb;
+  --ink: #1a1815;
+  --ink-soft: #6d675e;
+  --ink-faint: #98918a;
+  --line: #e8e3db;
+  --line-strong: #d8d1c7;
+  --accent: #0f766e;
+  --accent-press: #0b5d56;
+  --accent-wash: #e9f3f1;
+  --on-accent: #ffffff;
+  --danger: #b3261e;
+  --danger-wash: #fdeceb;
+  --ok: #3f6212;
+  --ok-wash: #f0f5e4;
+  --r-sm: 8px;
+  --r: 12px;
+  --r-lg: 16px;
+  --r-xl: 22px;
+  --s-1: 4px;
+  --s-2: 8px;
+  --s-3: 12px;
+  --s-4: 16px;
+  --s-5: 20px;
+  --s-6: 24px;
+  --font-ui: system-ui, -apple-system, 'Segoe UI', 'PingFang SC',
+    'Hiragino Sans GB', 'Microsoft YaHei', 'Noto Sans SC', sans-serif;
+  --font-word: 'Iowan Old Style', 'Palatino Linotype', Palatino, Charter,
+    Georgia, 'Times New Roman', 'Songti SC', serif;
+  --dur: 180ms;
+  --ease: cubic-bezier(0.2, 0, 0.2, 1);
+  --shadow-2: 0 6px 20px -6px rgba(60, 46, 30, 0.18);
+  --ring: 0 0 0 3px color-mix(in srgb, var(--accent) 28%, transparent);
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #161513;
+    --surface: #201e1b;
+    --surface-sunken: #1a1917;
+    --ink: #f2efe9;
+    --ink-soft: #a8a199;
+    --ink-faint: #7d766e;
+    --line: #2f2c28;
+    --line-strong: #403c37;
+    --accent: #4fd1c5;
+    --accent-press: #38b2a8;
+    --accent-wash: #12302d;
+    --on-accent: #08201e;
+    --danger: #ff8a80;
+    --danger-wash: #331b19;
+    --ok: #a3c96b;
+    --ok-wash: #1e2814;
+    --shadow-2: 0 8px 24px -8px rgba(0, 0, 0, 0.7);
+  }
+}
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+html {
+  -webkit-text-size-adjust: 100%;
+}
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--ink);
+  font-family: var(--font-ui);
+  font-size: 16px;
+  line-height: 1.6;
+  -webkit-font-smoothing: antialiased;
+  -webkit-tap-highlight-color: transparent;
+}
+
+button {
+  font: inherit;
+  color: inherit;
+  cursor: pointer;
+  transition: background var(--dur) var(--ease), border-color var(--dur) var(--ease), color var(--dur) var(--ease);
+}
+
+button:focus-visible {
+  outline: none;
+  box-shadow: var(--ring);
+}
+
+/* ═══ 一屏骨架 ═══════════════════════════════════════════════════════════════ */
+#app {
+  height: 100vh;
+  height: 100dvh;
+  max-width: 430px;
+  margin: 0 auto;
+  padding: 10px 14px 12px;
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-2);
+  overflow: hidden;
+}
+
+/* 页头 */
+.hdr {
+  flex: none;
+}
+
+.hdr-top {
+  display: flex;
+  align-items: baseline;
+  gap: var(--s-2);
+}
+
+.title {
+  font-size: 1.05rem;
+  font-weight: 650;
+  letter-spacing: 0.01em;
+}
+
+.badge {
+  font-size: 0.68rem;
+  color: var(--accent);
+  background: var(--accent-wash);
+  border-radius: 999px;
+  padding: 2px var(--s-2);
+}
+
+.sub {
+  margin: 2px 0 0;
+  font-size: 0.72rem;
+  color: var(--ink-soft);
+}
+
+/* 步骤轨：这一条就是"程序管流程"在屏上的样子 */
+.rail {
+  flex: none;
+  display: flex;
+  gap: 2px;
+}
+
+.rail-node {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 2px;
+}
+
+.rail-dot {
+  width: 20px;
+  height: 20px;
+  border-radius: 999px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 0.62rem;
+  background: var(--surface-sunken);
+  color: var(--ink-faint);
+  border: 1px solid var(--line);
+}
+
+.rail-label {
+  font-size: 0.62rem;
+  color: var(--ink-faint);
+}
+
+.rail-node[data-rail-state='done'] .rail-dot {
+  background: var(--accent-wash);
+  color: var(--accent);
+  border-color: color-mix(in srgb, var(--accent) 30%, transparent);
+}
+
+.rail-node[data-rail-state='done'] .rail-label {
+  color: var(--accent);
+}
+
+.rail-node[data-rail-state='now'] .rail-dot {
+  background: var(--accent);
+  color: var(--on-accent);
+  border-color: var(--accent);
+  font-weight: 650;
+}
+
+.rail-node[data-rail-state='now'] .rail-label {
+  color: var(--ink);
+  font-weight: 600;
+}
+
+/* ═══ 动作面板（每屏恰好一个）═══════════════════════════════════════════════ */
+/* 面板**贴着内容**（`flex: 0 1 auto`），剩下的高度留给「我的句子」那一块——
+ * 反过来（面板 flex:1 撑满）会在面板里留下一大块空洞，实测过：S0/S2 那种"内容在上、
+ * 主操作在最下"的画面中间会空掉半屏。内容太高时面板自己滚（`overflow-y`），
+ * 且因为 `flex-shrink: 1`，它让出空间的那一方永远是它、不是「我的句子」。 */
+.panel {
+  flex: 0 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: var(--r-lg);
+  padding: var(--s-3) var(--s-3) var(--s-4);
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-2);
+}
+
+.kicker {
+  margin: 0;
+  font-size: 0.68rem;
+  letter-spacing: 0.08em;
+  color: var(--accent);
+}
+
+.lead {
+  margin: 0 0 var(--s-1);
+  font-size: 0.98rem;
+  font-weight: 650;
+}
+
+.note {
+  margin: 0;
+  font-size: 0.74rem;
+  line-height: 1.5;
+  color: var(--ink-soft);
+}
+
+.note-blank {
+  color: var(--accent);
+}
+
+.row {
+  display: flex;
+  gap: var(--s-2);
+  flex-wrap: wrap;
+}
+
+/* ═══ 控件 ═══════════════════════════════════════════════════════════════════ */
+button.primary {
+  min-height: 46px;
+  flex: 1;
+  border: 0;
+  border-radius: var(--r);
+  background: var(--accent);
+  color: var(--on-accent);
+  font-size: 0.95rem;
+  font-weight: 600;
+}
+
+button.primary:active {
+  background: var(--accent-press);
+}
+
+.input {
+  width: 100%;
+  min-height: 76px;
+  padding: var(--s-2) var(--s-3);
+  border: 1px solid var(--line-strong);
+  border-radius: var(--r);
+  background: var(--surface-sunken);
+  color: var(--ink);
+  font-size: 1rem; /* 16px：iOS 上小于它的输入框会触发自动放大 */
+  line-height: 1.6;
+  resize: none;
+}
+
+.input::placeholder {
+  color: var(--ink-faint);
+}
+
+/* 词块（组装那一步的作答单位：点它 = 作答，不是查词） */
+.tiles {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: var(--s-2);
+}
+
+button.chunk {
+  min-height: 48px;
+  border: 1px solid var(--line-strong);
+  border-radius: var(--r);
+  background: var(--surface);
+  font-family: var(--font-word);
+  font-size: 1.05rem;
+  letter-spacing: 0.01em;
+}
+
+button.chunk:active {
+  background: var(--surface-sunken);
+}
+
+button.chunk[data-tried] {
+  border-style: dashed;
+  color: var(--ink-faint);
+  background: var(--surface-sunken);
+}
+
+/* ═══ 屏上的英文：逐个词可点 ════════════════════════════════════════════════ */
+.en {
+  font-family: var(--font-word);
+  letter-spacing: 0.01em;
+}
+
+/* 可点开词卡的词：衬线 + 虚线底线（不打断句子排版，所以不给 44px 高度） */
+button.w {
+  border: 0;
+  padding: 0 1px;
+  margin: 0;
+  background: transparent;
+  font-family: var(--font-word);
+  font-size: inherit;
+  line-height: inherit;
+  color: inherit;
+  border-bottom: 1px dashed color-mix(in srgb, var(--accent) 55%, transparent);
+  border-radius: 3px;
+}
+
+button.w:active {
+  background: var(--accent-wash);
+}
+
+.w-plain {
+  border-bottom: 1px dashed var(--line-strong);
+}
+
+.said {
+  margin: 0;
+  padding: var(--s-2) var(--s-3);
+  background: var(--surface-sunken);
+  border-radius: var(--r);
+  font-size: 0.95rem;
+  line-height: 1.8;
+}
+
+.said-span,
+mark.said-span {
+  background: var(--accent-wash);
+  color: var(--accent);
+  border-radius: var(--r-sm);
+  padding: 0 3px;
+  font-weight: 600;
+}
+
+.arrow {
+  margin: 0;
+  font-size: 0.74rem;
+  color: var(--ink-faint);
+}
+
+.point {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-1);
+  padding: var(--s-3);
+  background: var(--accent-wash);
+  border-radius: var(--r);
+}
+
+.point-line {
+  margin: 0;
+  font-size: 0.9rem;
+  line-height: 1.9;
+}
+
+.point-en {
+  font-size: 1.05rem;
+}
+
+.sentence {
+  margin: 0;
+  font-family: var(--font-word);
+  font-size: 1.02rem;
+  line-height: 1.95;
+}
+
+.blank {
+  display: inline-block;
+  min-width: 56px;
+  text-align: center;
+  border-bottom: 2px dashed var(--accent);
+  color: var(--accent);
+  font-family: var(--font-ui);
+  font-size: 0.74rem;
+  vertical-align: baseline;
+}
+
+.chip {
+  display: inline-block;
+  padding: 0 var(--s-2);
+  border-radius: var(--r-sm);
+  background: var(--accent-wash);
+  color: var(--accent);
+  font-weight: 600;
+}
+
+.ok-chip {
+  background: var(--ok-wash);
+  color: var(--ok);
+}
+
+.ok {
+  margin: 0;
+  align-self: flex-start;
+  padding: 2px var(--s-3);
+  border-radius: 999px;
+  background: var(--ok-wash);
+  color: var(--ok);
+  font-size: 0.78rem;
+  font-weight: 600;
+}
+
+.natural {
+  padding: var(--s-2) var(--s-3);
+  border-radius: var(--r);
+  background: var(--surface-sunken);
+}
+
+.k {
+  margin: 0 0 2px;
+  font-size: 0.68rem;
+  letter-spacing: 0.06em;
+  color: var(--ink-faint);
+}
+
+.natural-line,
+.col-line,
+.why-line {
+  margin: 0;
+  font-family: var(--font-word);
+  line-height: 1.8;
+}
+
+.natural-line {
+  font-size: 1rem;
+}
+
+.hint {
+  padding: var(--s-2) var(--s-3);
+  border-radius: var(--r);
+  background: var(--danger-wash);
+}
+
+.hint-k {
+  margin: 0 0 2px;
+  font-size: 0.68rem;
+  letter-spacing: 0.06em;
+  color: var(--danger);
+}
+
+.hint-v {
+  margin: 0;
+  font-size: 0.8rem;
+  line-height: 1.9;
+}
+
+.cols {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: var(--s-3);
+}
+
+.col {
+  min-width: 0;
+}
+
+.col + .col {
+  border-left: 1px solid var(--line);
+  padding-left: var(--s-3);
+}
+
+.col-line {
+  font-size: 0.84rem;
+}
+
+.bad-line {
+  color: var(--danger);
+  text-decoration: line-through;
+  text-decoration-thickness: 1px;
+}
+
+.ok-line {
+  color: var(--ok);
+}
+
+.why {
+  padding: var(--s-2) var(--s-3);
+  border-radius: var(--r);
+  background: var(--accent-wash);
+}
+
+.why-line {
+  font-size: 0.86rem;
+}
+
+.collected {
+  padding: var(--s-3);
+  border-radius: var(--r);
+  background: var(--surface-sunken);
+}
+
+.collected-zh {
+  margin: 0 0 var(--s-1);
+  font-size: 0.76rem;
+  color: var(--ink-soft);
+}
+
+.collected-en {
+  margin: 0;
+  font-family: var(--font-word);
+  font-size: 1.02rem;
+  line-height: 1.9;
+}
+
+.progress {
+  margin: 0;
+  padding: var(--s-2) var(--s-3);
+  border-radius: 999px;
+  background: var(--ok-wash);
+  color: var(--ok);
+  font-size: 0.78rem;
+  font-weight: 600;
+}
+
+.notice {
+  margin: 0;
+  padding: var(--s-2) var(--s-3);
+  border-radius: var(--r);
+  background: var(--danger-wash);
+  color: var(--danger);
+  font-size: 0.78rem;
+  line-height: 1.7;
+}
+
+/* ═══ 我的句子（历史 = 列表，不是对话）══════════════════════════════════════ */
+/* 这一块**吃满剩下的高度**（`flex: 1 1 auto`）：它既是历史，也是"渐进痕迹"的落点，
+ * 一屏里它占的地方越大，"积累"这件事越看得见。`min-height` 保证它不被面板挤没。 */
+.mine-wrap {
+  flex: 1 1 auto;
+  min-height: 96px;
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-1);
+  padding: var(--s-2) var(--s-3);
+  background: var(--surface-sunken);
+  border-radius: var(--r-lg);
+}
+
+.mine-head {
+  display: flex;
+  align-items: baseline;
+  gap: var(--s-2);
+}
+
+/* 空的时候：虚线留白 + 居中的一句话（"这里将来会长出东西"），
+ * 不是一块空米色——空的容器要看得出来是空的，而不是坏了。 */
+.mine-wrap.is-empty {
+  background: transparent;
+  border: 1px dashed var(--line-strong);
+  align-items: center;
+  justify-content: center;
+}
+
+.mine-title {
+  font-size: 0.78rem;
+  font-weight: 600;
+}
+
+.mine-count {
+  font-size: 0.7rem;
+  color: var(--ink-faint);
+}
+
+.mine-empty {
+  margin: 0;
+  font-size: 0.78rem;
+  color: var(--ink-faint);
+  text-align: center;
+}
+
+.mine {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+
+.mine-item {
+  padding: var(--s-1) 0 var(--s-2);
+  border-top: 1px dashed var(--line-strong);
+}
+
+.mine-zh {
+  margin: 0;
+  font-size: 0.74rem;
+  color: var(--ink-soft);
+}
+
+.mine-en {
+  margin: 0;
+  font-family: var(--font-word);
+  font-size: 0.9rem;
+  line-height: 1.8;
+}
+
+.mine-chunk {
+  margin: 0;
+  font-size: 0.7rem;
+  color: var(--accent);
+}
+
+.new-tag {
+  float: right;
+  font-size: 0.62rem;
+  color: var(--on-accent);
+  background: var(--accent);
+  border-radius: 999px;
+  padding: 1px 6px;
+}
+
+/* ═══ 词卡层（关着的时候是空的）════════════════════════════════════════════ */
+.wc-layer {
+  position: fixed;
+  inset: 0;
+  display: flex;
+  align-items: flex-end;
+  justify-content: center;
+  background: rgba(26, 24, 21, 0.32);
+}
+
+/* 关着的时候不得挡住底下的东西（它是空的，但仍铺满全屏） */
+.wc-layer:empty {
+  background: transparent;
+  pointer-events: none;
+}
+
+.wc {
+  width: 100%;
+  max-width: 430px;
+  padding: var(--s-3) var(--s-4) calc(var(--s-4) + env(safe-area-inset-bottom));
+  background: var(--surface);
+  border-radius: var(--r-xl) var(--r-xl) 0 0;
+  box-shadow: var(--shadow-2);
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-2);
+}
+
+.wc-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--s-3);
+}
+
+.wc-word {
+  font-family: var(--font-word);
+  font-size: 1.5rem;
+  color: var(--accent);
+}
+
+button.wc-close {
+  min-height: 36px;
+  padding: 0 var(--s-3);
+  border: 1px solid var(--line-strong);
+  border-radius: 999px;
+  background: var(--surface);
+  font-size: 0.78rem;
+  color: var(--ink-soft);
+}
+
+.wc-row {
+  display: flex;
+  gap: var(--s-3);
+  align-items: baseline;
+  border-top: 1px solid var(--line);
+  padding-top: var(--s-2);
+}
+
+.wc-k {
+  flex: none;
+  width: 74px;
+  font-size: 0.68rem;
+  color: var(--ink-faint);
+}
+
+.wc-v {
+  font-size: 0.86rem;
+  line-height: 1.8;
+}

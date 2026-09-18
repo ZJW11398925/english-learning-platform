@@ -1,0 +1,49 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <title>今天的一句 · 一屏原型</title>
+  <meta name="description" content="一屏可点的原型：程序管流程与状态，模型只管生成与评判。零依赖、零模型调用。">
+  <meta name="theme-color" content="#faf8f5" media="(prefers-color-scheme: light)">
+  <meta name="theme-color" content="#161513" media="(prefers-color-scheme: dark)">
+  <meta name="mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <!-- 内联 data URI 图标：只为消掉浏览器那次 favicon 请求（零外部资源：没有外站文件可 404）。
+       与 web/index.html 同一口径（那里对"只许图标这一处是内联"已有明文）。 -->
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Crect width='16' height='16' rx='4' fill='%230f766e'/%3E%3C/svg%3E">
+  <link rel="stylesheet" href="./flow.css">
+</head>
+<body>
+  <!--
+    **一屏原型**（Task 17）：用来被"当场否掉或通过"的那一屏。
+
+    ── 这一页为什么存在 ─────────────────────────────────────────────────────────
+    前两版形态都被真实用户否掉，根因是**架构倒过来了**：模型被当成产品（决定教什么、
+    怎么教、下一步干什么），程序只负责把它的文本贴到屏幕上。这一屏要做的不是"更漂亮的
+    对话"，而是把**程序管流程 / 状态 / 界面，模型只管生成与评判**这条分工**在界面上看得见**。
+
+    ── 这一页只做三件事 ─────────────────────────────────────────────────────────
+    1. 引 `flow.css`（样式**只在这一处**；本页没有内联 `<style>`）；
+    2. 引 `flow.mjs` 的状态机（纯函数，可在 Node 里直接 import 测试）；
+    3. 把 `flow.view.mjs` 的 `mountFlow` 挂到 `#app`。
+    页面自己**不做任何教学判断**，也**不发一个请求**：没有 Key、没有网络也能完整走完
+    `S0`→`S5` 六屏（这正是"程序管流程"的验收判据之一）。
+
+    ── 与已上线产品的关系 ───────────────────────────────────────────────────────
+    **未链接进 `web/index.html`**（原型不许冒充产品），也不 import 产品里任何模块：
+    它是一个独立的一屏，用来先回答"这个界面形态对不对"。通过之前不写第二屏、不做后端、
+    不接模型。
+
+    ── 没有内联脚本的兜底 ───────────────────────────────────────────────────────
+    模块加载失败（老浏览器解析期就抛）时页面会是一屏空白 —— 本页刻意**不写**降级文案：
+    一份"如果坏了就说这句"的兜底，是给一个还没被认可的原型再加一截要维护的东西。
+    真实浏览器走查（`tmp/probes/proto-flow-browser-check.mjs`）钉住"装载成功且零报错"。
+  -->
+  <main id="app"></main>
+  <script type="module">
+    import { mountFlow } from './flow.view.mjs';
+    mountFlow(document.getElementById('app'));
+  </script>
+</body>
+</html>
