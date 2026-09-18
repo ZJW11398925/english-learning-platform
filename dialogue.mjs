@@ -70,7 +70,7 @@
 //     （`DEC-…db.92`），擅自改相位会连带改掉校验口径。
 // (c) **`learnerState: 'untouched'` 是常量**（计划第 1813 行）：`focus.mjs` 的 `status`
 //     恒为 `FOCUS_STATUS[0]`，而 `profile.mjs` **没有**记录焦点状态的接口
-//     （计划声明过的 `recordFocus()` 不存在，见 `DEC-…db.96`）。⇒ 第六槽在整个 MVP 里
+//     （计划声明过的 `recordFocus()` 不存在，见 `DEC-…db.96`）。⇒ 这一槽在整个 MVP 里
 //     恒为 `'untouched'`。**没有为它发明一套"焦点状态怎么推进"的语义**：那是教学判断，
 //     本轮没有真实数据支撑，强行补 = 凭空发明阈值。
 // (d) **`exclude: []`（计划第 1802 行）⇒ `focus.mjs` 的"不复述同一个焦点"能力
@@ -78,8 +78,12 @@
 //     ⚠️ **不要用"排除上一轮焦点"来随手修好它**：候选只有一个时排除后 `pickFocus`
 //     返回 `null`，学习者会**每隔一回合**收到"这个我一时接不上"——那比重复更坏。
 //     （`pickFocus` 的 exclude 是给"多个候选"准备的，而 MVP 的候选只有一个。）
-// (e) **`scenes[0]`（计划第 1810 行）**：多场景时只用第一个，`fits` 与当前焦点**不参与**
-//     匹配。⇒ 情境与焦点可能不搭。同样不修：那需要一个匹配算法，而不是一个 `[0]`。
+// (e) **`scenes[0]`（计划第 1810 行）——Task 15 已改**：原实现多场景时只用第一个，`fits` 与
+//     当前焦点**不参与**匹配 ⇒ 情境与焦点可能不搭（实弹里就是这个让回复跑成了房东与续租）。
+//     现在取**第一个 `fits` 含 `focus.ref`** 的情境；都不含则**回退**到这个既有行为
+//     （回退理由写在 `sceneFor` 的注释里：情境不搭远比没有情境轻，且第七槽这次真的进了提示词）。
+//     ⚠️ 仍然**不为它发明匹配算法**：`fits.includes` 是这份数据能支撑的全部，
+//     没有打分 / 模糊匹配 / 语义相似度（那些都需要数据支撑，本轮没有）。
 //
 // ===========================================================================
 // 点击处理器**没有错误面**（任务书第四节 4）
@@ -88,7 +92,7 @@
 // 实测结论：**该有的错误面已经由 `runTurn` 提供了**——`generate` 抛错 / 返回 `null` /
 // 空串都走"降级为模板话术"那条路（`loop.mjs` 偏离 ②），所以模型这一层不存在
 // "学习者发了消息却永远等不到回复"。而**处理器级**的逃逸要 `runTurn` 自己 reject
-// 才可能发生（六槽违约 / 非法档位 / 非法拍子），那些字面量都在本文件里、由测试与
+// 才可能发生（七槽违约 / 非法档位 / 非法拍子），那些字面量都在本文件里、由测试与
 // 源码级护栏钉住；`band` 来自 `profile`，而 `profile.mjs` 的读路径**按合法档位集合回退**
 // （越界档位安全退回默认档，非"是不是整数"判）——所以它在生产路径上不可达。
 // ⇒ **照计划不补 try/catch**：补了会多造一句"教学内容"（视图自己编的话），
@@ -139,18 +143,46 @@ function assertRoot(root) {
 }
 
 /**
- * 情境槽：取第一个场景的 `setup`，没有就围绕焦点造一句。
+ * 情境槽：**取第一个 `fits` 含 `focus.ref` 的情境**的 `setup`（Task 15）。
+ *
+ * 为什么这么选（`DEC-OPI-968b804d-…db.140` 的 F2）：首次实弹里学习者说的是请假的事，
+ * 系统的回复说的是**房东与续租**——因为这里写死取 `scenes[0].setup`，而 `scenes[].fits`
+ * 这个字段在 `web/data/scenes.json` 里**零消费方**（8 个情境里 7 个永不出现）。
+ * ⇒ 改成"按焦点挑"，`fits` 终于有了消费方。**数据形状一个字都没改**（`fits` 只是终于被读了）。
+ *
+ * **回退到 `scenes[0]?.setup`（现有行为）的理由**：`fits` 是**数据**，完全可能没有一条命中
+ * ——8 个情境覆盖不了 20 个词（`knowledge.mjs` 文件头 ③ 明写这条交叉一致性没有任何机制检查），
+ * 数据也可能旧到没有这个字段。那种时候保留写死 `scenes[0]` 的既有行为，因为
+ * 「情境与焦点不搭」远比「没有情境可给」轻：第七槽（学习者的原话）这次真的进了提示词，
+ * 模型至少有**他的话**可接（这正是本次修复的主项）。**绝不返回空串**——那会让【情境】行变成
+ * 一句空话，比不搭更坏。**不为它发明匹配算法**（打分 / 模糊匹配 / 语义相似度都需要数据支撑，
+ * 本轮没有）：一个 `fits.includes` 加一条明确回退，是这份数据能支撑的全部。
  *
  * `Object.hasOwn` 是**防御性**的（`scenes[0].toString` 会顺着原型链取到一个函数，
  * 那会被 `assemblePrompt` 印进提示词）——同族缺陷本仓已修过三次
  * （`teach/session.mjs` 的 `send` / `teach/method.mjs` 的 `narrowOnStuck` / `teach/prompt.mjs` 的方法表）。
  * 顺带把 `scenes[0]` 是 `null` / 非对象 / `setup` 不是字符串都归到同一条兜底路上
  * （计划只挡了"`scenes` 为空"这一种）。
+ *
+ * `fits` 的守卫是**形状判定**：必须是数组，成员与 `focus.ref` 做**严格相等**比较。
+ * 写成 `String(fits).includes(ref)` 会把 `fits: 'hesitate'`（标量）也当成命中，
+ * 而那是另一套语义（子串匹配）——本模块不发明它，坏形状一律走回退（测试钉了这一点）。
  */
 function sceneFor(scenes, focus) {
-  const first = scenes[0];
-  const setup = (first !== null && typeof first === 'object' && Object.hasOwn(first, 'setup')) ? first.setup : undefined;
-  if (typeof setup === 'string' && setup.trim() !== '') return setup;
+  const setupOf = (scene) => {
+    const setup = (scene !== null && typeof scene === 'object' && Object.hasOwn(scene, 'setup')) ? scene.setup : undefined;
+    return (typeof setup === 'string' && setup.trim() !== '') ? setup : null;
+  };
+  const fitsFocus = (scene) => scene !== null && typeof scene === 'object'
+    && Array.isArray(scene.fits) && scene.fits.includes(focus.ref);
+  // ① 按焦点挑：第一个 `fits` 含这个焦点的情境。`setup` 不合法的场景**不算命中**
+  //    （否则会挑中一个挑不出句子的场景再落回兜底——那与"没命中"是两件事，别混）。
+  const matched = scenes.find((s) => fitsFocus(s) && setupOf(s) !== null);
+  if (matched !== undefined) return setupOf(matched);
+  // ② 回退：现有行为（`scenes[0]?.setup`），理由见上面那段。
+  const firstSetup = setupOf(scenes[0]);
+  if (firstSetup !== null) return firstSetup;
+  // ③ 连第一个场景都不可用（`scenes` 为空 / 坏形状）：保留现有那句由焦点派生的模板。
   const meaning = focus.meaning.trim() === '' ? FOCUS_PLACEHOLDER : focus.meaning;
   return `围绕「${meaning}」的一个日常情境`;
 }
@@ -347,6 +379,11 @@ export async function mountDialogue(root, deps = {}) {
       focus,
       learnerState: LEARNER_STATE,
       scene,
+      // 第七槽（Task 15）：**他刚说的那句话**，原样交出去（不改写、不截断）——
+      // 这就是实弹 F2 的修法：焦点是从他这段话里挑的，而他这段话本身必须让模型看见，
+      // 否则模型只能照着【情境】问（那一次它就在说房东与续租）。`content` 上面已经 `trim()`
+      // 过一次（空白输入在更上面就被挡下了），这里不再动它一个字符。
+      learnerSaid: content,
     });
     push('system', turn.text);
 

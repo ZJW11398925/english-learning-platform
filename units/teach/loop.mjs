@@ -59,7 +59,7 @@
 //
 // ⑤ **发请求之前多一道判定式守卫**（`assertPhaseAndBand`）：坏 `phase` 的权威守卫在
 //    `validate.mjs`（`assertPhase`），而 `prompt.mjs` 只要求"非空字符串"。若不做这一步，
-//    一个非法拍子会**先白发一次请求**、再由 `checkReply` reject——"六槽缺一不发调用"
+//    一个非法拍子会**先白发一次请求**、再由 `checkReply` reject——"七槽缺一不发调用"
 //    是**行为**断言，不只是"最终会抛错"。代价：每回合多一次 `focusLeakApplies` 调用
 //    （纯函数、无副作用、无 I/O），以及本模块多 import 一个符号（判据钉在源码级护栏里）。
 //
@@ -190,23 +190,30 @@ function assertPhaseAndBand(phase, band) {
 /**
  * 跑一个回合。
  *
- * 流程：组装提示词（六槽缺一在这里就炸，**一个请求都不发**）→ 调 `generate` → 校验 →
+ * 流程：组装提示词（七槽缺一在这里就炸，**一个请求都不发**）→ 调 `generate` → 校验 →
  * 违规就记原因、降一档、重来 → 用完 `MAX_ATTEMPTS` 仍不行 ⇒ 模板话术。
  *
  * @param {{
  *   generate: (input: { prompt: string, attempt: number }) => Promise<string>,
- *   phase: string, method: string, band: number, focus: object, learnerState: string, scene: string
+ *   phase: string, method: string, band: number, focus: object, learnerState: string, scene: string,
+ *   learnerSaid: string
  * }} input
  *   - `generate`：**必须是函数**，本模块不自己发请求也不兜底。返回非空字符串才算一次有效尝试。
  *   - `phase`：原样透传给 `checkReply`，**不许改写**（改写会让判定静默变紧或变松，见文件头偏离 ①）。
+ *   - `learnerSaid`：**第七槽**（Task 15）。学习者刚说的那句话，**原样**交给 `assemblePrompt`
+ *     ——转述 / 截断 / 加尾注都等于篡改教学素材，而且任何"顺手美化"都会让"提示词逐字含原话"
+ *     这条判据与真实发出的提示词**静默分叉**（纪律与 `phase` 同一条：原样透传）。
+ *     本模块**不判断它的内容**（那是调用方的事，见 `prompt.mjs` 文件头代价 ②/⑧）。
  *   - `focus.meaning`：作为 `focusMeaning` 交给 `checkReply`（4 档必须连释义一起隐去）。
  * @returns {Promise<{ text: string, method: string, band: number, degraded: boolean, attempts: number }>}
  *   - `band`：**实际生效**的档位（重试会降档，降级时是降过档的那个）。
  *   - `attempts`：**实际发起的尝试次数**；不是"失败次数"，降级时等于 `MAX_ATTEMPTS`。
- * @throws {TypeError} `generate` 不是函数；或六槽 / 档位 / 方法名 / 拍子违约（由 `prompt.mjs` 抛出，
+ * @throws {TypeError} `generate` 不是函数；或七槽 / 档位 / 方法名 / 拍子违约（由 `prompt.mjs` 抛出，
  *   且**在第一次请求之前**）
  */
-export async function runTurn({ generate, phase, method, band, focus, learnerState, scene } = {}) {
+export async function runTurn({
+  generate, phase, method, band, focus, learnerState, scene, learnerSaid,
+} = {}) {
   if (typeof generate !== 'function') {
     throw new TypeError('runTurn: generate 必须是函数（把模型调用注入进来，本模块不自己发请求）');
   }
@@ -219,9 +226,9 @@ export async function runTurn({ generate, phase, method, band, focus, learnerSta
 
   for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt += 1) {
     // 组装提示词在 try **之外**：契约违约（缺槽位 / 非法档位 / 非法方法名）必须**响亮抛穿**，
-    // 不许被当成"模型这次不行"而降级。六槽缺一不发调用是设计稿 §3.6.3 的第一层。
+    // 不许被当成"模型这次不行"而降级。七槽缺一不发调用是设计稿 §3.6.3 的第一层。
     const prompt = assemblePrompt({
-      phase, method, band: currentBand, focus, learnerState, scene,
+      phase, method, band: currentBand, focus, learnerState, scene, learnerSaid,
       // 第二次起把上一次的原因回灌给模型——否则它会原样再犯同一个错（计划第 1628–1630 行）
       retryHint: violationHint(lastReasons),
     });
