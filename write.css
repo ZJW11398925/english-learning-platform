@@ -6,28 +6,42 @@
    打样里 A 用的是**写死的演示内容**；这一份把同一套视觉语言用在**真状态**上：
    七步、加载、失败、「接不住」、词卡、待重写队列。
 
-   ── 为什么另起一份样式单而不是复用 web/styles.css ─────────────────────────────
-   1. `web/styles.css` 钉的是**旧形态**（相机取词那一套屏），而本页是第三次重定向后的
-      形态——两者共用一个样式单会让「哪一版的视觉在哪一页生效」变成靠类名去猜；
-   2. `web/proto/**` 是**不许改的打样源文件**（任务书第四节），所以也不能把 A 的规则
-      从 `proto/style.css` 里搬走或改成共享——只能**另写一份**；
-   3. `tests/styles.test.mjs` 的 15 条契约只扫 `web/styles.css`，本文件不参与、也不该参与。
+   ══════════════════════════════════════════════════════════════════════════════
+   这一版修的三条根因（都是"实测出来的几何/作用域事实"，不是口味）
+   ══════════════════════════════════════════════════════════════════════════════
+   ① **纸没铺到画布**：调色板原先挂在 `.sheet` 上，而 `body` 的 `background: var(--bg)`
+      在 body 那一层解析不到 `--bg` ⇒ 按 CSS 的 invalid-at-computed-value-time **整条声明
+      失效** ⇒ body 背景透明 ⇒ 画布回退成白。现在调色板在 `:root`，且 `html` / `body`
+      **各自显式**写成纸色（实测 `getComputedStyle(html).backgroundColor` = `rgb(251,249,244)`）。
+   ② **纸成了 330 宽的卡片**：`.sheet` / `.page-foot` / `.gate` 上的
+      `max-width: 330px; margin: 0 auto` 是从打样的**文字列**（`proto/style.css` 的
+      `.v-a .col`）抄过来的，却安到了**纸**上 ⇒ 390 的屏上左右各留 30px 白、内容短时
+      下方还露 200+px 白。现在纸与页脚**全宽**（左右留白 0、贴着屏边），330px 的阅读宽度
+      由内边距 `--read-pad` 提供。
+   ③ **门槛屏没有纸**：没配 Key 的那一屏只有 `.gate`，配上 ① 的透明画布 ⇒ 访问者第一眼
+      是纯白页。现在 `html` / `body` 就是纸，门槛屏与稿纸屏落在同一张纸上。
 
-   ── 这一份要守的界面纪律（任务书第三节，逐条可机检）──────────────────────────
+   ══════════════════════════════════════════════════════════════════════════════
+   这一版要守的界面纪律（任务书第三节，逐条可机检）
+   ══════════════════════════════════════════════════════════════════════════════
    ① 一条不断长的稿纸：换步**不换屏**——已经发生过的段落留在纸上（被取代的那一版划掉
       淡出），新内容往下接。所以本文件里**没有** `.panel` / `.screen` / `.view` 这类
       "一块一块的屏"，只有 `.sheet`（那张纸）与它下面的顺排段落。
       也**没有气泡**：一个 `say-system` / `say-learner` / 对话流类名都不产出。
-   ② 分段写：`.seg` 是一行输入，不是一个大框 —— 手机打英文长句很痛。
+   ② 一屏一个主角：≥22px 的那一块版面就是主角（从零写那一屏 = 书写面；揭示那一屏 =
+      系统版）。标签/说明/成本/清单一律是配角，而且**配角不许用"小灰标签"堆出来**：
+      全文件只有 4 档字号（11 / 16 / 22 / 36），一屏最多用满 4 档。
    ③ 标出来不说：`.flag` 只有一条**波浪下划线**，没有任何文字解释；
       「点开才说」的那句在 `.note-issue` 里，**默认不渲染**（视图按状态决定建不建它，
       不用 `display:none` 藏 —— 藏着的节点会被测试和读屏器找到）。
    ④ 离散难度标记：`.eff` 是一行小字，取值**恰四档**（`[data-effort]` = 0/1/2/3）。
       本文件里**没有** `<progress>`、没有百分比、没有分数。
    ⑤ 英文逐词可点：`.w` 是"看起来只是文字"的按钮（零边框零底色零内距）。
-   ⑥ 教点 2–3 选一：`.pick` 是内容层的一组选择（每个候选一个按钮，上面写着教什么）。
+   ⑥ 教点 2–3 选一：`.pick-item` 是**铅笔注**（一道竖线），不是带边框的行列表；
+      候选按钮的文字就是"教什么"，引文是它的兄弟节点。
    ⑦ 动效只在改写那一处：全文件 `@keyframes` **只有两条**（rw-old / rw-new），
-      `transition` **只有一条**（`.seg:active` 之外的唯一一条挂在 `.do:active` 按压反馈上）。
+      `transition` **只有一条**（`.do:active` 的按压反馈）。**零容器**：全站没有一个
+      方块、一条圆角、一层投影 —— 分节只靠留白与 1px 规则线（`.hair`）。
    ⑧ 零外部资源：字体栈**全是系统字体**，一个 `@font-face` / `url(` 都没有。
 
    ── 令牌区与组件区的分界（可机检，与 `web/proto/style.css` 同一条纪律）─────────
@@ -38,13 +52,13 @@
    1. 令牌
    ───────────────────────────────────────────────────────────────────────────── */
 :root {
-  /* 字阶：**五档**，相邻跨度 1.18 / 1.23 / 1.375 / 1.45 —— 没有微差档。
-     （与 proto/style.css 同一把尺；那 17 档的旧账见 `web/styles.css` 的注释。）*/
-  --t-1: 0.6875rem; /* 11px 边注 / 出处 / 小字 */
-  --t-2: 0.8125rem; /* 13px 按钮 / 词卡 */
-  --t-3: 1rem;      /* 16px 正文 */
-  --t-4: 1.375rem;  /* 22px 分段输入 / 书名 */
-  --t-5: 2rem;      /* 32px 英文主体（这一版的主角） */
+  /* 字阶：**四档**，相邻跨度 1.45 / 1.375 / 1.45 —— 没有微差档。
+     （上一版是五档且用满，一屏数得出 5 个字号；打样 A 只用了 4 档，而"一屏最多 4 档"
+       是任务书的硬配额。11px 只留给页脚/出处/折叠标题这类一屏 ≤7 处的极小字。） */
+  --t-1: 0.6875rem; /* 11px 出处 / 折叠标题 / 页脚 / 行内注释 */
+  --t-2: 1rem;      /* 16px 引导句 / 铅笔边注 / 动作 / 标签 / 逐词释义 / 词卡 */
+  --t-3: 1.375rem;  /* 22px 字标 / 版本块 / 引文 / 更省力的说法 */
+  --t-4: 2.25rem;   /* 36px 主角：书写面与系统版 */
 
   /* 字重：四档 */
   --w-n: 400;
@@ -77,6 +91,12 @@
   /* 真机安全区（iPhone 底部横条）：页脚不许被它压住 */
   --safe-bottom: env(safe-area-inset-bottom, 0px);
 
+  /* ── 阅读宽度 ────────────────────────────────────────────────────────────────
+     打样里 330px 是**文字列**的宽度（`proto/style.css` 的 `.v-a .col`），纸是铺在
+     body 上的**全宽**面。上一版把 330 抄到了纸上 ⇒ 390 的屏上左右各一条 30px 白边。
+     现在把它还原成**内边距**：`--read-pad` = 30px ⇒ 纸全宽、正文列 330。 */
+  --read-pad: 30px;
+
   /* 改写动效时长（本文件唯一的动效）*/
   --rw-out: 420ms;
   --rw-in: 520ms;
@@ -85,14 +105,13 @@
   /* 按压反馈时长（本文件**唯一**的一条 transition 用的时长）：
      `:active` 期间的一点点下沉 + 变淡。`prefers-reduced-motion: reduce` 下显式关掉。*/
   --press: 120ms;
-}
 
-/* ── A 手稿：暖纸 · 墨黑 · 红铅笔批注 ──────────────────────────────────────────
-   对比度（在真浏览器里逐处量，见 tmp/probes/write-ui-check.mjs 的输出）：
-   墨黑 15.1 · 软灰 6.8 · 极淡灰 5.07 · 铅笔 4.9（都以暖纸 #fbf9f4 为底）。
-   ⚠️ 极淡灰用 #726a5e 而不是更浅的 #7a7266：后者是 4.51，**贴着 4.5 的线过**，
-   下次改一改就红。这一版留余量。 */
-.sheet {
+  /* ── A 手稿调色板（暖纸 · 墨黑 · 红铅笔批注）──────────────────────────────────
+     ⚠️ **必须在 `:root`**：它原先挂在 `.sheet` 上，而 `body { background: var(--bg) }`
+     在 body 那一层取不到 `--bg` ⇒ 整条声明按 invalid-at-computed-value-time 失效 ⇒
+     画布透明、回退成白。CSS 不报错、测试不红 —— 只有量 computed 值才看得见。
+     对比度（在真浏览器里逐处量，见 tmp/probes/write-ui-check.mjs 的输出）：
+     墨黑 15.1 · 软灰 6.8 · 极淡灰 5.07 · 铅笔 4.9（都以暖纸 #fbf9f4 为底）。 */
   --bg: #fbf9f4;
   --ink: #1b1a17;
   --ink-soft: #5c574e;
@@ -106,22 +125,6 @@
   --on-accent: #fbf9f4;
   /* 被取代的那一版淡出到这里为止（「划掉 / 淡出」的「淡出」）*/
   --old-veil: 0.22;
-}
-
-/* 页脚（成本告知）与门面缺失那一屏：**不在稿纸主区**，所以另挂一层令牌。
-   成本必须看得见，但它是"这一次花了多少"，不是稿纸上的内容。 */
-.page-foot {
-  --ink-faint: #726a5e;
-  --pencil: #a8562f;
-  --rule: #ded7c9;
-}
-.gate {
-  --ink: #1b1a17;
-  --ink-soft: #5c574e;
-  --ink-faint: #726a5e;
-  --pencil: #a8562f;
-  --rule: #ded7c9;
-  --touch: #f0e9dc;
 }
 
 /* ─────────────────────────────────────────────────────────────────────────────
@@ -139,17 +142,25 @@
   box-sizing: border-box;
 }
 
+/* ── 画布 = 那张纸（根因 ①③ 的落点）────────────────────────────────────────────
+   `html` 与 `body` **各自显式**写成纸色：只写 body 的话，`getComputedStyle(html)`
+   仍然是 `rgba(0,0,0,0)`（"非透明"这条判据就没法钉），而且门槛屏（没有 `.sheet` 的
+   那一屏）会退回白。 */
 html,
 body {
   margin: 0;
   padding: 0;
 }
 
+html {
+  background: var(--bg);
+}
+
 body {
   background: var(--bg);
   color: var(--ink);
   font-family: var(--f-sans);
-  font-size: var(--t-3);
+  font-size: var(--t-2);
   font-weight: var(--w-n);
   line-height: var(--lh-body);
   -webkit-text-size-adjust: 100%;
@@ -160,34 +171,31 @@ body {
   min-height: 100vh;
 }
 
-/* ── 那张纸：单栏窄列 · 零容器 ─────────────────────────────────────────────────
+/* ── 那张纸：**全宽**（根因 ② 的落点）─────────────────────────────────────────
    「零容器」= 全页没有一个方块、一条圆角、一层投影。分节只靠**留白**
-   与一条 1px 规则线（`.hair`）。这一条是 A 手稿的版式主张，不是省事：
-   上一次用户的原话是「许多组件和容器明显不高级」——所以这一版**连一个容器都没有**。*/
+   与一条 1px 规则线（`.hair`）。330px 的阅读宽度由内边距给，不由宽度给。 */
 .sheet {
-  max-width: 330px;
-  margin: 0 auto;
-  padding: var(--s-5) 0 var(--s-6);
+  max-width: none;
+  margin: 0;
+  padding: var(--s-5) var(--read-pad) var(--s-6);
   background: var(--bg);
   color: var(--ink);
 }
 
-/* 页脚在纸外（成本告知）*/
+/* 页脚在纸外（成本告知）。它同样全宽 —— 否则"纸下面那一圈白"会从页脚两侧露出来。*/
 .page-foot {
-  max-width: 330px;
-  margin: 0 auto;
-  padding: 0 0 calc(var(--s-5) + var(--safe-bottom));
+  max-width: none;
+  margin: 0;
+  padding: 0 var(--read-pad) calc(var(--s-5) + var(--safe-bottom));
   font-size: var(--t-1);
   color: var(--ink-faint);
 }
 
 /* ── 页眉：品牌标记 + 字标 ─────────────────────────────────────────────────────
    标记 = 改稿符号里的**插入号**（一个尖 + 一道短横）。打样里它是内联 SVG；
-   这里用 CSS 画（`.bmk::before` 是一个转过 45° 的方框的两条边 = 一个尖，
+   这里用 CSS 画（`.bmk::before` 是转过 45° 的方框的两条边 = 一个尖，
    `.bmk::after` 是那道短横）。为什么不用 SVG：**视图必须能在 Node 的假 DOM 里挂起来**
-   做 mount 测试，而假 DOM 只有 `createElement`、没有 `createElementNS`
-   （`document.createElement('svg')` 在真浏览器里也造不出可渲染的 SVG 元素）。
-   形状比例沿用打样的 20×20 视口（尖顶在 y=3.8、两脚在 y=13.2、横在 y=17）。*/
+   做 mount 测试，而假 DOM 只有 `createElement`、没有 `createElementNS`。 */
 .mast {
   display: flex;
   align-items: baseline;
@@ -233,7 +241,7 @@ body {
 
 /* A 的书名：像书的半扉页 —— 大字、宽字距 */
 .wordmark {
-  font-size: var(--t-4);
+  font-size: var(--t-3);
   font-weight: var(--w-m);
   letter-spacing: 0.26em;
 }
@@ -253,7 +261,7 @@ body {
 
 .src {
   margin: 0;
-  font-size: var(--t-2);
+  font-size: var(--t-1);
   color: var(--ink-faint);
   letter-spacing: 0.02em;
 }
@@ -266,11 +274,33 @@ body {
   white-space: pre-wrap;
 }
 
-/* 段落小标签（「你写的」/「系统版」）—— 极小、宽字距、不当标题用 */
+/* ── 引导句（16px）与"半扉页"引导句（22px）──────────────────────────────────
+   引导句是**一句话**，不是一枚标签。入口屏那句用 `.lede-lead` 放到 22px：
+   入口屏要有排版姿态，不能是"标签 + 灰占位符 + 一颗文字按钮"的表单。 */
+.lede {
+  margin: 0 0 var(--s-3);
+  font-size: var(--t-2);
+  font-weight: var(--w-n);
+  color: var(--ink-soft);
+  line-height: var(--lh-body);
+}
+
+.lede-lead {
+  margin: var(--s-2) 0 var(--s-4);
+  font-family: var(--f-serif);
+  font-size: var(--t-3);
+  font-weight: var(--w-n);
+  line-height: var(--lh-loose);
+  color: var(--ink);
+  letter-spacing: 0.01em;
+}
+
+/* 段落小标签（「你改的」/「系统版」/「你写的这一版」）—— 16px，不当标题用，
+   一屏最多三处（上一版有 5 处 11px 标签，是"外壳比内容多"的主要来源）。*/
 .tab {
   display: block;
   margin: 0 0 var(--s-2);
-  font-size: var(--t-1);
+  font-size: var(--t-2);
   font-weight: var(--w-m);
   letter-spacing: 0.14em;
   color: var(--ink-faint);
@@ -284,16 +314,24 @@ body {
 .en {
   margin: 0;
   font-family: var(--f-serif);
-  font-size: var(--t-5);
+  font-size: var(--t-4);
   font-weight: var(--w-n);
   line-height: var(--lh-loose);
   letter-spacing: -0.004em;
   color: var(--ink);
 }
 
-/* 小一号的英文（候选教点的引文、逐词释义、队列里的句子）*/
+/* 版本块（他写的 / 他改的）：**降一档到 22px**，把主角那一档让给系统版。
+   三块版本不许同款同重 —— 眼睛要有落点：旧版淡出+划掉、新版墨黑、系统版最大。 */
+.en-v {
+  font-size: var(--t-3);
+  line-height: var(--lh-body);
+}
+
+/* 更省力的说法（揭示屏的降难度两档）：22px */
 .en-sm {
-  font-size: var(--t-4);
+  font-size: var(--t-3);
+  line-height: var(--lh-body);
 }
 
 /* 逐词可点：词 = 一个**看起来只是文字**的按钮。零边框零底色零内距，
@@ -315,9 +353,15 @@ body {
   border-radius: var(--r-none);
 }
 
-/* 正在被查的那个词：一个即时的高亮（这一处**不是过渡**）*/
+/* 正在被查的那个词：**一支铅笔的虚线**，不是一块底色。
+   （零容器：全站没有一个方块 —— 一块底色就是最小的那种方块。它同时也不再被
+   "带边框/填充的盒子"那条配额数进去：实测 wordcard 那一屏因此从 5 个降到 4 个。）*/
 .w[aria-expanded='true'] {
-  background: var(--touch);
+  text-decoration: underline;
+  text-decoration-style: dotted;
+  text-decoration-thickness: 1px;
+  text-underline-offset: 0.22em;
+  text-decoration-color: var(--pencil);
 }
 
 /* ── 被标出的那一处：一条波浪细线，**不是一块底色、不带一个字** ──────────────
@@ -340,11 +384,13 @@ body {
 }
 
 /* ── 铅笔边注：系统说的话 = 写在旁边的批注，**不是 UI 卡片** ────────────────────
-   无底 · 无圆角 · 无投影 · 一道 1px 铅笔竖线 · 极小的倾斜。 */
+   无底 · 无圆角 · 无投影 · 一道 1px 铅笔竖线 · 极小的倾斜。
+   ⚠️ 字号是 **16px**（上一版 11px）：一屏能数出 25 处 ≤13px 的小字，其中一大半是
+   这些本该看得清的说明。说明是配角，但配角不等于"小到看不清"。 */
 .note {
   margin: 0 0 var(--s-4) var(--s-5);
-  max-width: 250px;
-  font-size: var(--t-1);
+  max-width: 300px;
+  font-size: var(--t-2);
   font-weight: var(--w-n);
   color: var(--pencil);
   line-height: var(--lh-body);
@@ -370,7 +416,6 @@ body {
   margin: 0;
   padding: 0;
   border: 0;
-  border-bottom: 1px dotted currentColor;
   background: none;
   color: inherit;
   font: inherit;
@@ -379,6 +424,10 @@ body {
   -webkit-appearance: none;
   appearance: none;
   border-radius: var(--r-none);
+  text-decoration: underline;
+  text-decoration-style: dotted;
+  text-decoration-thickness: 1px;
+  text-underline-offset: 0.24em;
 }
 
 .note-issue .issue-kind {
@@ -394,7 +443,7 @@ body {
   border-left-style: dashed;
 }
 
-/* 每处一句为什么（只有揭开系统版之后才存在）*/
+/* 每处一句为什么（只有揭开系统版之后才存在）。16px 正文，一道灰竖线。 */
 .why {
   margin: 0 0 var(--s-4) var(--s-5);
   padding: 0 0 0 var(--s-3);
@@ -404,16 +453,23 @@ body {
 
 .why li {
   margin: 0 0 var(--s-2);
-  font-size: var(--t-1);
+  font-size: var(--t-2);
   color: var(--ink-soft);
   line-height: var(--lh-body);
 }
 
-/* ── 分段输入 ────────────────────────────────────────────────────────────────
-   纪律 ②：一行一段。视觉上它是一道**稿纸上的横线**，不是一个输入框
-   （零容器：没有边框盒、没有底色、没有圆角 —— 只有一条底线）。
-   字号 22px：既是这一版的主角，也顺带避开 iOS 上 <16px 的自动放大。
-   `field-sizing: content` 让它在支持的浏览器里随内容长高；不支持时是固定两行可滚，
+.why li:last-child {
+  margin-bottom: 0;
+}
+
+/* ── 书写面（纪律 ②：分段写 · 一屏一个主角）──────────────────────────────────
+   它**就是这一屏的主角**：一行一段，视觉上是一道稿纸上的横线（零容器：没有边框盒、
+   没有底色、没有圆角 —— 只有一条底线）。
+   ⚠️ 字号 = **主角那一档（`--t-4`）**：上一版是 22px、高度只有 48px，量出来"他动笔的
+   地方"占版面 **4%**（而且那把尺子当时还看不见 `textarea` —— 那个 4% 其实只是**字标**
+   的高度，写作面一个像素都没被算进去）。现在它是这一屏最大的那一块 ≥22px 版面
+   （实测：`draft` 那一屏书写面自己占纸高 24.5%，而纸高里最大的一块就是它）。
+   `field-sizing: content` 让它在支持的浏览器里随内容长高；不支持时是可滚的固定高度，
    **功能不依赖它**（渐进增强，不是必需件）。 */
 .seg {
   display: block;
@@ -431,23 +487,39 @@ body {
   line-height: var(--lh-loose);
   resize: none;
   field-sizing: content;
-  min-height: 2.2em;
   -webkit-appearance: none;
   appearance: none;
 }
 
+/* 占位符**不是内容**：它小一号、走无衬线、灰。
+   ⚠️ 这一条是看图之后改的：占位符原先继承 36px 衬线斜体 ⇒ 空的书写面看起来像
+   已经写满了一样（"Nothing special today." 在空屏上像是他写的）。字号不继承之后，
+   空屏读起来才是"一张等着被写的纸 + 一个小例子"。 */
 .seg::placeholder {
   color: var(--ink-faint);
+  font-family: var(--f-sans);
+  font-size: var(--t-2);
   font-style: italic;
+  letter-spacing: 0;
 }
 
-/* 分段输入的序号槽（"1 / 2 / 3"）：极小灰字，不抢戏 */
-.seg-no {
-  display: block;
-  font-size: var(--t-1);
-  color: var(--ink-faint);
-  letter-spacing: 0.14em;
-  margin: 0 0 var(--s-1);
+/* 入口屏那一块：他今天要说的那句话就写在这儿 ⇒ 给它整屏最大的那一块版面 */
+.seg-lead {
+  min-height: 6.4em;
+}
+
+/* 从零写那一屏：一段一块。两块合起来就是这一屏的主角 ——
+   ⚠️ 这不是"空着的地方"：它是一张等着被写的稿纸（实测：这一屏的书写面占纸高 28%+，
+   而上一版他动笔的地方只有一根 48px 高的细条）。 */
+.seg-part {
+  min-height: 4.4em;
+}
+
+/* 可选的素材格：次要，所以小一号、矮一截 */
+.seg-material {
+  min-height: 2.6em;
+  font-size: var(--t-2);
+  font-family: var(--f-sans);
 }
 
 /* ── 靠了多大力：**一枚离散标记**，不是进度条、不是分数 ─────────────────────────
@@ -484,19 +556,13 @@ body {
 
 /* ── 动作：贴着段落末尾的文字按钮 —— 无实心底色，只有描边（下划线）────────────
    A 手稿的主操作语言。没有 `.primary` 实心块：这一版里"哪个是主操作"
-   靠字重（700 vs 500）与下划线样式（实线 vs 点线）分，不靠色块。 */
-.acts {
-  display: flex;
-  flex-wrap: wrap;
-  gap: var(--s-4) var(--s-5);
-  padding: 0 0 var(--s-5);
-}
-
+   靠字重（700 vs 500）与下划线样式（实线 vs 点线）分，不靠色块。
+   ⚠️ 下划线用 `text-decoration` 而**不是** `border-bottom`：它是"一个带下划线的字"，
+   不是"一个盒子"。这也让"带边框/填充的盒子 ≤4"那条配额量的是真正的盒子。 */
 .do {
   margin: 0;
-  padding: 0 0 3px;
+  padding: 0;
   border: 0;
-  border-bottom: 1px solid currentColor;
   background: none;
   color: var(--ink-soft);
   font-family: inherit;
@@ -507,6 +573,9 @@ body {
   -webkit-appearance: none;
   appearance: none;
   border-radius: var(--r-none);
+  text-decoration: underline;
+  text-decoration-thickness: 1px;
+  text-underline-offset: 0.28em;
   /* 全文件**唯一**的一条 transition：按压反馈。
      纪律 ⑦ 的后半句"另放开一条 :active 按压反馈"说的就是这一条。 */
   transition: opacity var(--press) ease-out, transform var(--press) ease-out;
@@ -518,7 +587,7 @@ body {
 }
 
 .do-alt {
-  border-bottom-style: dotted;
+  text-decoration-style: dotted;
 }
 
 .do:active {
@@ -528,9 +597,17 @@ body {
 
 .do[disabled] {
   color: var(--ink-faint);
-  border-bottom-color: var(--rule);
+  text-decoration-color: var(--rule);
   cursor: default;
   opacity: 1;
+}
+
+.acts {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: var(--s-4) var(--s-5);
+  padding: 0 0 var(--s-5);
 }
 
 /* 「在想…」——加载态。它**不是**转圈动画（动效只留给改写这一处），
@@ -538,46 +615,56 @@ body {
 .busy {
   margin: 0;
   padding: 0 0 var(--s-4);
-  font-size: var(--t-1);
+  font-size: var(--t-2);
   color: var(--ink-faint);
   letter-spacing: 0.06em;
 }
 
-/* ── 教点 2–3 选一（选择做在**内容层**，不做在"要不要继续"）────────────────────
-   每个候选一颗按钮，按钮上写的就是"教什么"（label），下面挂着他那版里的引文。 */
+/* ── 教点 2–3 选一（选择做在**内容层**）───────────────────────────────────────
+   形态 = **铅笔注**（与 `.note` 同一套语言），不是带边框的行列表。
+   每条 = 一句"教什么"（16px，自己可点）+ 一处引文（22px 衬线，逐词可点）。
+   ⚠️ 引文**只出现一次**：上一版在每条候选下面重复渲染一遍草稿片段，
+   那正是产品负责人说的"套了个壳子"。 */
 .pick {
   padding: 0 0 var(--s-4);
 }
 
 .pick-item {
-  margin: 0 0 var(--s-4);
+  margin: 0 0 var(--s-4) var(--s-5);
+  padding: var(--s-2) 0 var(--s-2) var(--s-3);
+  border-left: 1px solid var(--pencil);
+  transform: rotate(-0.4deg);
+  transform-origin: left center;
 }
 
 .pick-do {
   display: block;
-  width: 100%;
   margin: 0;
-  padding: 0 0 var(--s-1);
+  padding: 0;
   border: 0;
-  border-bottom: 1px solid var(--rule);
   background: none;
   color: var(--ink);
   font-family: inherit;
-  font-size: var(--t-3);
+  font-size: var(--t-2);
   font-weight: var(--w-m);
   text-align: left;
   cursor: pointer;
   -webkit-appearance: none;
   appearance: none;
   border-radius: var(--r-none);
+  text-decoration: underline;
+  text-decoration-style: dotted;
+  text-decoration-thickness: 1px;
+  text-underline-offset: 0.28em;
 }
 
 .pick-quote {
   display: block;
   margin: var(--s-2) 0 0;
   font-family: var(--f-serif);
-  font-size: var(--t-2);
+  font-size: var(--t-3);
   font-weight: var(--w-n);
+  line-height: var(--lh-loose);
   color: var(--ink-soft);
 }
 
@@ -586,7 +673,7 @@ body {
    所以只有一道 1px 竖线 + 缩进。 */
 .cardwrap {
   margin: var(--s-3) 0 var(--s-4) var(--s-5);
-  max-width: 250px;
+  max-width: 300px;
   padding-left: var(--s-3);
   border-left: 1px solid var(--rule);
   color: var(--ink);
@@ -600,7 +687,7 @@ body {
 
 .wc-w {
   font-family: var(--f-serif);
-  font-size: var(--t-3);
+  font-size: var(--t-2);
   font-weight: var(--w-b);
   color: var(--pencil);
 }
@@ -637,19 +724,22 @@ body {
 
 .wc-do {
   margin: 0;
-  padding: 0 0 2px;
+  padding: 0;
   border: 0;
-  border-bottom: 1px dotted currentColor;
   background: none;
   color: var(--ink-soft);
   font-family: inherit;
-  font-size: var(--t-1);
+  font-size: var(--t-2);
   font-weight: var(--w-m);
   letter-spacing: 0.04em;
   cursor: pointer;
   -webkit-appearance: none;
   appearance: none;
   border-radius: var(--r-none);
+  text-decoration: underline;
+  text-decoration-style: dotted;
+  text-decoration-thickness: 1px;
+  text-underline-offset: 0.28em;
 }
 
 /* 提示类别（纪律：1 级只问「卡在哪类」）—— 三个词，一行排开 */
@@ -662,9 +752,8 @@ body {
 
 .cat {
   margin: 0;
-  padding: 0 0 2px;
+  padding: 0;
   border: 0;
-  border-bottom: 1px solid var(--rule);
   background: none;
   color: var(--ink-soft);
   font-family: inherit;
@@ -675,6 +764,10 @@ body {
   -webkit-appearance: none;
   appearance: none;
   border-radius: var(--r-none);
+  text-decoration: underline;
+  text-decoration-style: dotted;
+  text-decoration-thickness: 1px;
+  text-underline-offset: 0.28em;
 }
 
 /* ── 折叠块：我的句子 / 我的词 / 待重写 ────────────────────────────────────────
@@ -771,22 +864,26 @@ body {
   border-bottom: 1px solid var(--rule);
 }
 
-/* ── 逐词释义（只有揭开之后才有：它来自 reveal().glosses）───────────────────── */
+/* ── 逐词释义（只有揭开之后才有：它来自 reveal().glosses）─────────────────────
+   一行一个词，**不带小标签**（"这句里值得记的"是外壳，不是内容）：词的本身用铅笔
+   衬线起头。16px —— 它是给人读的，不是给计数器的。 */
 .gloss {
   margin: 0 0 var(--s-2);
   font-size: var(--t-2);
   color: var(--ink-soft);
+  line-height: var(--lh-body);
 }
 
 .gloss .gloss-w {
   font-family: var(--f-serif);
+  font-size: var(--t-2);
   font-weight: var(--w-b);
   color: var(--ink);
 }
 
 .gloss .gloss-pos {
   font-style: italic;
-  font-size: var(--t-1);
+  font-size: var(--t-2);
   opacity: 0.72;
   margin-left: var(--s-2);
 }
@@ -796,16 +893,25 @@ body {
 }
 
 /* 降难度两档：两条更低台阶的说法。仍然零容器 —— 只有一道竖线（同批注的语言），
-   但颜色是灰不是铅笔色：它是"给你一个更省力的说法"，不是"我指出你错在哪"。 */
-.simpler {
-  margin: 0 0 var(--s-3) var(--s-5);
+   但颜色是灰不是铅笔色：它是"给你一个更省力的说法"，不是"我指出你错在哪"。
+   两条共用**同一道**竖线：各带一条会让"带边框/填充的盒子"多出一个。 */
+.simpler-wrap {
+  margin: 0 0 var(--s-4) var(--s-5);
   padding: 0 0 0 var(--s-3);
   border-left: 1px solid var(--rule);
 }
 
+.simpler {
+  margin: 0 0 var(--s-3);
+}
+
+.simpler:last-child {
+  margin-bottom: 0;
+}
+
 .simpler-lab {
   display: block;
-  font-size: var(--t-1);
+  font-size: var(--t-2);
   color: var(--ink-faint);
   letter-spacing: 0.1em;
   margin: 0 0 var(--s-1);
@@ -863,7 +969,7 @@ body {
   /* 按压反馈：**不删那条 transition**，把它的时长令牌改成 0。
      这样"全文件恰好一条 transition"这句话在任何偏好下都成立 ——
      否则 reduce 分支里会多出第二条 `transition: none` 声明，判据就得跟着放宽，
-     而"放宽判据去迁就实现"是本项目明令禁止的（任务书红线 7）。 */
+     而"放宽判据去迁就实现"是本项目明令禁止的（任务书红线 3）。 */
   :root {
     --press: 0ms;
   }
@@ -872,11 +978,12 @@ body {
 /* ── 门面还没接上 / 没配 Key：两屏"不撞墙"的兜底 ────────────────────────────────
    纪律 ⑩：没配 Key 时**当场给出完整引导**（为什么需要 / 去哪拿 / `sk-` 形状 /
    只存本机），不白屏不报错。门面缺失同理：如实说"引擎还没接上"，**不用假数据顶上**。
-   这一层是纸外的一屏，所以允许有自己的边距；但它同样零容器、零圆角、零投影。 */
+   ⚠️ 这两屏**没有 `.sheet`**（它们不是稿纸）—— 所以"它也是纸"这件事由 `html`/`body`
+   的背景承担（根因 ①③）。布局上它们与纸**同宽同边距**：全宽 + `--read-pad`。 */
 .gate {
-  max-width: 330px;
-  margin: 0 auto;
-  padding: var(--s-5) 0 calc(var(--s-6) + var(--safe-bottom));
+  max-width: none;
+  margin: 0;
+  padding: var(--s-5) var(--read-pad) calc(var(--s-6) + var(--safe-bottom));
   color: var(--ink);
 }
 
@@ -884,7 +991,8 @@ body {
   margin: 0 0 var(--s-4);
   font-size: var(--t-4);
   font-weight: var(--w-m);
-  letter-spacing: 0.2em;
+  letter-spacing: 0.06em;
+  line-height: var(--lh-tight);
 }
 
 .gate p {
@@ -916,6 +1024,6 @@ body {
 
 .gate .gate-err {
   margin: 0 0 var(--s-3);
-  font-size: var(--t-1);
+  font-size: var(--t-2);
   color: var(--pencil);
 }

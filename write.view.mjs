@@ -405,10 +405,12 @@ function sourceSeg(doc, snapshot, handlers) {
   sec.setAttribute('data-block', 'src');
 
   if (snapshot.step === 'source') {
-    sec.append(el(doc, 'p', 'src', '用中文说一句你今天的（或你想说的）事；也可以顺便贴一段素材。'));
+    // 入口屏的**排版姿态**：一句大引导 + 一整块书写面。
+    // 它不是一个"标签 + 灰占位符 + 一颗按钮"的表单 —— 那一版被产品负责人判为
+    // "像设置页"。这里的书写面就是这一屏的主角（≥22px 的那块版面）。
+    sec.append(el(doc, 'p', 'lede lede-lead', '用中文说一句，今天你过得怎么样。'));
 
-    sec.append(el(doc, 'span', 'tab', '你说的'));
-    const box = el(doc, 'textarea', 'seg');
+    const box = el(doc, 'textarea', 'seg seg-lead');
     box.setAttribute('data-in', 'source');
     box.setAttribute('rows', '2');
     box.setAttribute('placeholder', '例如：今天没什么特殊的，我正常上了半天课');
@@ -419,11 +421,12 @@ function sourceSeg(doc, snapshot, handlers) {
     // 贴素材是**可选**的第二格。为什么分成两格而不是一格：门面收的就是
     // `startSentence({chinese, material})` 两个字段 —— 让它们各有一个来源，
     // 比在装配层猜"这一坨算中文还是算素材"诚实。
-    sec.append(el(doc, 'span', 'tab', '或者贴一段素材（可选）'));
-    const mat = el(doc, 'textarea', 'seg');
+    // ⚠️ 它的说明收在 `placeholder` 里（占位符不是元素、不占版面）：
+    //    "一格标签 + 一格占位符"正是这一版要治的形态（标签是配角，配角要少）。
+    const mat = el(doc, 'textarea', 'seg seg-material');
     mat.setAttribute('data-in', 'material');
-    mat.setAttribute('rows', '2');
-    mat.setAttribute('placeholder', '一段英文/中文的原文都行');
+    mat.setAttribute('rows', '1');
+    mat.setAttribute('placeholder', '也可以贴一段素材（可选）：一段英文或中文的原文都行');
     mat.value = String(snapshot.materialInput ?? '');
     mat.addEventListener('input', () => { handlers.on('materialInput', mat.value); });
     sec.append(mat);
@@ -434,7 +437,7 @@ function sourceSeg(doc, snapshot, handlers) {
     return sec;
   }
 
-  sec.append(el(doc, 'span', 'tab', '你说的'));
+  // 纸已经写起来了：出处只剩一行极小的灰字（它是配角，不再带标签）。
   sec.append(el(doc, 'p', 'src', snapshot.chinese));
   if (typeof snapshot.material === 'string' && snapshot.material !== '') {
     sec.append(el(doc, 'p', 'material', snapshot.material));
@@ -449,7 +452,8 @@ function paintStep(doc, body, snapshot, handlers) {
 
   if (step === 'draft') {
     // 「从零写」：分段输入。**没有提示、没有答案、没有一个示范词。**
-    body.append(tab(doc, '你写的（一段一段写，不用一口气打完）'));
+    // 引导语是 16px 的一句话（不是 11px 的小标签）—— 这一屏的主角是下面那块书写面。
+    body.append(el(doc, 'p', 'lede', '一段一段写，不用一口气打完；写完再挑一处说好它。'));
     appendSegInputs(doc, body, snapshot.draftSegs, 'draft', handlers);
   }
 
@@ -457,9 +461,9 @@ function paintStep(doc, body, snapshot, handlers) {
 
   if (step !== 'draft') {
     // 第一版已经交出去了：留在纸上（被取代之后划掉淡出）——
-    // 这就是纪律 ①「一条不断长的稿纸」：旧版不消失，新内容往下接。
+    // 这就是纪律 ①「一条不断长的纸」：旧版不消失，新内容往下接。
     if (typeof snapshot.version1 === 'string' && snapshot.version1 !== '') {
-      body.append(tab(doc, step === 'choose' ? '你写的这一版' : '你写的第一版'));
+      if (step === 'choose') body.append(el(doc, 'p', 'tab', '你写的这一版'));
       const host = el(doc, 'div');
       host.setAttribute('data-block', 'v1');
       host.append(enBlock(doc, snapshot.version1, {
@@ -467,7 +471,11 @@ function paintStep(doc, body, snapshot, handlers) {
         block: 'v1',
         flag: snapshot.issue === null ? null : snapshot.issue.quote,
         cardKey: cardKeyIn(snapshot, 'v1'),
-        // 揭开之后他就是"上一版"了：划掉 + 淡出。没揭开之前它还是当前那一版。
+        // 版本史的三块**不许同款同重**（眼睛要有落点）：
+        //   他写的第一版 = 22px 划掉淡出（旧）／他改的 = 22px 墨黑（新）／系统版 = 32px 主角。
+        // 所以 v1 只在**没有 v2 作对照**的那几屏（choose/marked/revise）留在 32px，
+        // 一旦揭示屏把它俩并排放在一起，两版一起降到 22px，把 32px 让给系统版。
+        enClass: step === 'reveal' || step === 'rewrite' ? 'en en-v' : 'en',
         state: step === 'reveal' ? 'old' : undefined,
         // ⚠️ 动效类**只在改写发生的那一次重画**上加（`snapshot.anim`）——
         // 若按 `step === 'reveal'` 加，之后每次重画（展开折叠块、点词卡）都会重播一遍。
@@ -558,18 +566,19 @@ const cardKeyIn = (snapshot, block) => (
     : null
 );
 
-/* ── 分段输入（纪律 ②）──────────────────────────────────────────────────────── */
+/* ── 分段输入（纪律 ②）────────────────────────────────────────────────────────
+   一行一段。**没有"1 / 2 / 3"的序号槽**：那是标签，而这一屏的主角是这几行本身。
+   序号由 placeholder 的措辞承担（第一格给例句，后面的说"接着写下一段"）。 */
 function appendSegInputs(doc, host, segs, kind, handlers) {
   const list = Array.isArray(segs) && segs.length > 0 ? segs : [''];
   list.forEach((value, i) => {
-    const no = el(doc, 'span', 'seg-no', String(i + 1));
-    const box = el(doc, 'textarea', 'seg');
+    const box = el(doc, 'textarea', 'seg seg-part');
     box.setAttribute('data-in', `${kind}-${String(i)}`);
     box.setAttribute('rows', '1');
     box.setAttribute('placeholder', i === 0 ? 'Nothing special today.' : '接着写下一段…');
     box.value = String(value ?? '');
     box.addEventListener('input', () => { handlers.on(`${kind}Input`, { index: i, value: box.value }); });
-    host.append(no, box);
+    host.append(box);
   });
 }
 
@@ -619,18 +628,20 @@ function hintButtons(doc, snapshot, handlers) {
     : [button(doc, '再给一点', 'do do-alt', () => handlers.on('hintAgain'), 'hint-again')];
 }
 
-/* ── 挑教点：2–3 选一（选在**内容层**）──────────────────────────────────────── */
+/* ── 教点 2–3 选一（选在**内容层**）────────────────────────────────────────────
+   形态 = **铅笔注**（与 `.note` 同一套语言），**不是带边框的行列表**。
+   上一版把三个候选做成三条带下划线的整行按钮，还在每条下面重复渲染一遍草稿片段 ——
+   那是"盒子 + 重复内容"，正是产品负责人说的"套了个壳子"。现在：
+     · 一行 16px 的引导（"挑一个你最想弄明白的"）；
+     · 三条铅笔注，每条 = 一句"教什么"（16px，自己可点）+ 一处引文（22px 衬线，逐词可点）。
+   候选按钮的**文字仍然恰好是 label 本身**（引文是它的兄弟节点）：本仓 mount 测试按按钮
+   文案精确匹配 —— 引文塞进按钮里，真 DOM 与假 DOM 下的"按钮文案"就会不一样。 */
 function paintChoose(doc, host, snapshot, handlers) {
   if (Array.isArray(snapshot.candidates) && snapshot.candidates.length > 0) {
-    host.append(tab(doc, '这一段里，挑一个你最想弄明白的'));
+    host.append(el(doc, 'p', 'lede', '这一段里，挑一个你最想弄明白的。'));
     const box = el(doc, 'div', 'pick');
     box.setAttribute('data-layer', 'candidates');
     for (const c of snapshot.candidates) {
-      // ⚠️ 候选按钮的**文字就是 label 本身**（引文是它的**兄弟节点**，不是孩子）：
-      // 本仓 mount 测试按按钮文案匹配，而"按钮文案"在真 DOM 里是**子孙文本的拼接**、
-      // 在 `tests/helpers/dom.mjs` 的假 DOM 里是**一个普通属性**。把引文塞进按钮里，
-      // 两种 DOM 下按钮的文案就不一样了 —— 于是"按文案匹配"在真浏览器与单测里
-      // 会指向不同的东西（这正是本仓反复踩过的那类假绿）。分开之后两边逐字一致。
       const row = el(doc, 'div', 'pick-item');
       row.append(button(doc, c.label, 'pick-do', () => handlers.on('pick', c.key), `pick-${c.key}`));
       const q = el(doc, 'span', 'pick-quote');
@@ -668,26 +679,31 @@ function paintIssue(doc, host, snapshot, handlers) {
   host.append(note);
 }
 
-/* ── 揭开系统版：改完才有（三条不许提前的第 ① 条）──────────────────────────── */
+/* ── 揭开系统版：改完才有（三条不许提前的第 ① 条）────────────────────────────
+   版本史的**三种重量**（这一屏的落点就在这里，上一版三块一模一样大 ⇒ 眼睛没有落点）：
+     他改的（v2）  = 22px 墨黑（`.is-new`）
+     系统版        = 32px 主角（这一屏唯一的大字）
+     他写的第一版  = 22px 划掉淡出（`.is-old`，在 `paintStep` 里画，排在更上面）
+   为什么系统版才是主角：他爬到这一屏就是为了看"更好的那一版长什么样"。 */
 function paintReveal(doc, host, snapshot, handlers) {
   const revealed = snapshot.revealed === true
     && typeof snapshot.system === 'string' && snapshot.system !== '';
   if (!revealed) return;
 
-  // 他改完的那一版：新版浮现（动效只发生在这一处）
+  // 他改完的那一版（新版浮现；动效只发生在这一处）
   if (typeof snapshot.version2 === 'string' && snapshot.version2 !== '') {
-    host.append(tab(doc, '你改的'));
+    host.append(el(doc, 'p', 'tab', '你改的'));
     const hostV2 = el(doc, 'div');
     hostV2.setAttribute('data-block', 'v2');
     hostV2.append(enBlock(doc, snapshot.version2, {
       onWord: onWordHandler(handlers), block: 'v2', cardKey: cardKeyIn(snapshot, 'v2'),
-      state: 'new', anim: snapshot.anim === true,
+      enClass: 'en en-v', state: 'new', anim: snapshot.anim === true,
     }));
     host.append(hostV2);
     attachCard(doc, hostV2, 'v2', snapshot, handlers);
   }
 
-  host.append(tab(doc, '系统版'));
+  host.append(el(doc, 'p', 'tab', '系统版'));
   const hostSys = el(doc, 'div');
   hostSys.setAttribute('data-block', 'system');
   hostSys.append(enBlock(doc, snapshot.system, {
@@ -696,7 +712,8 @@ function paintReveal(doc, host, snapshot, handlers) {
   host.append(hostSys);
   attachCard(doc, hostSys, 'system', snapshot, handlers);
 
-  // 每处一句为什么
+  // 每处一句为什么：写在**铅笔边注**里（16px 的正文，不是 11px 的小灰条）。
+  // 上一版把它做成 `ul.why` 里两条 11px 的 li —— 一屏能数出 25 处小字，其中一大半是它。
   if (Array.isArray(snapshot.why) && snapshot.why.length > 0) {
     const ul = el(doc, 'ul', 'why');
     ul.setAttribute('data-layer', 'why');
@@ -704,11 +721,12 @@ function paintReveal(doc, host, snapshot, handlers) {
     host.append(ul);
   }
 
-  // 降难度两档
+  // 降难度两档：两条更省力的说法（标签 16px + 英文 22px）。
+  // 两条共用**同一道铅笔竖线**（`.simpler-wrap`）—— 上一版两条各带一条竖线，
+  // 于是"带边框/填充的盒子"多出一个（wordcard 那一屏实测 6 个，配额是 4）。
   const simpler = snapshot.simpler;
   if (simpler !== null && simpler !== undefined && (simpler.half || simpler.easy)) {
-    const box = el(doc, 'div');
-    box.setAttribute('data-layer', 'simpler');
+    const wrap = el(doc, 'div', 'simpler-wrap');
     for (const [k, label] of [['half', '再简单一点'], ['easy', '最简单']]) {
       const text = simpler[k];
       if (typeof text !== 'string' || text === '') continue;
@@ -721,20 +739,21 @@ function paintReveal(doc, host, snapshot, handlers) {
         onWord: onWordHandler(handlers), block: `simpler-${k}`, cardKey: cardKeyIn(snapshot, `simpler-${k}`),
       });
       row.append(p);
-      box.append(row);
+      wrap.append(row);
       attachCard(doc, row, `simpler-${k}`, snapshot, handlers);
     }
-    host.append(box);
+    host.append(wrap);
   }
 
-  // 逐词释义（来自 reveal().glosses）：这句里值得记的词
+  // 逐词释义（来自 reveal().glosses）：这句里值得记的词。
+  // ⚠️ 它**不再自带一行小标签**（"这句里值得记的"是外壳，不是内容）——
+  //   词的本身用铅笔衬线起头，一行一个。
   if (Array.isArray(snapshot.glosses) && snapshot.glosses.length > 0) {
-    host.append(tab(doc, '这句里值得记的'));
     const box = el(doc, 'div');
     box.setAttribute('data-layer', 'glosses');
     for (const g of snapshot.glosses) {
       const row = el(doc, 'p', 'gloss');
-      row.append(el(doc, 'span', 'gloss-w', g.word));
+      row.append(el(doc, 'b', 'gloss-w', g.word));
       if (typeof g.pos === 'string' && g.pos !== '') row.append(el(doc, 'i', 'gloss-pos', g.pos));
       if (typeof g.zh === 'string' && g.zh !== '') row.append(el(doc, 'span', 'gloss-zh', g.zh));
       box.append(row);
