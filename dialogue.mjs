@@ -16,7 +16,7 @@
 // ===========================================================================
 // Task 12：作品回看与导出（兑现设计稿 §8 的"拥有感"与 §11 风险 3 的长期语料）
 // ===========================================================================
-//   · 作品按 `WORK_KEY` 落在**调用方注入的那个 storage** 上（`web/dialogue.html` 注的是
+//   · 作品按 `WORK_KEY` 落在**调用方注入的那个 storage** 上（`web/index.html` 注的是
 //     `localStorage`）⇒ 刷新页面 / 关标签页再打开，回看与导出里**东西还在**。
 //   · **读回发生在挂载时**（`readWork(storage)`，坏数据安全回退成空作品）；
 //     **写回发生在回合落定之后**（学习者那句 + 系统回复那句都渲染完之后，一次 `appendTurn`）。
@@ -50,7 +50,7 @@
 //    护栏：焦点释义本身为空串时退回"某个说法"（**空串不能被拼成 `围绕「」`**）。
 //
 // ③ **入口守卫**（计划没有）：`root` 不是容器 ⇒ 响亮抛 TypeError，与 `web/app.mjs` 的
-//    `mount` 同口径。理由不是洁癖：`web/dialogue.html`（Task 11）里一个拼错的容器 id
+//    `mount` 同口径。理由不是洁癖：`web/index.html`（Task 11 的入口页，Task 16 换成站点首页）里一个拼错的容器 id
 //    会让 `root.replaceChildren` 抛 "Cannot read properties of null"——那句话指向
 //    **DOM 内部**，而真因是"容器没找到"。同族代价 `profile.mjs` 的 storage 守卫已登记。
 //
@@ -138,7 +138,7 @@ const LEARNER_STATE = 'untouched';
  */
 function assertRoot(root) {
   if (root === null || root === undefined || typeof root.replaceChildren !== 'function') {
-    throw new TypeError('mountDialogue: 需要传入一个容器元素（web/dialogue.html 里的容器）');
+    throw new TypeError('mountDialogue: 需要传入一个容器元素（web/index.html 里的容器）');
   }
 }
 
@@ -202,7 +202,7 @@ function sceneFor(scenes, focus) {
  *   - `download`：导出作品的下载出口，形状 `({ filename, text }) => void`。**可注入是为了
  *     能在 Node 里测**（`Blob` 与 `URL.createObjectURL` 是浏览器 API，假 DOM 里没有）；
  *     不注入、或它自己抛错时，导出退化成"摊出一个只读的 JSON 框让学习者自己复制"——
- *     绝不允许"按了导出什么都没发生"（同族：`web/dialogue.html` 的失败路径都要有出口）。
+ *     绝不允许"按了导出什么都没发生"（同族：`web/index.html` 的失败路径都要有出口）。
  *   - `Blob` / `urlFactory`：**只在测试里注入**（浏览器里它们就是全局的）。
  *     `urlFactory` 的形状是 `{ createObjectURL, revokeObjectURL }`，缺省取 `globalThis.URL`。
  * @returns {Promise<void>}
