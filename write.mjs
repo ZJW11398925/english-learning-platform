@@ -193,6 +193,37 @@ function browserSpeak(surface) {
   }
 }
 
+/** 词库模块的位置（`web/units/lexicon.mjs`）。**同源静态数据**，不是接口、不是 CDN。 */
+export const LEXICON_URL = './units/lexicon.mjs';
+
+/**
+ * 造一个**惰性**的词库查词器：第一次点词才 `import` 词库模块、才可能发第一个请求。
+ *
+ * 为什么要惰性：一是首屏不许预拉词库（门 G8 钉着）；二是词库模块或数据缺失时
+ * **页面其余部分照常能用**（查词是一个附加能力，不是这一页能不能开的前提）。
+ * 代价：第一次点词多一次模块加载——可接受，且只在真的点词时付。
+ *
+ * @param {object} deps `mountWrite` 的注入点（走查台/测试可以整个换掉）
+ * @returns {() => Promise<(word: string) => Promise<object|null>>}
+ */
+function makeLazyLookup(deps) {
+  if (typeof deps.lookup === 'function') return async () => deps.lookup;
+  let pending = null;
+  return async () => {
+    if (pending === null) {
+      pending = (async () => {
+        const mod = await import(deps.lexiconUrl ?? LEXICON_URL);
+        const lex = mod.createLexicon({
+          ...(typeof deps.fetchImpl === 'function' ? { fetch: deps.fetchImpl } : {}),
+          ...(deps.storage === undefined ? {} : { storage: deps.storage }),
+        });
+        return (w) => lex.lookup(w);
+      })();
+    }
+    return pending;
+  };
+}
+
 /**
  * 把「今天的一句」挂到 `root` 上。
  *
@@ -217,6 +248,14 @@ export async function mountWrite(root, deps = {}) {
   }
   const keyring = deps.keyring ?? createKeyring();
   const speak = typeof deps.speak === 'function' ? deps.speak : browserSpeak;
+
+  /**
+   * 词库查词口（**惰性**：第一次点词才加载词库模块）。
+   * 注入 `deps.lookup` 可以整个换掉它（单测/门用假词库）；注入 `deps.fetchImpl`
+   * 可以只换取数口（真词库 + 可控请求，门 G8 就是这么数请求的）。
+   */
+  const resolveLookup = makeLazyLookup(deps);
+  let lookupWord = null;
 
   /** 视图快照。**唯一**的一份界面状态；每次改完都整棵重画（本页零组件状态）。 */
   let snap = emptySnapshot();
@@ -713,20 +752,48 @@ export async function mountWrite(root, deps = {}) {
     },
     gotoReveal() { snap.step = 'reveal'; },
 
-    /* ── 词卡：发音 / 加进我要学的 ──────────────────────────────────────── */
+    /* ── 词卡：**主源是词库** + 发音 / 加进我要学的 ─────────────────────── */
     async word({ key, surface, block }) {
       const same = snap.card !== null && snap.card.key === key && snap.card.block === block;
       if (same) { snap.card = null; return; }        // 再点一次收起
       await run(async () => {
         try {
+          // ⚠️ **点词只多一次词库请求（同源静态文件），不新增任何模型调用**：
+          //    成本纪律是"一个回合 ≤2 次模型调用"，而 `facade.wordCard()` 只是读引擎
+          //    状态里已有的那几条释义（零网络）。这一条有门 G8 与单测钉着。
           const c = facade.wordCard(key);
           const obj = (c !== null && typeof c === 'object') ? c : {};
+
+          // 词库是**主源**。查不到时如实留 `null` —— 不拿引擎那条释义冒充"词库的"，
+          // 也不因为词库没收录就把引擎那条释义一起丢掉（它仍是有效信息，标出处即可）。
+          let lex = null;
+          let lexError = null;
+          if (lookupWord === null) {
+            try {
+              lookupWord = await resolveLookup();
+            } catch (err) {
+              // 词库模块加载不了 ⇒ 这一页照常能用，只是查词退化成"只有引擎那条释义"。
+              lexError = `词库没能加载：${String(err?.message ?? err)}`;
+            }
+          }
+          if (lookupWord !== null) {
+            try {
+              lex = await lookupWord(key);
+            } catch (err) {
+              // "取片失败"与"词库没这一条"是两件事：前者是这一次没取到（可以再试），
+              // 后者是词典里确实没有。混成一句会把真因藏起来（本项目最怕的那种错）。
+              lexError = String(err?.message ?? err);
+            }
+          }
+
           snap.card = {
             key,
             surface: String(surface ?? key),
             pos: typeof obj.pos === 'string' ? obj.pos : null,
             zh: typeof obj.zh === 'string' ? obj.zh : null,
             hasGloss: obj.hasGloss === true,
+            lex,
+            lexError,
             block,
           };
           ui.failReason = null;

@@ -1,0 +1,389 @@
+{
+  "v": 1,
+  "source": {
+    "repo": "https://github.com/skywind3000/ECDICT",
+    "url": "https://raw.githubusercontent.com/skywind3000/ECDICT/master/ecdict.csv",
+    "file": "ecdict.csv",
+    "bytes": 65933428,
+    "sha256": "1a6947e04785db63613a92e14903cdae7954f7e84860b10e68e5c7cbb3f9c3cf",
+    "rows": 770611
+  },
+  "license": {
+    "name": "MIT",
+    "file": "LICENSE-ECDICT.txt",
+    "copyright": "Copyright (c) 2025 Linwei"
+  },
+  "rules": {
+    "oxford": "oxford > 0",
+    "collins": "collins >= 1",
+    "tag": "tag 非空（cet4/cet6/ky/toefl/ielts/gre/zk/gk）",
+    "frq": "frq <= 30000",
+    "bnc": "bnc <= 30000",
+    "frequencyCap": 30000,
+    "dedupe": "词头按小写去重（同词头保留先出现的那条）"
+  },
+  "counts": {
+    "entries": 38243,
+    "shards": 82,
+    "buckets": 27,
+    "inflectionKeys": 28774,
+    "inflectionConflicts": 91,
+    "defTrimmedToFirstSentence": 29647,
+    "lostIfFreqCap20000": 10382,
+    "posColumnNonEmptyInSource": 0,
+    "posDerivedFromTranslation": 34740,
+    "literalNlInTranslation": 15960,
+    "literalNlInDefinition": 15047,
+    "hits": {
+      "oxford": 3461,
+      "collins": 13633,
+      "tag": 14942,
+      "frq": 26964,
+      "bnc": 28589
+    },
+    "onlyOne": {
+      "oxford": 114,
+      "collins": 1224,
+      "tag": 1632,
+      "frq": 5524,
+      "bnc": 7638
+    }
+  },
+  "sizes": {
+    "shardsBytes": 6959266,
+    "inflectBytes": 618838,
+    "grandTotalBytes": 7578104,
+    "maxShard": {
+      "name": "m",
+      "bytes": 381104
+    },
+    "maxShardLimitBytes": 409600,
+    "totalLimitBytes": 8388608,
+    "perShard": {
+      "a__b": 27038,
+      "a__c": 39543,
+      "a__d": 34636,
+      "a__f": 12019,
+      "a__g": 14155,
+      "a__i": 11429,
+      "a__l": 35993,
+      "a__m": 22096,
+      "a__n": 50362,
+      "a__p": 26891,
+      "a__r": 40080,
+      "a__s": 32577,
+      "a__t": 18033,
+      "a__u": 21229,
+      "a__0": 27694,
+      "b": 374116,
+      "c__a": 111033,
+      "c__e": 20028,
+      "c__h": 80036,
+      "c__i": 17785,
+      "c__l": 46041,
+      "c__o": 280493,
+      "c__r": 62084,
+      "c__u": 29463,
+      "c__0": 13587,
+      "d__a": 30932,
+      "d__e": 146801,
+      "d__i": 132808,
+      "d__o": 44555,
+      "d__r": 34333,
+      "d__u": 20369,
+      "d__0": 11210,
+      "e": 288334,
+      "f": 306872,
+      "g": 221890,
+      "h": 260656,
+      "i": 313950,
+      "j": 65875,
+      "k": 53984,
+      "l": 227809,
+      "m": 381104,
+      "n": 140941,
+      "o": 172721,
+      "p__a": 96721,
+      "p__e": 83832,
+      "p__h": 24764,
+      "p__i": 36849,
+      "p__l": 41359,
+      "p__o": 75572,
+      "p__r": 149934,
+      "p__u": 37620,
+      "p__0": 15212,
+      "q": 30255,
+      "r__a": 54254,
+      "r__e": 241359,
+      "r__i": 28771,
+      "r__o": 47112,
+      "r__u": 24774,
+      "r__0": 9813,
+      "s__a": 58714,
+      "s__c": 57584,
+      "s__e": 81790,
+      "s__h": 70378,
+      "s__i": 44416,
+      "s__k": 14586,
+      "s__l": 32462,
+      "s__m": 15662,
+      "s__n": 17675,
+      "s__o": 49243,
+      "s__p": 74410,
+      "s__t": 138501,
+      "s__u": 89899,
+      "s__w": 22352,
+      "s__y": 19192,
+      "s__0": 12294,
+      "t": 343003,
+      "u": 182914,
+      "v": 109566,
+      "w": 186684,
+      "x": 3238,
+      "y": 21728,
+      "z": 11189
+    }
+  },
+  "route": {
+    "a": [
+      "a__b",
+      "a__c",
+      "a__d",
+      "a__f",
+      "a__g",
+      "a__i",
+      "a__l",
+      "a__m",
+      "a__n",
+      "a__p",
+      "a__r",
+      "a__s",
+      "a__t",
+      "a__u",
+      "a__0"
+    ],
+    "b": [
+      "b"
+    ],
+    "c": [
+      "c__a",
+      "c__e",
+      "c__h",
+      "c__i",
+      "c__l",
+      "c__o",
+      "c__r",
+      "c__u",
+      "c__0"
+    ],
+    "d": [
+      "d__a",
+      "d__e",
+      "d__i",
+      "d__o",
+      "d__r",
+      "d__u",
+      "d__0"
+    ],
+    "e": [
+      "e"
+    ],
+    "f": [
+      "f"
+    ],
+    "g": [
+      "g"
+    ],
+    "h": [
+      "h"
+    ],
+    "i": [
+      "i"
+    ],
+    "j": [
+      "j"
+    ],
+    "k": [
+      "k"
+    ],
+    "l": [
+      "l"
+    ],
+    "m": [
+      "m"
+    ],
+    "n": [
+      "n"
+    ],
+    "o": [
+      "o"
+    ],
+    "p": [
+      "p__a",
+      "p__e",
+      "p__h",
+      "p__i",
+      "p__l",
+      "p__o",
+      "p__r",
+      "p__u",
+      "p__0"
+    ],
+    "q": [
+      "q"
+    ],
+    "r": [
+      "r__a",
+      "r__e",
+      "r__i",
+      "r__o",
+      "r__u",
+      "r__0"
+    ],
+    "s": [
+      "s__a",
+      "s__c",
+      "s__e",
+      "s__h",
+      "s__i",
+      "s__k",
+      "s__l",
+      "s__m",
+      "s__n",
+      "s__o",
+      "s__p",
+      "s__t",
+      "s__u",
+      "s__w",
+      "s__y",
+      "s__0"
+    ],
+    "t": [
+      "t"
+    ],
+    "u": [
+      "u"
+    ],
+    "v": [
+      "v"
+    ],
+    "w": [
+      "w"
+    ],
+    "x": [
+      "x"
+    ],
+    "y": [
+      "y"
+    ],
+    "z": [
+      "z"
+    ],
+    "_": []
+  },
+  "prefixes": {
+    "ab": "a__b",
+    "ac": "a__c",
+    "ad": "a__d",
+    "af": "a__f",
+    "ag": "a__g",
+    "ai": "a__i",
+    "al": "a__l",
+    "am": "a__m",
+    "an": "a__n",
+    "ap": "a__p",
+    "ar": "a__r",
+    "as": "a__s",
+    "at": "a__t",
+    "au": "a__u",
+    "b": "b",
+    "ca": "c__a",
+    "ce": "c__e",
+    "ch": "c__h",
+    "ci": "c__i",
+    "cl": "c__l",
+    "co": "c__o",
+    "cr": "c__r",
+    "cu": "c__u",
+    "da": "d__a",
+    "de": "d__e",
+    "di": "d__i",
+    "do": "d__o",
+    "dr": "d__r",
+    "du": "d__u",
+    "e": "e",
+    "f": "f",
+    "g": "g",
+    "h": "h",
+    "i": "i",
+    "j": "j",
+    "k": "k",
+    "l": "l",
+    "m": "m",
+    "n": "n",
+    "o": "o",
+    "pa": "p__a",
+    "pe": "p__e",
+    "ph": "p__h",
+    "pi": "p__i",
+    "pl": "p__l",
+    "po": "p__o",
+    "pr": "p__r",
+    "pu": "p__u",
+    "q": "q",
+    "ra": "r__a",
+    "re": "r__e",
+    "ri": "r__i",
+    "ro": "r__o",
+    "ru": "r__u",
+    "sa": "s__a",
+    "sc": "s__c",
+    "se": "s__e",
+    "sh": "s__h",
+    "si": "s__i",
+    "sk": "s__k",
+    "sl": "s__l",
+    "sm": "s__m",
+    "sn": "s__n",
+    "so": "s__o",
+    "sp": "s__p",
+    "st": "s__t",
+    "su": "s__u",
+    "sw": "s__w",
+    "sy": "s__y",
+    "t": "t",
+    "u": "u",
+    "v": "v",
+    "w": "w",
+    "x": "x",
+    "y": "y",
+    "z": "z"
+  },
+  "shardPolicy": {
+    "buckets": "abcdefghijklmnopqrstuvwxyz_",
+    "bucketNote": "首字母桶（a–z + `_`）。桶超预算时在桶内按后续字符递归再切——任务书要求「≈27 份」且「单片 ≤400KB」，实测这两条**不可能同时成立**（`s` 桶单独就 961KB），故保留 27 个桶、把片切细，`route` 给出每个桶的片清单。",
+    "nameChars": "片名 = 前缀 + `_` + 该字符位的安全标记（非 [a-z0-9] 编成 `_x<hex>`）",
+    "maxShardBytes": 409600,
+    "totalBytes": 8388608,
+    "prefixes": "`prefixes` = 前缀 → 片名。**片名不等于前缀**（`s__t__r` 覆盖 `str`），所以运行时靠这张表定位\"该取哪一片\"，不做任何推断（见 build-lexicon 的 `prefixOf`）。"
+  },
+  "fields": {
+    "w": "词头（原样大小写）",
+    "phonetic": "音标",
+    "pos": "词性（如 n. / vt./vi.）——**不是**源 CSV 的 pos 列（那一列实测全空），而是从 translation 开头自带的词性标记里取的（`derivePos`）；取不到就没有这个键",
+    "zh": "中文释义（源里的字面 \\n 已转成真换行）",
+    "en": "英文释义（**只保留源数据的第一句**）",
+    "collins": "柯林斯星级 1–5",
+    "oxford": "1 = 牛津3000",
+    "tag": "考纲标签（空格分隔）",
+    "bnc": "BNC 词频序",
+    "frq": "当代语料库词频序",
+    "exchange": "变形（p:过去式 d:过去分词 i:现在分词 3:三单 r:比较级 t:最高级 s:复数 0:lemma）"
+  },
+  "missing": {
+    "examples": "源数据 detail 列为空 ⇒ 本词库**没有例句**（界面如实写「暂缺」，不编）",
+    "collocations": "源数据没有搭配列 ⇒ 本词库**没有搭配**（同上）",
+    "audio": "源数据 audio 列为空 ⇒ 发音由浏览器自带 speechSynthesis 提供"
+  },
+  "builtAt": "2026-09-19T01:48:06.106Z"
+}

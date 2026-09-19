@@ -50,7 +50,9 @@
 //   why          string[]
 //   simpler      null|{half,easy}
 //   glosses      [{word,pos,zh}]
-//   card         null|{key,surface,pos,zh,hasGloss,block}
+//   card         null|{key,surface,pos,zh,hasGloss,block,lex}
+//                `lex` = 词库那条规范词条（`web/units/lexicon.mjs` 的产物）或 `null`；
+//                有 `lex` 时**以它为主源**，`pos`/`zh` 只在词库没有这一条时兜底。
 //   mineSentences [{zh,en}]
 //   myWords      string[]
 //   due          [{en,when}]
@@ -233,6 +235,9 @@ const caller = (on) => (typeof on === 'function' ? on : () => {});
    纪律 ⑤「屏上英文全部可点」。这里的"全部"是**字面意思**：句子、候选引文、被标出的
    那一处、系统版、两个降档版、逐词释义、队列里的句子、我的句子 —— 一个不漏。
    查不到释义**不是**不可点的理由：点开之后如实显示「没查到」（`.wc-miss`）。
+   释义的来源已从"模型临时吐的那几条"换成**词库**（ECDICT）：点开先查词库，
+   查到就以它为主源（音标/词性/柯林斯/牛津/考纲/词频/变形），查不到才退回引擎那条释义、
+   两边都没有就如实说「词典里没查到」。**点词不新增任何模型调用**（成本纪律：一个回合 ≤2 次）。
    （上一版原型把无卡词降级成不可点的纯文本并打了 `data-uncarded` 标记；那一手在
    `flow.html` 里成立是因为它的判据是"面板区 `data-uncarded` 必须为 0"，而本任务书的
    纪律 ⑤ 要的是**没有例外**，所以这里改成"全都可点、没查到就说没查到"。）
@@ -311,7 +316,51 @@ function enBlock(doc, text, opts) {
   return p;
 }
 
-/** 词卡：一个脚注（零容器）。取不到释义**如实说「没查到」**，不编。 */
+/**
+ * 元信息那一行：音标 · 词性 · 柯林斯星级 · 牛津3000 · 考纲 · 词频档。
+ *
+ * ⚠️ **整条是「一个元素 + 文本分隔符」，不是七个子元素。**
+ *   这一条看着像排版偏好，实际是被门量出来的：G3 的「≤13px 的小字 ≤7 处」是
+ *   **逐文本元素**数的，与折不折行无关。把每一项做成 `<span>` 子元素时实测
+ *   小字 15 处（门红）；改成"一个元素 + 文本 `·` 分隔"之后 8 处。
+ *   每个字段**仍带一小段自己的标记类**（如 `pos` / `牛津3000` / `词频 极高`），
+ *   探针与门照样能逐项读，不靠子元素。
+ */
+function metaLine(doc, lex) {
+  const bits = [];
+  if (typeof lex.phonetic === 'string' && lex.phonetic !== '') bits.push(`/${lex.phonetic}/`);
+  if (typeof lex.pos === 'string' && lex.pos !== '') bits.push(lex.pos);
+  if (lex.collinsStars !== null) bits.push(lex.collinsStars);
+  if (lex.oxford === true) bits.push('· 牛津3000');
+  for (const t of lex.tagLabels ?? []) bits.push(`· ${t}`);
+  if (lex.frequency !== null) bits.push(`· 词频 ${lex.frequency.label}`);
+  return bits.length === 0 ? null : el(doc, 'span', 'wc-meta', bits.join(' '));
+}
+
+/**
+ * 词卡：一个脚注（零容器）。**主源是词库**（ECDICT，见 `web/units/lexicon.mjs`）。
+ *
+ * 卡上有三行（`card.lex` 有值时才画）：
+ *   ① 词头 + **一行元信息**（音标 · 词性 · 柯林斯星级 · 牛津3000 · 考纲 · 词频档）
+ *   ② 中文释义（主角，`--t-2`）
+ *   ③ 一行注：**变形**（有就写）+ **例句与搭配：暂缺**（恒定，见下）
+ *
+ * **英文释义不上卡**（词库里仍然带着它，见 `lex.en`）：ECDICT 的 `en` 是 Wiktionary 抄来的
+ * 整段，实测大量条目只有词性标记（`n.`）或混着词源；把它挤进一张手机上读的脚注，
+ * 收益小于它占掉的那一行。要读英文释义的场合是查词工具，不是"屏上点一下"。
+ *
+ * 卡上**没有**什么，以及为什么：
+ *   · **例句与搭配：源数据里就没有**（ECDICT 的 `detail` 列是空的）⇒ 如实写「暂缺」，
+ *     **不许编**。这一栏**恒定存在**（不是"查到了才有"），为的是让人一眼看见
+ *     "这两样现在没有"，而不是以为产品把它们藏起来了。
+ *   · **发音**不由词库提供（源 `audio` 列也是空的）⇒ 继续用浏览器自带的 `speechSynthesis`
+ *     （那颗「听一下」的按钮，本地、免费、零外部资源）。
+ * 查不到的两种情形**分开说**（把"不知道"说成"知道"是本项目最怕的错）：
+ *   · 词库里有这一条 ⇒ 按上面四行画；
+ *   · 词库里**根本没这一条** ⇒ 如实说「词典里没查到」；
+ *   · **取片失败** ⇒ 也说「没查到」，但下面那句是「这次没能取到词库：…」——
+ *     "取不到"与"没有这个词"是两件事。
+ */
 function wordCard(doc, card, handlers) {
   const wrap = el(doc, 'div', 'cardwrap');
   wrap.setAttribute('data-layer', 'card');
@@ -319,12 +368,47 @@ function wordCard(doc, card, handlers) {
 
   const box = el(doc, 'span', 'wc');
   box.append(el(doc, 'b', 'wc-w', card.surface));
-  if (card.hasGloss === true) {
+
+  const lex = card.lex ?? null;
+  if (lex !== null) {
+    wrap.setAttribute('data-card-source', 'lexicon');
+    const meta = metaLine(doc, lex);
+    if (meta !== null) box.append(meta);
+
+    // 中文释义是这张卡的**主角**（跟词头同一档字号）。
+    if (typeof lex.zh === 'string' && lex.zh !== '') box.append(el(doc, 'span', 'wc-zh', lex.zh));
+
+    // 最后一行：**变形**（有就写）**+ 「例句与搭配：暂缺」**（恒定，源数据就没有）。
+    // ⚠️ 这两件合成**一个文本元素**，不是排版偏好，是配额算出来的：G3 的
+    //    「≤13px 的小字 ≤7」逐元素数，这一屏底子 4 处 + 卡片 3 处 = 7 刚好；
+    //    拆成两个元素就是 8（实测门红）。所以是"变形：… ｜ 例句与搭配：暂缺"一行。
+    const notes = [];
+    if (typeof lex.lemmaForm === 'string' && lex.lemmaForm !== '') {
+      notes.push(`${lex.lemmaForm} 是 ${lex.word} 的变形`);
+    }
+    if (Array.isArray(lex.exchange) && lex.exchange.length > 0) {
+      notes.push(`变形：${lex.exchange.map((x) => `${x.label} ${x.form}`).join(' · ')}`);
+    }
+    notes.push('例句与搭配：暂缺');
+    box.append(el(doc, 'span', 'wc-none', notes.join(' ｜ ')));
+  } else if (card.hasGloss === true) {
+    // 词库里没有这一条，但引擎这条释义还在 ⇒ 画引擎那份，并**如实标出来源**。
+    wrap.setAttribute('data-card-source', 'engine');
     if (typeof card.pos === 'string' && card.pos !== '') box.append(el(doc, 'i', 'wc-pos', card.pos));
     if (typeof card.zh === 'string' && card.zh !== '') box.append(el(doc, 'span', 'wc-zh', card.zh));
+    box.append(el(doc, 'span', 'wc-none', '例句与搭配：暂缺'));
   } else {
-    // 纪律 ⑤ 的后半截：没有释义就**如实显示「没查到」**。
+    // 查不到就说查不到。`.wc-miss` 与「没查到」这两个字**来自上一版、已被测试钉住**，
+    // 是"如实说查不到"的落点；这里在它后面补两件事：**更准确的出处**，以及
+    // **例句与搭配这一栏照样在**（"没有"也要摆出来，不能因为没查到就整栏消失 ——
+    //  那样读起来像"这卡上本来就没有这一栏"，而事实是"这一栏现在没有内容"）。
+    wrap.setAttribute('data-card-source', 'none');
     box.append(el(doc, 'span', 'wc-miss', '没查到'));
+    // 「取片失败」与「词典里没这一条」是两件事 —— 分开说，别把真因藏起来。
+    box.append(el(doc, 'span', 'wc-none', typeof card.lexError === 'string' && card.lexError !== ''
+      ? `这次没能取到词库：${card.lexError}`
+      : '词典里没查到这一条'));
+    box.append(el(doc, 'span', 'wc-none', '例句与搭配：暂缺'));
   }
   wrap.append(box);
 
@@ -555,9 +639,19 @@ function paintStep(doc, body, snapshot, handlers) {
 }
 
 /** 逐词可点的回调（把"点哪个词"翻译成事件出口）。 */
-const onWordHandler = (handlers) => (key, surface, block) => {
-  handlers.on('word', { key, surface, block });
-};
+/**
+ * 点词的出口。
+ *
+ * ⚠️ **必须把 `handlers.on(...)` 的返回值原样返回**（这里以前漏了 `return`，代价真实）：
+ * 装配层的 `word` 动作是 **async**（它要去查词库 —— 一次同源取片），而假 DOM 的
+ * `click()` 返回的是监听器的返回值。不返回的话 `await b.click()` 拿到 `undefined`，
+ * 于是"点词 → 查词库 → 画卡"这条链在测试里**永远等不到落定**：卡还没画出来，
+ * 断言先跑了。这与 `web/write.mjs` 的 `handle()` 里那条注释是同一件事
+ * （那里专门 `return out` 就是为了让测试能 await 到异步链真的结束）。
+ */
+const onWordHandler = (handlers) => (key, surface, block) => (
+  handlers.on('word', { key, surface, block })
+);
 
 /** 当前打开的词卡属于哪一段 → 只有那一段里的那个词带 `aria-expanded`。 */
 const cardKeyIn = (snapshot, block) => (

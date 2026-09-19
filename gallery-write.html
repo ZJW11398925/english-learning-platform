@@ -36,12 +36,20 @@
 
     ── 结构上不可能花钱（三层，缺一层都不够）──────────────────────────────────
     1. **不 import `./units/write/client.mjs` / `./units/write/index.mjs`**：
-       整个文件里没有端点常量（`api.deepseek.com` 一次都不出现），`fetch` 一次都不调；
+       整个文件里没有端点常量（`api.deepseek.com` 一次都不出现），`fetch` 一次都不调
+       —— **除了词库那一次**：`fetchImpl` 注入的是全局 `fetch`，而 `lexicon.mjs` 只会
+       取同源的 `./data/lexicon/*.json`（静态文件，不是接口、不花一分钱）；
     2. **假门面是本地函数**：所有返回值写死在下面，不看 Key、不发请求；
     3. **Key 环用内存 Map**（`elp.apiKey` 是一串明显的假 Key）——真 localStorage
        只被用来存"我的句子 / 我的词 / 待重写"，**从不碰 `elp.apiKey`**。
        （这就是为什么本页敢用真 localStorage：持久化那一截**必须**是真的，
        否则 `reload()` 之后的回读证据毫无意义 —— 本项目踩过"假 storage 永远看不见这一截"。）
+
+    ── 词卡的内容从哪儿来（走查台与线上**同一条路**）──────────────────────────
+    词卡的主源是**词库**（`web/units/lexicon.mjs` + `web/data/lexicon/`，ECDICT/MIT），
+    装配层 `mountWrite` 在点词时查它；下面假门面的 `wordCard()` 只提供"引擎那条释义"
+    作为**兜底**（词库没收录时才用得上）。所以走查台上 `wordcard` 那一档看到的是
+    **真词库的释义**（`classes` 的真音标/词性/柯林斯/牛津/考纲/词频）。
 
     ── 数据往哪儿写 / 怎么清 ───────────────────────────────────────────────────
     键：`elp.write.gallery`（一份 JSON，装 `sentences` / `words` / `rewriteQueue` 三样，
@@ -99,7 +107,11 @@
       },
     };
 
-    /** 逐词释义。**故意不全**：`usually` 不在表里 —— 于是「没查到」那一支在屏上真的能走到。 */
+    /** 逐词释义。**故意不全**：`usually` 不在表里 —— 于是「没查到」那一支在屏上真的能走到。
+     *  ⚠️ 词卡的主源现在是**词库**（见文件头），这张表只是"引擎那条释义"的兜底；
+     *  但它必须覆盖走查台驱动会点的那些词 —— 否则走查台自己的 `ARRIVED` 判据
+     *  （`wordcard` 档要求屏上有「课（复数）」）会当场不成立，走查台先红。
+     *  驱动点的是 `classes`（`?scenario=wordcard`）。 */
     const LEX = {
       nothing: { pos: 'pron.', zh: '没有什么' },
       special: { pos: 'adj.', zh: '特别的' },
@@ -325,6 +337,9 @@
           return { ...rec, hasGloss: rec.zh !== null, added: true };
         },
         wordCard(word) {
+          // `noGloss` 档：**这一个词引擎没有释义**（真实情形：模型那次没给它 gloss）
+          // —— 用来造"两个来源都没有"那一支（见文件头与 ARRIVED 的说明）。
+          if (opts.noGloss === word) return { word: String(word ?? ''), zh: null, pos: null, hasGloss: false };
           const e = LEX[String(word ?? '').toLowerCase()];
           return e === undefined
             ? { word: String(word ?? ''), zh: null, pos: null, hasGloss: false }
@@ -441,7 +456,13 @@
       if (name === 'reveal') return;
 
       if (name === 'wordcard') { await clickWord('classes'); return; }
-      if (name === 'wordcard-miss') { await clickWord('usually'); return; }
+      // ⚠️ 这一档原来点 `usually` 指望走「没查到」。词卡主源换成**词库**之后这条路**走不通了**：
+      //    词库把屏上**每一个**词都覆盖到了（实测 21/21，见门 G6）—— 所以走查台
+      //    **造不出**"词典里没查到这一条"这个状态，除非编一个词库。
+      //    于是这一档改测**另一条真实分支**：取片失败。它同样显示「没查到」，
+      //    但下面那句是「这次没能取到词库：…」——"取不到"与"没有这个词"是两件事，
+      //    走查台把这件事**画出来**（判据见 ARRIVED）。
+      if (name === 'wordcard-miss') { await clickWord('classes'); return; }
 
       await click('过几天再写一遍');
     }
@@ -463,7 +484,8 @@
       reveal: '系统版',
       rewrite: '过几天再写一遍（1）',
       wordcard: '课（复数）',
-      'wordcard-miss': '没查到',
+      // 取片失败那一支：**先说「没查到」，再说清"是这次没取到"**（两件事不许混成一句）。
+      'wordcard-miss': '这次没能取到词库',
       'refuse-submit': '这次接不住',
       'refuse-pick': '这次接不住',
     };
@@ -488,6 +510,20 @@
 
       await mountWrite(app, {
         keyring,
+        // **词库走真货**：`web/units/lexicon.mjs` + `web/data/lexicon/` 是**同源静态文件**
+        // （不是接口、不是 CDN），走查台当然要用真的 —— 用假词库的话，量到的是
+        // "假词库能不能查词"，而不是"这份词库能不能查词"。
+        // `fetchImpl` 只是把取数口**显式注入**（生产缺省也是全局 `fetch`）；
+        // 门 G8 靠包一层它来数"点一个词到底取了哪几片"。
+        // ⚠️ 它**只取同源**：URL 由 `lexicon.mjs` 按 `import.meta.url` 推出来，写不进域名。
+        //
+        // `wordcard-miss` 档：把**词库取数口**换成必定失败的（其余请求照常走真 `fetch`）——
+        // 这是"取片失败"那条真实分支的唯一造法，见文件头与下面 ARRIVED 的说明。
+        fetchImpl: scenario === 'wordcard-miss'
+          ? (url) => (String(url).includes('/data/lexicon/')
+            ? Promise.reject(new Error('走查台注入：词库取数失败'))
+            : fetch(url))
+          : (...args) => fetch(...args),
         // `nokey` 档：Key 环换成一个空的（于是页面走"没配 Key"那一屏的完整引导）。
         ...(scenario === 'nokey'
           ? { keyring: createKeyring({ storage: { getItem: () => null, setItem: () => {}, removeItem: () => {} } }) }
@@ -498,6 +534,9 @@
           : { facade: fakeFacade({
             refuseSubmit: scenario === 'refuse-submit',
             refusePick: scenario === 'refuse-pick',
+            // 「两个来源都没有」那一档：这一档的词库取数被注入失败（见上面的 `fetchImpl`），
+            // 再让引擎对同一个词**也没有释义** ⇒ 卡片如实走"没查到"那一支。
+            ...(scenario === 'wordcard-miss' ? { noGloss: 'classes' } : {}),
           }) }),
       });
 
