@@ -1,0 +1,712 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <title>对话客厅 · V1 誊写稿（四屏打样）</title>
+  <meta name="description" content="对话客厅 V1 誊写稿：悬挂说话人栏的转写手稿。零依赖、零外部资源、零模型调用。">
+  <meta name="theme-color" content="#fbf9f4">
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 20 20'%3E%3Crect width='20' height='20' rx='4' fill='%231b1a17'/%3E%3Cpath d='M5 12.8 L10 6 L15 12.8' fill='none' stroke='%23fbf9f4' stroke-width='1.9' stroke-linecap='round' stroke-linejoin='round'/%3E%3Cpath d='M7 16 H13' fill='none' stroke='%23fbf9f4' stroke-width='1.9' stroke-linecap='round'/%3E%3C/svg%3E">
+  <!--
+    ══ V1 誊写稿 ════════════════════════════════════════════════════════════
+    结构身份：把对话当成一份**转写手稿**——每回合有一道**悬挂说话人栏**（左侧
+    固定窄栏：小号大写字母距的名字 MAY / 我），正文全宽左对齐；双方不靠左右
+    摆动区分，靠**栏标 + 缩进 + 字重**区分（MAY 常规 400 / 我 500 且正文再缩
+    一档）。教学卡 = **夹页**：全宽插进两回合之间，右下折角，页缘一道「教」
+    竖签，揭开的动效是**从上缘向下翻开的折页**。输入区 = 窄单框 + 台阶**竖梯**
+    挂在框右缘（①开头 ②一半 ③全给，从上到下）。引子的「今日活动」是开场
+    回合栏上的一条**书签带**；「换个挑战」小签**回形针别在输入框左上角**。
+    抽屉从**左**侧滑出（卷宗，页签朝上）。
+    与 V2/V3 的差异轴：消息行形态（栏式转写 vs 信笺左右 vs 剧本中央报名）／
+    教学卡（夹页 vs 贴签 vs 行间批注）／输入区（窄框竖梯 vs 高框楼梯 vs 短行
+    左签）／引子与小签位置（栏上书签 vs 附笔 vs 场记行）。
+  -->
+  <style>
+    /* ── 令牌（与 write.css / A 手稿同一套纸感基因）────────────────────────── */
+    :root {
+      --bg: #fbf9f4;
+      --ink: #1b1a17;
+      --ink-soft: #5c574e;
+      --ink-faint: #726a5e;
+      --rule: #ded7c9;
+      --rule-soft: #ebe5d8;
+      --pencil: #a8562f;
+      --touch: #f0e9dc;
+      --f-serif: Georgia, 'Times New Roman', 'Songti SC', 'SimSun', 'Noto Serif CJK SC', serif;
+      --f-sans: system-ui, -apple-system, 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', sans-serif;
+      --f-mono: ui-monospace, 'Cascadia Mono', Consolas, monospace;
+      --read-pad: 20px;
+      --rail: 58px;
+      --safe-bottom: env(safe-area-inset-bottom, 0px);
+    }
+    * { box-sizing: border-box; }
+    html, body { margin: 0; padding: 0; background: var(--bg); }
+    body {
+      color: var(--ink);
+      font-family: var(--f-serif);
+      font-size: 16px;
+      line-height: 1.55;
+      -webkit-text-size-adjust: 100%;
+      -webkit-tap-highlight-color: transparent;
+    }
+    #stage { max-width: 430px; margin: 0 auto; min-height: 100vh; position: relative; }
+
+    /* ── 屏切换（打样机架：屏不是设计的一部分）────────────────────────────── */
+    .screen { display: none; }
+    .screen.on { display: block; }
+
+    /* ── 客厅 · 头部 ─────────────────────────────────────────────────────── */
+    .top {
+      position: sticky; top: 0; z-index: 5;
+      background: var(--bg);
+      border-bottom: 1px solid var(--rule);
+      padding: 10px var(--read-pad) 8px;
+    }
+    .top-row { display: flex; align-items: baseline; gap: 10px; }
+    .who { font-size: 13px; font-weight: 500; letter-spacing: 0.18em; }
+    .who-sub { font-size: 11px; color: var(--ink-faint); font-family: var(--f-sans); }
+    .meter {
+      margin-left: auto; border: 0; background: none; padding: 0;
+      font-family: var(--f-mono); font-size: 11px; color: var(--ink-soft);
+      cursor: pointer; text-decoration: underline dotted;
+      text-underline-offset: 0.28em; text-decoration-color: var(--rule);
+    }
+    .menu {
+      border: 0; background: none; padding: 2px 6px; margin-left: 8px;
+      font-family: var(--f-sans); font-size: 15px; color: var(--ink-soft); cursor: pointer;
+    }
+    .meter-detail {
+      display: none; margin-top: 8px; padding: 8px 0 2px;
+      border-top: 1px solid var(--rule-soft);
+      font-family: var(--f-sans); font-size: 11px; color: var(--ink-faint); line-height: 1.8;
+    }
+    .meter-detail.on { display: block; }
+    .meter-detail b { color: var(--ink-soft); font-weight: 500; }
+
+    /* ── 对话流：悬挂说话人栏的转写体 ─────────────────────────────────────── */
+    .flow { padding: 18px var(--read-pad) 210px; }
+    .turn { display: grid; grid-template-columns: var(--rail) 1fr; margin: 0 0 22px; }
+    .rail {
+      font-family: var(--f-sans); font-size: 10px; letter-spacing: 0.14em;
+      color: var(--ink-faint); padding-top: 5px; position: relative;
+    }
+    .rail .t { display: block; margin-top: 3px; font-size: 9px; letter-spacing: 0.06em; opacity: 0.75; }
+    .say { margin: 0; }
+    .say .zh { font-size: 16px; }
+    .say .en {
+      font-size: 21px; line-height: 1.42; letter-spacing: -0.004em;
+    }
+    /* 我这一方：栏标换成「我」，正文缩进一档 + 字重 500 —— 不靠左右摆动 */
+    .turn.me .rail { color: var(--ink-soft); }
+    .turn.me .say { margin-left: 14px; font-weight: 500; }
+    .meterline {
+      margin: 6px 0 0; font-family: var(--f-sans); font-size: 10px;
+      color: var(--ink-faint); letter-spacing: 0.03em;
+    }
+
+    /* 引子：开场回合栏上的一条书签带（V1 独有位置） */
+    .rail .bk {
+      position: absolute; left: -12px; top: 2px; width: 14px;
+      writing-mode: vertical-rl; font-size: 9px; letter-spacing: 0.1em;
+      color: var(--bg); background: var(--pencil); padding: 6px 1px;
+      border-radius: 1px 1px 0 0;
+    }
+    .activity { margin-top: 8px; }
+    .activity .lab {
+      font-family: var(--f-sans); font-size: 11px; letter-spacing: 0.12em;
+      color: var(--pencil);
+    }
+    .activity .txt { font-size: 14px; color: var(--ink-soft); }
+
+    /* 逐词可点的英文：看起来只是文字 */
+    .w {
+      display: inline; margin: 0; padding: 0; border: 0; background: none;
+      color: inherit; font: inherit; letter-spacing: inherit; line-height: inherit;
+      cursor: pointer; text-decoration: underline dotted;
+      text-decoration-thickness: 1px; text-underline-offset: 0.24em;
+      text-decoration-color: var(--rule-soft);
+    }
+    .w:active { background: var(--touch); }
+    .w.open { text-decoration-color: var(--pencil); }
+
+    /* ── 教学时刻各状态（body[data-step] 门控；1 引出 2 圈划 3 改写 4 揭开 5 接回）── */
+    [data-step] .tm-intro, [data-step] .tcard, [data-step] .tm-back { display: none; }
+    [data-step="1"] .tm-intro, [data-step="2"] .tm-intro, [data-step="3"] .tm-intro,
+    [data-step="4"] .tm-intro, [data-step="5"] .tm-intro { display: grid; }
+    [data-step="4"] .tcard, [data-step="5"] .tcard { display: block; }
+    [data-step="5"] .tm-back { display: grid; }
+
+    /* 铅笔圈：套在被锚定的词上，第 2 步起出现（描一笔的动效） */
+    .anchor { position: relative; display: inline-block; }
+    .ring { position: absolute; left: -0.32em; right: -0.34em; top: -0.14em; bottom: -0.3em; pointer-events: none; opacity: 0; }
+    .ring svg { width: 100%; height: 100%; overflow: visible; display: block; }
+    [data-step="2"] .ring, [data-step="3"] .ring, [data-step="4"] .ring, [data-step="5"] .ring { opacity: 1; }
+    [data-step="2"] .ring ellipse, [data-step="3"] .ring ellipse, [data-step="4"] .ring ellipse, [data-step="5"] .ring ellipse {
+      animation: draw 640ms ease-out both;
+    }
+    @keyframes draw { from { stroke-dashoffset: 320; } to { stroke-dashoffset: 0; } }
+
+    /* ── 教学卡：夹页（V1 的形状与插入方式）───────────────────────────────── */
+    .tcard {
+      position: relative; margin: 26px 0 24px; padding: 14px 18px 18px 20px;
+      background: var(--bg);
+      border: 1px solid var(--rule);
+      transform: rotate(-0.4deg); transform-origin: left top;
+    }
+    [data-step="4"] .tcard { animation: unfold 520ms ease-out both; }
+    @keyframes unfold { from { transform: rotateX(-84deg) rotate(-0.4deg); opacity: 0.35; } to { transform: rotateX(0) rotate(-0.4deg); opacity: 1; } }
+    .tcard::before { /* 页缘那道「教」竖签 */
+      content: '教'; position: absolute; left: -1px; top: 14px;
+      writing-mode: vertical-rl; font-family: var(--f-sans); font-size: 10px;
+      letter-spacing: 0.2em; color: var(--bg); background: var(--pencil);
+      padding: 7px 2px;
+    }
+    .tcard::after { /* 右下折角 */
+      content: ''; position: absolute; right: 0; bottom: 0; width: 22px; height: 22px;
+      background: linear-gradient(135deg, transparent 49.5%, var(--rule) 50%, var(--rule-soft) 52%, var(--bg) 70%);
+    }
+    .tcard .hd {
+      margin: 0 0 10px; font-family: var(--f-sans); font-size: 10px;
+      letter-spacing: 0.2em; color: var(--ink-faint);
+    }
+    .tcard .row { margin: 0 0 10px; }
+    .tcard .lab {
+      display: inline-block; font-family: var(--f-sans); font-size: 11px;
+      color: var(--ink-faint); letter-spacing: 0.1em; margin-right: 8px;
+    }
+    .tcard .old { font-size: 17px; color: var(--ink-soft); }
+    .tcard .new { font-size: 17px; }
+    .tcard .fix { font-weight: 700; color: var(--pencil); }
+    .tcard .why {
+      margin: 12px 0 0; padding-left: 10px; border-left: 1px solid var(--pencil);
+      font-size: 14px; color: var(--pencil); transform: rotate(-0.3deg);
+    }
+    .tcard .keep { margin: 10px 0 0; font-family: var(--f-sans); font-size: 11px; color: var(--ink-faint); }
+
+    /* ── 输入区：窄单框 + 竖梯台阶 + 回形针小签（V1 的比例与位置）──────────── */
+    .dock {
+      position: fixed; left: 0; right: 0; bottom: 0; z-index: 8;
+      background: var(--bg); border-top: 1px solid var(--rule);
+      padding: 10px var(--read-pad) calc(88px + var(--safe-bottom));
+      max-width: 430px; margin: 0 auto;
+    }
+    .dock-inner { display: grid; grid-template-columns: 1fr auto; gap: 10px; align-items: end; }
+    .box { position: relative; }
+    .pen {
+      width: 100%; border: 0; background: none; resize: none;
+      font-family: var(--f-serif); font-size: 16px; color: var(--ink); line-height: 1.5;
+      padding: 8px 2px 6px; border-bottom: 1px solid var(--rule);
+      outline: none; min-height: 34px;
+    }
+    .pen::placeholder { color: var(--ink-faint); font-size: 14px; font-family: var(--f-sans); }
+    .send {
+      border: 0; background: none; padding: 6px 2px; cursor: pointer;
+      font-family: var(--f-serif); font-size: 15px; font-weight: 700; color: var(--ink);
+      text-decoration: underline; text-decoration-thickness: 1px; text-underline-offset: 0.3em;
+    }
+    .send:active { opacity: 0.55; }
+    /* 台阶竖梯：挂在框的右缘，从上到下三档 */
+    .ladder { display: flex; flex-direction: column; gap: 5px; padding-bottom: 2px; }
+    .rung {
+      border: 0; background: none; cursor: pointer; white-space: nowrap;
+      font-family: var(--f-sans); font-size: 11px; color: var(--ink-soft);
+      padding: 3px 4px 3px 10px; border-left: 1px solid var(--rule);
+      text-decoration: underline dotted; text-decoration-thickness: 1px;
+      text-underline-offset: 0.26em; text-decoration-color: var(--rule);
+    }
+    .rung:active { background: var(--touch); }
+    .rung.r2 { margin-right: 14px; }
+    .rung.r3 { margin-right: 28px; }
+    /* 换个挑战：回形针别在输入框左上角的小签 */
+    .slip-tag {
+      position: absolute; left: -4px; top: -16px; z-index: 2;
+      border: 0; background: var(--bg); cursor: pointer;
+      font-family: var(--f-sans); font-size: 11px; color: var(--pencil);
+      padding: 2px 10px; transform: rotate(-2deg);
+      border-top: 1px solid var(--rule); border-bottom: 1px solid var(--rule);
+    }
+    .slip-tag::before { /* 回形针（CSS 画的双钩） */
+      content: ''; position: absolute; left: 4px; top: -7px; width: 7px; height: 12px;
+      border: 1.4px solid var(--ink-soft); border-bottom: 0; border-radius: 4px 4px 0 0;
+    }
+    .challenge {
+      display: none; position: absolute; left: 0; right: 118px; bottom: calc(100% + 8px);
+      background: var(--bg); border: 1px solid var(--rule); padding: 10px 12px;
+      font-family: var(--f-sans); font-size: 12px; color: var(--ink-soft); line-height: 1.8;
+      transform: rotate(-0.5deg);
+    }
+    .challenge.on { display: block; }
+    .challenge b { font-weight: 600; color: var(--ink); }
+
+    /* 教学时刻第 3 步：改写模式（原句与圈划悬在上文） */
+    .rewrite { display: none; margin: 0 0 8px; padding: 8px 10px; border-left: 1px solid var(--pencil); }
+    [data-step="3"] .rewrite { display: block; }
+    .rewrite .mini { font-size: 14px; color: var(--ink-soft); }
+    .rewrite .mini .anchor { font-weight: 600; }
+    .rewrite .rl {
+      font-family: var(--f-sans); font-size: 10px; letter-spacing: 0.14em;
+      color: var(--pencil); display: block; margin-bottom: 4px;
+    }
+
+    /* 词卡脚注（点了词之后挂在段落下面） */
+    .cardwrap {
+      margin: 10px 0 0; padding-left: 10px; border-left: 1px solid var(--rule);
+      font-family: var(--f-sans); font-size: 13px; color: var(--ink-soft);
+    }
+    .cardwrap .hw { font-family: var(--f-serif); font-size: 16px; font-weight: 700; color: var(--pencil); }
+    .cardwrap .miss { font-style: italic; }
+
+    /* ── 首启：扉页 + 卡片（V1 形态）────────────────────────────────────── */
+    .ob { padding: 64px var(--read-pad) 120px; min-height: 100vh; }
+    .ob .halftitle { text-align: center; margin: 0 0 48px; }
+    .ob .halftitle .mk { font-size: 13px; letter-spacing: 0.5em; color: var(--ink-faint); font-family: var(--f-sans); }
+    .ob .halftitle h1 { margin: 14px 0 0; font-size: 30px; font-weight: 500; letter-spacing: 0.3em; }
+    .ob .one {
+      text-align: center; margin: 0 0 10px; font-size: 13px;
+      font-family: var(--f-sans); letter-spacing: 0.22em; color: var(--ink-faint);
+    }
+    .ob field { display: block; }
+    .ob .q { text-align: center; font-size: 19px; margin: 0 0 18px; }
+    .ob .in {
+      display: block; width: 100%; border: 0; background: none; outline: none;
+      border-bottom: 1px solid var(--rule); padding: 10px 2px;
+      font-family: var(--f-serif); font-size: 17px; color: var(--ink); text-align: center;
+    }
+    .ob .in::placeholder { color: var(--ink-faint); font-size: 14px; font-family: var(--f-sans); }
+    .ob .go {
+      display: block; margin: 26px auto 0; border: 0; background: none; cursor: pointer;
+      font-family: var(--f-serif); font-size: 17px; font-weight: 700; color: var(--ink);
+      text-decoration: underline; text-decoration-thickness: 1px; text-underline-offset: 0.32em;
+    }
+    .ob .go:active { opacity: 0.55; }
+    /* 卡片态：索引卡 + 折角 */
+    .persona { display: none; position: relative; margin: 44px 6px 0; padding: 18px 18px 22px; border: 1px solid var(--rule); transform: rotate(0.4deg); }
+    .ob.done .persona { display: block; }
+    .ob.done .ob-form { display: none; }
+    .persona::after {
+      content: ''; position: absolute; right: 0; top: 0; width: 26px; height: 26px;
+      background: linear-gradient(225deg, transparent 49.5%, var(--rule) 50%, var(--rule-soft) 52%, var(--bg) 70%);
+    }
+    .persona .nm { margin: 0; font-size: 26px; font-weight: 600; letter-spacing: 0.06em; }
+    .persona .role { margin: 4px 0 12px; font-size: 13px; color: var(--ink-soft); font-family: var(--f-sans); }
+    .persona .bio { margin: 0 0 14px; font-size: 15px; color: var(--ink); }
+    .prefs { border-top: 1px solid var(--rule-soft); padding-top: 12px; }
+    .prefs .p { display: flex; gap: 10px; font-family: var(--f-sans); font-size: 12px; color: var(--ink-soft); margin: 0 0 7px; }
+    .prefs .k { min-width: 66px; color: var(--ink-faint); }
+    .prefs .v { color: var(--ink); }
+
+    /* ── 抽屉：左滑卷宗（V1 方向）────────────────────────────────────────── */
+    .drawer-wrap { position: relative; min-height: 100vh; }
+    .backdrop { position: absolute; inset: 0; opacity: 0.28; filter: saturate(0.6); pointer-events: none; padding: 24px var(--read-pad); }
+    .drawer {
+      position: absolute; left: 0; top: 0; bottom: 0; width: 86%;
+      background: var(--bg); border-right: 1px solid var(--rule);
+      padding: 18px 18px 40px; overflow-y: auto;
+      animation: slidein 320ms ease-out both;
+    }
+    @keyframes slidein { from { transform: translateX(-100%); } to { transform: translateX(0); } }
+    .dw-head { display: flex; align-items: baseline; gap: 10px; margin-bottom: 6px; }
+    .dw-head h2 { margin: 0; font-size: 19px; font-weight: 600; letter-spacing: 0.1em; }
+    .dw-close { margin-left: auto; border: 0; background: none; cursor: pointer; font-family: var(--f-sans); font-size: 12px; color: var(--ink-faint); text-decoration: underline dotted; text-underline-offset: 0.3em; }
+    .dw-tabs { display: flex; gap: 6px; margin: 10px 0 4px; }
+    .dw-tabs span {
+      font-family: var(--f-sans); font-size: 10px; letter-spacing: 0.1em; color: var(--ink-soft);
+      border: 1px solid var(--rule); border-bottom: 0; padding: 3px 9px; background: var(--bg);
+    }
+    .dw-sec { padding: 14px 0 4px; border-bottom: 1px solid var(--rule-soft); }
+    .dw-sec h3 { margin: 0 0 8px; font-family: var(--f-sans); font-size: 11px; letter-spacing: 0.18em; color: var(--ink-faint); font-weight: 500; }
+    .dw-sec ul { margin: 0; padding: 0 0 6px; list-style: none; }
+    .dw-sec li { font-size: 14px; color: var(--ink); margin-bottom: 6px; }
+    .dw-sec li .sm { font-family: var(--f-sans); font-size: 11px; color: var(--ink-faint); }
+    .st { font-family: var(--f-sans); font-size: 10px; letter-spacing: 0.08em; margin-left: 8px; padding: 1px 6px; border: 1px solid var(--rule); color: var(--ink-soft); }
+    .st.ok { color: var(--ink); border-color: var(--ink-soft); }
+    .st.due { color: var(--pencil); border-color: var(--pencil); }
+    .wchips { display: flex; flex-wrap: wrap; gap: 8px 14px; padding-bottom: 8px; }
+    .wchips span { font-size: 15px; border-bottom: 1px solid var(--rule); color: var(--ink-soft); }
+    .tools { padding: 16px 0 8px; }
+    .tools h3 { margin: 0 0 10px; font-family: var(--f-sans); font-size: 11px; letter-spacing: 0.18em; color: var(--ink-faint); font-weight: 500; }
+    .tool {
+      display: block; width: 100%; text-align: left; border: 0; background: none; cursor: pointer;
+      border-left: 1px solid var(--pencil); padding: 8px 0 8px 12px; margin-bottom: 10px;
+    }
+    .tool b { display: block; font-size: 16px; font-weight: 600; color: var(--ink); }
+    .tool span { font-family: var(--f-sans); font-size: 11px; color: var(--ink-faint); }
+
+    /* ── 练习场：稿纸（参照 write.html 气质）──────────────────────────────── */
+    .pr { padding: 26px var(--read-pad) 130px; }
+    .pr .mast { font-family: var(--f-sans); font-size: 11px; letter-spacing: 0.2em; color: var(--ink-faint); margin: 0 0 4px; }
+    .pr h2 { margin: 0 0 6px; font-size: 24px; font-weight: 500; letter-spacing: 0.12em; }
+    .pr .src { margin: 18px 0 6px; font-family: var(--f-sans); font-size: 11px; color: var(--ink-faint); }
+    .pr .zh { margin: 0 0 14px; font-size: 14px; color: var(--ink-soft); }
+    .pr .field {
+      width: 100%; border: 0; background: none; outline: none; resize: none;
+      font-family: var(--f-serif); font-size: 26px; line-height: 44px; color: var(--ink);
+      padding: 0; min-height: 132px;
+      background-image: repeating-linear-gradient(to bottom, transparent 0 43px, var(--rule-soft) 43px 44px);
+      background-attachment: local;
+    }
+    .pr .hint-note {
+      margin: 16px 0 0 20px; max-width: 300px; padding-left: 10px;
+      border-left: 1px solid var(--pencil); font-size: 14px; color: var(--pencil);
+      transform: rotate(-0.4deg);
+    }
+    .pr .hint-note .hb { font-family: var(--f-sans); font-size: 10px; letter-spacing: 0.14em; display: block; margin-bottom: 3px; }
+    .pr .note-open { margin: 12px 0 0 20px; padding-left: 10px; border-left: 1px solid var(--rule); font-size: 14px; color: var(--ink-soft); display: none; }
+    .pr .note-open.on { display: block; }
+    .pr .flagged { text-decoration: underline wavy 1px var(--pencil); text-underline-offset: 0.24em; }
+    .pr .rec { margin: 22px 0 0; font-family: var(--f-sans); font-size: 11px; color: var(--ink-faint); letter-spacing: 0.05em; }
+    .pr .backs { margin-top: 26px; border-top: 1px solid var(--rule); padding-top: 14px; }
+    .pr .back { border: 0; background: none; cursor: pointer; font-family: var(--f-sans); font-size: 12px; color: var(--ink-soft); text-decoration: underline dotted; text-underline-offset: 0.3em; }
+
+    /* ── 打样工具条（不属于被评的设计）：黑底等宽，一眼是工具 ──────────────── */
+    .chrome {
+      position: fixed; left: 50%; transform: translateX(-50%); bottom: 0; z-index: 40;
+      width: 100%; max-width: 430px; background: var(--ink); color: var(--bg);
+      font-family: var(--f-mono); font-size: 11px;
+      padding: 8px 10px calc(8px + var(--safe-bottom));
+      outline: 1px dashed rgba(251,249,244,0.45); outline-offset: -5px;
+    }
+    .steps { display: none; align-items: center; gap: 6px; padding-bottom: 8px; margin-bottom: 8px; border-bottom: 1px solid rgba(251,249,244,0.2); }
+    [data-screen="living"] .steps { display: flex; }
+    .steps .sl { color: rgba(251,249,244,0.7); letter-spacing: 0.08em; }
+    .stp { border: 1px solid rgba(251,249,244,0.4); background: none; color: var(--bg); font: inherit; cursor: pointer; padding: 3px 7px; }
+    .stp.on { background: var(--bg); color: var(--ink); }
+    .tabs { display: flex; gap: 6px; justify-content: center; }
+    .tab { border: 0; background: none; color: rgba(251,249,244,0.75); font: inherit; cursor: pointer; padding: 3px 9px; letter-spacing: 0.1em; }
+    .tab.on { color: var(--ink); background: var(--bg); }
+
+    @media (prefers-reduced-motion: reduce) {
+      *, *::before, *::after { animation: none !important; transition: none !important; }
+    }
+  </style>
+</head>
+<body data-screen="living" data-step="1">
+  <div id="stage">
+
+    <!-- ═══ ① 客厅（主屏）═══ -->
+    <section class="screen on" id="living">
+      <header class="top">
+        <div class="top-row">
+          <button class="menu" id="menuBtn" aria-label="打开抽屉">☰</button>
+          <div>
+            <div class="who">MAY</div>
+            <div class="who-sub">旅居波特兰的插画师 · 人设 ▾</div>
+          </div>
+          <button class="meter" id="meterBtn">今日 ↑1.8k ↓3.2k · ≈¥0.008</button>
+        </div>
+        <div class="meter-detail" id="meterDetail">
+          <b>token 明细（透明仪表 · 你的 Key：deepseek-chat）</b><br>
+          开场引子 ↑118 ↓326 ·缓存命中<br>
+          散步回复 ↑134 ↓402 ·缓存命中<br>
+          教学时刻（引出）↑96 ↓188 ·缓存命中<br>
+          接回话题 ↑88 ↓232 ·缓存命中<br>
+          缓存命中 3 段 · 教学提议由程序门控，不计费
+        </div>
+      </header>
+
+      <main class="flow">
+        <!-- 引子：今日活动是栏上书签带 -->
+        <div class="turn">
+          <div class="rail"><span class="bk">今日活动</span>MAY<span class="t">18:02</span></div>
+          <div>
+            <p class="say">晚上好呀。今天想从哪聊起？</p>
+            <div class="activity">
+              <span class="lab">今日活动 ·</span>
+              <span class="txt">讲一件你昨天做的小事，越具体越好——散步、吃饭、路过的店，都行。</span>
+            </div>
+            <p class="meterline">↑118 ↓326 ·缓存命中</p>
+          </div>
+        </div>
+
+        <div class="turn me">
+          <div class="rail">我<span class="t">18:04</span></div>
+          <p class="say">我昨天去公园散步了，还挺累的。</p>
+        </div>
+
+        <div class="turn">
+          <div class="rail">MAY<span class="t">18:04</span></div>
+          <div>
+            <p class="say">散步好。公园现在什么样，树绿了吗？——试试用英文把这句说了：<span class="zh">我昨天去公园散步了，还挺累的。</span>就说这一句，别的我来。</p>
+            <p class="meterline">↑134 ↓402 ·缓存命中</p>
+          </div>
+        </div>
+
+        <div class="turn me">
+          <div class="rail">我<span class="t">18:05</span></div>
+          <p class="say en" id="userEn">
+            <button class="w" type="button">yesterday</button>
+            <button class="w" type="button">I</button>
+            <span class="anchor"><button class="w" type="button">go</button><span class="ring" aria-hidden="true"><svg viewBox="0 0 100 46" preserveAspectRatio="none"><ellipse cx="50" cy="23" rx="47" ry="19" fill="none" stroke="#a8562f" stroke-width="2.2" stroke-linecap="round" stroke-dasharray="320" stroke-dashoffset="0" transform="rotate(-3 50 23)" opacity="0.9"/></svg></span></span>
+            <button class="w" type="button">to</button>
+            <button class="w" type="button">park</button>
+            <button class="w" type="button">for</button>
+            <button class="w" type="button">walk</button>,
+            <button class="w" type="button">very</button>
+            <button class="w" type="button">tired</button>.
+          </p>
+        </div>
+
+        <!-- 教学时刻 · 引出（第 1 步起出现） -->
+        <div class="turn tm-intro">
+          <div class="rail">MAY<span class="t">18:05</span></div>
+          <div>
+            <p class="say">等一下，你刚那句——我圈了一个词，就是那个动作。昨天做的事，它得换一副样子。你来改改？</p>
+            <p class="meterline">↑96 ↓188 ·缓存命中</p>
+          </div>
+        </div>
+
+        <!-- 教学卡 · 夹页（第 4 步起插入对话流） -->
+        <aside class="tcard" id="tcard">
+          <p class="hd">教学卡 · 第 7 张 · 时态（过去式）</p>
+          <p class="row"><span class="lab">原句</span><span class="old">yesterday I <span class="anchor" style="font-weight:600">go<span class="ring" aria-hidden="true"><svg viewBox="0 0 100 46" preserveAspectRatio="none"><ellipse cx="50" cy="23" rx="47" ry="19" fill="none" stroke="#a8562f" stroke-width="2.2" stroke-linecap="round" stroke-dasharray="320" transform="rotate(-3 50 23)" opacity="0.9"/></svg></span></span> to park for walk, very tired.</span></p>
+          <p class="row"><span class="lab">你改的</span><span class="new">yesterday I <span class="fix">went</span> to park for walk, very tired.</span></p>
+          <p class="why">说昨天做过的事，动词要变成过去式——go 的过去式是 went。</p>
+          <p class="keep">一次只改这一笔。句子里还有几处以后轮得到，先不动。</p>
+        </aside>
+
+        <!-- 接回（第 5 步） -->
+        <div class="turn tm-back">
+          <div class="rail">MAY<span class="t">18:07</span></div>
+          <div>
+            <p class="say">Went！就差这一笔，现在它说的是昨天的事了。所以——走了一圈，累归累，值不值？</p>
+            <p class="meterline">↑88 ↓232 ·缓存命中</p>
+          </div>
+        </div>
+      </main>
+
+      <!-- 输入区：窄框 + 竖梯 + 回形针小签 -->
+      <div class="dock">
+        <div class="dock-inner">
+          <div class="box">
+            <button class="slip-tag" id="chalBtn" type="button">换个挑战</button>
+            <div class="challenge" id="chalPop">
+              <b>换个挑战 · 今天还有</b><br>
+              ① 你包里装了什么<br>② 昨天晚饭吃了什么<br>③ 最近一次大笑是什么时候
+            </div>
+            <div class="rewrite" id="rewriteBox">
+              <span class="rl">教学时刻 · 改这一笔</span>
+              <span class="mini">yesterday I <span class="anchor">go<span class="ring" aria-hidden="true"><svg viewBox="0 0 100 46" preserveAspectRatio="none"><ellipse cx="50" cy="23" rx="47" ry="19" fill="none" stroke="#a8562f" stroke-width="2.2" stroke-linecap="round" stroke-dasharray="320" transform="rotate(-3 50 23)" opacity="0.9"/></svg></span></span> to park …</span>
+            </div>
+            <input class="pen" id="penInput" type="text" placeholder="想说什么，就说什么（Enter 发送 · Shift+Enter 换段）" readonly>
+            <button class="send" id="sendBtn" type="button">说</button>
+          </div>
+          <div class="ladder">
+            <button class="rung" type="button">① 给个开头</button>
+            <button class="rung r2" type="button">② 给一半</button>
+            <button class="rung r3" type="button">③ 全给</button>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ═══ ② 首启（一步）═══ -->
+    <section class="screen ob" id="onboard">
+      <div class="halftitle">
+        <div class="mk">✎</div>
+        <h1>对 话 客 厅</h1>
+      </div>
+      <div class="ob-form">
+        <p class="one">第一步，也是唯一一步</p>
+        <p class="q">你想跟谁聊？</p>
+        <input class="in" type="text" placeholder="比如：一个在美国生活过的姐姐，爱聊日常，英文别太难" readonly>
+        <button class="go" type="button" id="obGo">就这么定</button>
+      </div>
+      <div class="persona">
+        <p class="nm">May</p>
+        <p class="role">旅居波特兰的插画师 · 她自报的</p>
+        <p class="bio">爱聊日常小事，爱吃辣，家里一只猫叫 Maple。中文英文都行；你说得不对她会提，但不扫兴。</p>
+        <div class="prefs">
+          <p class="p"><span class="k">回复语言</span><span class="v">中文为主，夹英文</span></p>
+          <p class="p"><span class="k">教学时刻</span><span class="v">开 · 挑你刚说的那句</span></p>
+          <p class="p"><span class="k">挑战</span><span class="v">温和 · 一次只教一笔</span></p>
+        </div>
+        <button class="go" type="button" id="obIn">进客厅 →</button>
+      </div>
+    </section>
+
+    <!-- ═══ ③ 抽屉（左滑卷宗）═══ -->
+    <section class="screen drawer-wrap" id="drawer">
+      <div class="backdrop" aria-hidden="true">
+        <p style="font-size:14px;color:var(--ink-faint)">（客厅在后面，压暗了）</p>
+      </div>
+      <div class="drawer">
+        <div class="dw-head">
+          <h2>我的本子</h2>
+          <button class="dw-close" type="button" data-nav="living">回到客厅 ✕</button>
+        </div>
+        <div class="dw-tabs"><span>记忆</span><span>句子</span><span>词</span><span>活动</span><span>工具房</span></div>
+
+        <div class="dw-sec">
+          <h3>它记得你什么</h3>
+          <ul>
+            <li>住在杭州 · 养了只猫叫年糕 · 最近常加班</li>
+            <li>常忘的事：<b>动词过去式</b>（已教 3 次，第 4 次在盯）</li>
+            <li>说话习惯：爱用 very；散步是你放松的方式</li>
+          </ul>
+        </div>
+        <div class="dw-sec">
+          <h3>我的句子</h3>
+          <ul>
+            <li>yesterday I went to park for walk, very tired.<span class="st ok">已地道</span><br><span class="sm">今天 · 教过一笔 go→went</span></li>
+            <li>the meeting is very long, I want sleep.<span class="st due">待重写</span></li>
+            <li>my cat rice cake sleep on my keyboard.<span class="st due">待重写</span></li>
+          </ul>
+        </div>
+        <div class="dw-sec">
+          <h3>我的词</h3>
+          <div class="wchips"><span>went</span><span>for a walk</span><span>worth it</span><span>grocery run</span></div>
+        </div>
+        <div class="dw-sec">
+          <h3>待重写</h3>
+          <ul>
+            <li>the meeting is very long…<br><span class="sm">明天回来写一遍</span></li>
+            <li>my cat rice cake…<br><span class="sm">3 天后</span></li>
+          </ul>
+        </div>
+        <div class="dw-sec">
+          <h3>今日活动史</h3>
+          <ul>
+            <li>讲一件昨天的小事 <span class="st ok">完成</span></li>
+            <li>昨天的三个词 <span class="st ok">完成</span></li>
+            <li>睡前一句 <span class="st">还剩</span></li>
+          </ul>
+        </div>
+        <div class="tools">
+          <h3>工具房</h3>
+          <button class="tool" type="button" data-nav="practice">
+            <b>造句练习场</b>
+            <span>从零写一句英文，再一层层说好（稿纸）</span>
+          </button>
+          <button class="tool" type="button">
+            <b>背单词</b>
+            <span>看中文打英文 · 听音写词 · 看词造句</span>
+          </button>
+        </div>
+      </div>
+    </section>
+
+    <!-- ═══ ④ 练习场（稿纸）═══ -->
+    <section class="screen pr" id="practice">
+      <p class="mast">工具房</p>
+      <h2>造句练习场</h2>
+      <p class="src">今日待写 · 第 1 句 / 共 3 句</p>
+      <p class="zh">我昨天去公园散步了，还挺累的。</p>
+      <textarea class="field" readonly spellcheck="false">yesterday I went to park for walk, very tired.</textarea>
+      <p class="marked" aria-label="已标记的镜像行（textarea 里嵌不了标记，这里用渲染行示意）">
+        yesterday I went to <span class="flagged">park for walk</span>, very tired.
+      </p>
+      <div class="hint-note">
+        <span class="hb">三级台阶</span>
+        ① 给个开头：Yesterday I …<br>
+        ② 给一半：Yesterday I ____ to the park …<br>
+        ③ 全给：Yesterday I ____ to the park for a walk, very ____.
+      </div>
+      <div class="note-open on" id="prNote">
+        <span class="flagged">park for walk</span> 这一处不地道——「散个步」是 for a walk，冠词 a 不能省。点句子里任何一个词，词卡就挂在这段下面。
+      </div>
+      <div class="cardwrap" id="prCard">
+        <span class="hw">went</span> /went/ 动词 · go 的过去式<br>昨天做过的事，用它。
+      </div>
+      <p class="rec">今日 3 句 · 已过 2 · 待重写 1（明天回来写一遍）</p>
+      <div class="backs">
+        <button class="back" type="button" data-nav="drawer">← 回工具房</button>
+      </div>
+    </section>
+  </div>
+
+  <!-- 打样工具条（工具，不是设计） -->
+  <nav class="chrome" aria-label="打样工具">
+    <div class="steps" id="steps">
+      <span class="sl">教学时刻</span>
+      <button class="stp on" data-step="1" type="button">①引出</button>
+      <button class="stp" data-step="2" type="button">②圈划</button>
+      <button class="stp" data-step="3" type="button">③改写</button>
+      <button class="stp" data-step="4" type="button">④揭开</button>
+      <button class="stp" data-step="5" type="button">⑤接回</button>
+    </div>
+    <div class="tabs">
+      <button class="tab on" data-nav="living" type="button">客厅</button>
+      <button class="tab" data-nav="onboard" type="button">首启</button>
+      <button class="tab" data-nav="drawer" type="button">抽屉</button>
+      <button class="tab" data-nav="practice" type="button">练习场</button>
+    </div>
+  </nav>
+
+  <script>
+    // ── 打样机架的最小 JS：屏切换 / 教学时刻步进 / 三处静态弹层 ──────────────
+    var $ = function (s) { return document.querySelector(s); };
+    var body = document.body;
+
+    function nav(id) {
+      location.hash = id;
+    }
+    function applyScreen(id) {
+      var valid = ['living', 'onboard', 'drawer', 'practice'];
+      if (valid.indexOf(id) < 0) id = 'living';
+      body.setAttribute('data-screen', id);
+      var secs = document.querySelectorAll('.screen');
+      for (var i = 0; i < secs.length; i++) secs[i].classList.toggle('on', secs[i].id === id);
+      var tabs = document.querySelectorAll('.tab');
+      for (var j = 0; j < tabs.length; j++) tabs[j].classList.toggle('on', tabs[j].getAttribute('data-nav') === id);
+      window.scrollTo(0, 0);
+    }
+    window.addEventListener('hashchange', function () { applyScreen(location.hash.slice(1) || 'living'); });
+    applyScreen(location.hash.slice(1) || 'living');
+
+    document.addEventListener('click', function (e) {
+      var t = e.target.closest('[data-nav]');
+      if (t) nav(t.getAttribute('data-nav'));
+    });
+    $('#menuBtn').addEventListener('click', function () { nav('drawer'); });
+
+    // 教学时刻步进：换 body[data-step]，顺带把最新元素滚进视野
+    var stepNames = { 1: '.tm-intro', 2: '.turn.me .anchor', 3: '.rewrite', 4: '.tcard', 5: '.tm-back' };
+    function setStep(n) {
+      body.setAttribute('data-step', String(n));
+      var btns = document.querySelectorAll('.stp');
+      for (var i = 0; i < btns.length; i++) btns[i].classList.toggle('on', btns[i].getAttribute('data-step') === String(n));
+      // 第 3 步：输入框切成改写内容；其余步恢复
+      var pen = $('#penInput');
+      if (n === 3) { pen.value = 'yesterday I went to park for walk, very tired.'; $('#sendBtn').textContent = '改好了'; }
+      else { pen.value = ''; $('#sendBtn').textContent = '说'; }
+      var el = document.querySelector(stepNames[n]);
+      if (el) setTimeout(function () { el.scrollIntoView({ behavior: 'smooth', block: 'center' }); }, 40);
+    }
+    document.querySelectorAll('.stp').forEach(function (b) {
+      b.addEventListener('click', function () { setStep(parseInt(b.getAttribute('data-step'), 10)); });
+    });
+
+    // 透明仪表明细 / 换个挑战 / 逐词词卡
+    $('#meterBtn').addEventListener('click', function () { $('#meterDetail').classList.toggle('on'); });
+    $('#chalBtn').addEventListener('click', function (e) { e.stopPropagation(); $('#chalPop').classList.toggle('on'); });
+
+    var lex = {
+      go: 'go /ɡəʊ/ 动词 · 去；走（这里该用过去式 went）',
+      went: 'went /went/ 动词 · go 的过去式',
+      park: 'park /pɑːk/ 名词 · 公园',
+      tired: 'tired /taɪəd/ 形容词 · 累的',
+      yesterday: 'yesterday /ˈjestədeɪ/ 副词·名词 · 昨天',
+      walk: 'walk /wɔːk/ 动词·名词 · 走；散步'
+    };
+    document.querySelectorAll('#userEn .w').forEach(function (w) {
+      w.addEventListener('click', function () {
+        document.querySelectorAll('#userEn .w').forEach(function (x) { x.classList.remove('open'); });
+        var old = $('#living .cardwrap');
+        if (old) old.remove();
+        w.classList.add('open');
+        var div = document.createElement('div');
+        div.className = 'cardwrap';
+        div.textContent = lex[w.textContent] || (w.textContent + ' ——没查到（如实说，不编）');
+        w.closest('.say').appendChild(div);
+      });
+    });
+
+    // 首启两态 / 人设入口提示
+    $('#obGo').addEventListener('click', function () { $('#onboard').classList.add('done'); });
+    $('#obIn').addEventListener('click', function () { nav('living'); });
+    document.querySelector('.who-sub').addEventListener('click', function () {
+      alert('人设管理 · 设置（IA ④⑤，本轮未打样）');
+    });
+  </script>
+</body>
+</html>

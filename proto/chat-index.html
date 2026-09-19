@@ -1,0 +1,182 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <title>对话客厅 · 四屏三版结构打样（总览）</title>
+  <meta name="description" content="对话客厅：客厅/首启/抽屉/练习场四屏 × 三版结构（誊写稿/往来信笺/排练剧本）。零依赖、零外部资源、零模型调用。">
+  <meta name="theme-color" content="#fbf9f4">
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 20 20'%3E%3Crect width='20' height='20' rx='4' fill='%231b1a17'/%3E%3Cpath d='M5 12.8 L10 6 L15 12.8' fill='none' stroke='%23fbf9f4' stroke-width='1.9' stroke-linecap='round' stroke-linejoin='round'/%3E%3Cpath d='M7 16 H13' fill='none' stroke='%23fbf9f4' stroke-width='1.9' stroke-linecap='round'/%3E%3C/svg%3E">
+  <!--
+    总览页：三版（V1 誊写稿 / V2 往来信笺 / V3 排练剧本）× 四屏（客厅 / 首启 /
+    抽屉 / 练习场）。左上选版、右上选屏，中间是 390×844 的手机框（iframe 载入
+    对应版本的对应屏）。三版共用同一套纸感令牌（write.css / A 手稿）与同一份
+    演示内容，差异全在【结构与交互】——对照着翻，别看配色。
+    顶部黑条是打样工具，不属于被评的设计。
+  -->
+  <style>
+    :root {
+      --bg: #fbf9f4;
+      --ink: #1b1a17;
+      --ink-soft: #5c574e;
+      --ink-faint: #726a5e;
+      --rule: #ded7c9;
+      --rule-soft: #ebe5d8;
+      --pencil: #a8562f;
+      --f-serif: Georgia, 'Times New Roman', 'Songti SC', 'SimSun', 'Noto Serif CJK SC', serif;
+      --f-sans: system-ui, -apple-system, 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', sans-serif;
+      --f-mono: ui-monospace, 'Cascadia Mono', Consolas, monospace;
+    }
+    * { box-sizing: border-box; }
+    html, body { margin: 0; padding: 0; background: var(--bg); }
+    body { color: var(--ink); font-family: var(--f-serif); -webkit-tap-highlight-color: transparent; }
+
+    .layout { display: flex; min-height: 100vh; }
+
+    /* ── 侧栏（桌面）/ 顶栏（手机）────────────────────────────────────────── */
+    aside {
+      width: 300px; flex: none; padding: 26px 22px 30px;
+      border-right: 1px solid var(--rule);
+      display: flex; flex-direction: column; gap: 14px;
+    }
+    .mast { font-family: var(--f-sans); }
+    .mast h1 { margin: 0 0 4px; font-size: 17px; font-weight: 600; letter-spacing: 0.14em; font-family: var(--f-serif); }
+    .mast p { margin: 0; font-size: 11px; color: var(--ink-faint); line-height: 1.7; }
+    .grp { font-family: var(--f-sans); font-size: 10px; letter-spacing: 0.24em; color: var(--ink-faint); margin: 10px 0 2px; }
+    .vbtn, .sbtn {
+      display: block; width: 100%; text-align: left; border: 0; background: none; cursor: pointer;
+      font-family: var(--f-serif); color: var(--ink-soft); padding: 8px 10px; border-left: 1px solid var(--rule);
+    }
+    .vbtn b { display: block; font-size: 15px; font-weight: 600; color: var(--ink); }
+    .vbtn span { display: block; font-family: var(--f-sans); font-size: 11px; color: var(--ink-faint); line-height: 1.6; margin-top: 2px; }
+    .vbtn.on { border-left: 1px solid var(--pencil); background: var(--rule-soft); }
+    .sbtn { display: inline-block; width: auto; font-family: var(--f-sans); font-size: 12px; padding: 4px 10px; border-left: 0; border-bottom: 1px solid var(--rule); margin: 0 8px 8px 0; }
+    .sbtn.on { border-bottom: 1px solid var(--ink); color: var(--ink); font-weight: 600; }
+    .open { font-family: var(--f-sans); font-size: 11px; color: var(--ink-faint); }
+    .open a { color: var(--pencil); }
+    .note { font-family: var(--f-sans); font-size: 10px; color: var(--ink-faint); line-height: 1.7; border-top: 1px solid var(--rule-soft); padding-top: 10px; margin-top: auto; }
+
+    /* ── 手机框 ──────────────────────────────────────────────────────────── */
+    main { flex: 1; display: flex; align-items: center; justify-content: center; padding: 26px 16px; overflow: hidden; }
+    .device-wrap { position: relative; }
+    .device {
+      width: 390px; height: 844px; position: relative; overflow: hidden;
+      border: 1px solid var(--rule); outline: 8px solid var(--ink); outline-offset: 2px;
+      background: var(--bg);
+      transform-origin: top center;
+    }
+    .device iframe { width: 390px; height: 844px; border: 0; display: block; background: var(--bg); }
+    .dev-cap {
+      margin-top: 16px; text-align: center; font-family: var(--f-sans); font-size: 11px; color: var(--ink-faint);
+    }
+    .dev-cap b { color: var(--ink); font-weight: 600; letter-spacing: 0.08em; }
+
+    @media (max-width: 760px) {
+      .layout { flex-direction: column; }
+      aside { width: 100%; border-right: 0; border-bottom: 1px solid var(--rule); padding-bottom: 14px; }
+      .note { display: none; }
+      main { padding: 10px 0 0; }
+      .dev-cap { margin-bottom: 12px; }
+      .vbtn span { display: none; }
+      .vbtn b { font-size: 14px; }
+      .vbtn { padding: 5px 10px; display: inline-block; width: auto; border-left: 0; border-bottom: 1px solid var(--rule); margin-right: 6px; }
+      .vbtn.on { border-left: 0; border-bottom: 1px solid var(--pencil); background: none; }
+    }
+  </style>
+</head>
+<body>
+  <div class="layout">
+    <aside>
+      <div class="mast">
+        <h1>对话客厅 · 结构打样</h1>
+        <p>四屏 × 三版。三版共用同一套纸感令牌（A 手稿）与同一份演示对话，差异全在<b>结构与交互</b>：消息行形态、教学卡的形状与插入、输入区比例与台阶、引子与小签位置。</p>
+      </div>
+      <div class="grp">版本（结构差异轴）</div>
+      <button class="vbtn on" data-v="1" type="button">
+        <b>V1 · 誊写稿</b>
+        <span>悬挂说话人栏的转写手稿：栏标+缩进+字重分双方；教学卡＝夹页（折角、从上翻开）；输入窄框、台阶竖梯挂右缘；引子是栏上书签带，小签回形针别在框角；抽屉左滑。</span>
+      </button>
+      <button class="vbtn" data-v="2" type="button">
+        <b>V2 · 往来信笺</b>
+        <span>左右信纸对齐：May 素纸在左、我落在撕边信纸卡上（右、字重 600）；教学卡＝贴签（两角胶带、左右翻开）；输入两行半高框、台阶楼梯在框下；引子是附笔 P.S.，小签从机顶垂挂；抽屉右滑。</span>
+      </button>
+      <button class="vbtn" data-v="3" type="button">
+        <b>V3 · 排练剧本</b>
+        <span>居中报名行的排练剧本：页缘行号，字重分双方；教学卡＝行间批注（双规线夹住、页缘箭头指回被圈的词、从上长出来）；输入一句提词行、台阶三签在左；引子是场记行，小签是右屏缘页签；抽屉底升。</span>
+      </button>
+      <div class="grp">屏</div>
+      <div>
+        <button class="sbtn on" data-s="living" type="button">客厅（教学时刻五步）</button>
+        <button class="sbtn" data-s="onboard" type="button">首启</button>
+        <button class="sbtn" data-s="drawer" type="button">抽屉</button>
+        <button class="sbtn" data-s="practice" type="button">练习场</button>
+      </div>
+      <p class="open">单独打开：<a id="openLink" href="chat-v1.html#living" target="_blank">chat-v1.html</a></p>
+      <p class="note">
+        客厅底部黑条＝打样工具（屏切换 + 教学时刻五步：①引出 ②圈划 ③改写 ④揭开 ⑤接回），不属于被评的设计。<br>
+        演示数据全静态：May／我昨天去公园散步了，还挺累的／yesterday I go to park for walk, very tired。<br>
+        纸感令牌与 A 手稿（write.css）同源：#fbf9f4 纸 · #1b1a17 墨 · #a8562f 红铅笔 · 系统衬线栈，零外部资源。
+      </p>
+    </aside>
+    <main>
+      <div class="device-wrap">
+        <div class="device" id="device">
+          <iframe id="frame" title="打样预览" src="chat-v1.html#living"></iframe>
+        </div>
+        <p class="dev-cap" id="cap"><b>V1 誊写稿</b> · 客厅 · 390×844</p>
+      </div>
+    </main>
+  </div>
+
+  <script>
+    var V = { 1: 'V1 誊写稿', 2: 'V2 往来信笺', 3: 'V3 排练剧本' };
+    var S = { living: '客厅', onboard: '首启', drawer: '抽屉', practice: '练习场' };
+    var NAMES = { 1: '誊写稿', 2: '往来信笺', 3: '排练剧本' };
+    var cur = { v: 1, s: 'living' };
+    var frame = document.getElementById('frame');
+    var cap = document.getElementById('cap');
+    var openLink = document.getElementById('openLink');
+
+    function syncHash() {
+      location.hash = 'v=' + cur.v + '&s=' + cur.s;
+    }
+    function apply(veh, sil) {
+      cur.v = veh; cur.s = sil;
+      frame.src = 'chat-v' + veh + '.html#' + sil;
+      cap.innerHTML = '<b>' + V[veh] + '</b> · ' + S[sil] + ' · 390×844';
+      openLink.href = 'chat-v' + veh + '.html#' + sil;
+      openLink.textContent = 'chat-v' + veh + '.html';
+      var vb = document.querySelectorAll('.vbtn');
+      for (var i = 0; i < vb.length; i++) vb[i].classList.toggle('on', vb[i].getAttribute('data-v') === String(veh));
+      var sb = document.querySelectorAll('.sbtn');
+      for (var j = 0; j < sb.length; j++) sb[j].classList.toggle('on', sb[j].getAttribute('data-s') === sil);
+      syncHash();
+    }
+    // 从自身 hash 恢复（#v=2&s=drawer）
+    var m = /^#v=([123])&s=(living|onboard|drawer|practice)$/.exec(location.hash);
+    if (m) apply(m[1], m[2]);
+
+    document.querySelectorAll('.vbtn').forEach(function (b) {
+      b.addEventListener('click', function () { apply(b.getAttribute('data-v'), cur.s); });
+    });
+    document.querySelectorAll('.sbtn').forEach(function (b) {
+      b.addEventListener('click', function () { apply(cur.v, b.getAttribute('data-s')); });
+    });
+
+    // 手机框随视口缩放（390×844 优先，小屏整体缩到装得下）。
+    // 桌面端 aside 与预览区是并排的（不吃高度），只有 ≤760px 折叠成上下才要减它；
+    // 下限钳 0.35，防止把 avail 算成负数时 scale 变负、框被镜像翻转。
+    function fit() {
+      var d = document.getElementById('device');
+      var stacked = window.innerWidth <= 760;
+      var asideH = stacked ? document.querySelector('aside').offsetHeight : 0;
+      var avail = window.innerHeight - asideH - (stacked ? 80 : 110);
+      var scale = Math.max(0.35, Math.min(1, avail / 844));
+      d.style.transform = 'scale(' + scale + ')';
+      d.parentElement.style.height = (844 * scale + 46) + 'px';
+    }
+    window.addEventListener('resize', fit);
+    fit();
+  </script>
+</body>
+</html>
