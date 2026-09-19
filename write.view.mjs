@@ -568,14 +568,22 @@ const cardKeyIn = (snapshot, block) => (
 
 /* ── 分段输入（纪律 ②）────────────────────────────────────────────────────────
    一行一段。**没有"1 / 2 / 3"的序号槽**：那是标签，而这一屏的主角是这几行本身。
-   序号由 placeholder 的措辞承担（第一格给例句，后面的说"接着写下一段"）。 */
+   序号由 placeholder 的措辞承担（第一格说"第一段，用英文写"，后面的说"接着写下一段"）。
+   ⚠️ placeholder **只许说"这里该写什么"，一个字英文都不许有**（2026-09-19 修）：
+   他上一屏看到的中文例子是"今天没什么特殊的，我正常上了半天课"，而第一格原先的灰字是
+   `Nothing special today.` —— 那**恰好就是那句中文的现成英文答案**：他一个字还没打，
+   答案已经摆在光标的位置上。这与本文件 `paintStep` 里「从零写：没有提示、没有答案、
+   没有一个示范词」这条纪律**直接冲突**（原先两处注释互相矛盾，是这次一起改掉的那条）。
+   现在这条纪律有机械判据：`scripts/ui-gates.mjs` 的 **G5**（draft 档、他还没打字时，
+   屏上不得出现任何 ASCII 英文字母；带"故意注入一句英文"的反向控制）。 */
 function appendSegInputs(doc, host, segs, kind, handlers) {
   const list = Array.isArray(segs) && segs.length > 0 ? segs : [''];
   list.forEach((value, i) => {
     const box = el(doc, 'textarea', 'seg seg-part');
     box.setAttribute('data-in', `${kind}-${String(i)}`);
     box.setAttribute('rows', '1');
-    box.setAttribute('placeholder', i === 0 ? 'Nothing special today.' : '接着写下一段…');
+    // ⚠️ 中性提示，**不含任何英文**：这一屏是他从零写，给一句示范英文 = 给答案（见上面那段）。
+    box.setAttribute('placeholder', i === 0 ? '第一段，用英文写' : '接着写下一段…');
     box.value = String(value ?? '');
     box.addEventListener('input', () => { handlers.on(`${kind}Input`, { index: i, value: box.value }); });
     host.append(box);
