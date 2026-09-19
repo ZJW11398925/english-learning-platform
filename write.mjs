@@ -669,15 +669,22 @@ export async function mountWrite(root, deps = {}) {
      * 他把这一步**看见**（屏上如实写着为什么没有东西可挑），比悄悄替他决定要好。
      * 它**不自己开一个 `run()`**：调用方（`draftDone`）已经在 `run()` 里了，
      * 再套一层会让同一次动作重画两遍。
+     *
+     * w3 第三条道：`why` 是模型的中文 reason（为什么没有教点可挑）。它要在 ② 的**任何**
+     * 结局里都留在屏上——草稿没有可锚英文时，② 很可能也如实说 canTeach:false，而
+     * `refuse()` 会清掉 notice，所以每条出口都补一遍（"为什么没教点"与"② 的回答"是两件事，
+     * 都要看得见）。
      */
     async pickSkip(why = '') {
+      const keepNotice = () => { if (why !== '') ui.notice = why; };
       try {
         const r = await facade.pickTeachPoint(null);
-        if (r === null || typeof r !== 'object') { refuse('门面没有回话'); return; }
-        if (r.ok !== true) { refuse(whyOf(r, '它没给理由')); return; }
+        if (r === null || typeof r !== 'object') { refuse('门面没回话'); keepNotice(); return; }
+        if (r.ok !== true) { refuse(whyOf(r, '它没给理由')); keepNotice(); return; }
         const issue = r.issue;
         if (issue === null || issue === undefined || typeof issue.quote !== 'string' || issue.quote === '') {
           refuse('它没有说清要标哪一处');
+          keepNotice();
           return;
         }
         snap.picked = null;
@@ -685,8 +692,8 @@ export async function mountWrite(root, deps = {}) {
         snap.issueOpen = false;
         snap.step = 'marked';
         ui.failReason = null;
-        ui.notice = why === '' ? null : why;
-      } catch (err) { refuse(err); }
+        keepNotice();
+      } catch (err) { refuse(err); keepNotice(); }
     },
 
     /* ── 第 4 步：标出来、不说；点开才说 ────────────────────────────────── */

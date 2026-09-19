@@ -26,8 +26,12 @@
 // 纯逻辑模块：零 import、零浏览器 API、零副作用——可在 Node 中直接测。
 // `/v1/chat/completions` 的请求头、超时、失败分档都在 `./client.mjs`，本模块**不碰网络**。
 
-/** 提示词版本号（`w1` → `w2`：D4 收紧 1 级提示；改提示词就改它，成本账与效果账要能区分"哪一代提示词"）。 */
-export const PROMPT_VERSION = 'w2';
+/**
+ * 提示词版本号（`w1` → `w2`：D4 收紧 1 级提示；`w2` → `w3`：2026-09-19 给"能帮（台阶锚中文）
+ * 但草稿无可锚教点"的输入补**第三条道**——空 teachPoints + 一句中文 reason；改提示词就改它，
+ * 成本账与效果账要能区分"哪一代提示词"）。
+ */
+export const PROMPT_VERSION = 'w3';
 
 // ─────────────────────────── ① 「读这一版」───────────────────────────
 
@@ -60,7 +64,7 @@ export const READ_RULE_TRACEABLE = [
  * 教点必须逐字锚在他写过的字上（V1），而"他一个字都还没写"时**无处可锚** ——
  * 那时逼模型给出 2–3 个教点是**在逼它编**（编出来的 quote 会被 V1 拦下，整份 ① 作废，
  * 于是"他还没写就点提示"这条路永远走不通）。所以空白草稿要求 `teachPoints: []`。
- * 非空草稿那条**逐字不变**。
+ * 非空草稿那条**逐字返回 `READ_RULE_PICK_FEW`**（w3 起它自带诚实空道，见那个常量的说明）。
  *
  * @param {unknown} draft 他这一版（原样；只有"归一空白后是不是空的"这一个判断）
  * @returns {string} 提示词里那一段
@@ -73,24 +77,47 @@ export function readRulePickFew(draft) {
       'Output an EMPTY "teachPoints" array ([]). Do not invent a teach point, and do not quote',
       'the Chinese text as if it were their English.',
     ].join('\n')
-    : [
-      'Output 2 or 3 teach points, ordered by how much they would improve this sentence.',
-      'Judge ONLY what the learner actually wrote. Do not teach something the draft never attempts.',
-    ].join('\n');
+    : READ_RULE_PICK_FEW; // 非空那一档与常量**逐字同步**（同步由构造保证，测试另钉一道）
 }
 
-/** 非空草稿那一档的原文（有测试逐字钉住它，免得"分岔"顺手把旧口径改掉）。 */
+/**
+ * 非空草稿那一档的原文（有测试逐字钉住它，免得"分岔"顺手把旧口径改掉）。
+ *
+ * w3 起这一档多了**诚实空道**（第三条道，实弹 refuse-2 落地）：草稿非空白、但里面
+ * 没有能逐字锚住 quote 的英文（一个字母 `q`、`ok`、纯数字、把中文写进了英文框、乱敲的字母）
+ * ⇒ 输出**空 teachPoints 数组** + `reason` 里一句短中文告诉学习者这一版还没有能指着教的东西。
+ * 修这条之前的死路：模型对这类输入回 canHelp:true + 台阶 + teachPoints:[]（reason 为空），
+ * 被 V3「canHelp===true 却一个教点都没有」整份拦下 ⇒ 学习者只看到 validation_failed——
+ * 既不是"不接"也不是帮助。`readRulePickFew` 的非空分支**逐字返回本常量**（同步由构造保证）。
+ */
 export const READ_RULE_PICK_FEW = [
   'Output 2 or 3 teach points, ordered by how much they would improve this sentence.',
   'Judge ONLY what the learner actually wrote. Do not teach something the draft never attempts.',
+  'Honest empty case: if the draft contains no English you could anchor a quote on',
+  'character-for-character (random letters, a single letter, digits only, an isolated word that',
+  'carries none of their meaning, or Chinese typed into the English box), output an empty',
+  '"teachPoints" array ([]) instead, and write one short Chinese sentence in "reason" telling the',
+  'learner this draft has nothing to point at and teach yet (the hint steps are still for them).',
+  'Never invent a quote just to avoid the empty array.',
 ].join('\n');
 
-/** 行为约束之四：**接不住就说不接**（V3：程序绝不补内容，见 `./engine.mjs` / `./flow.mjs`）。 */
+/**
+ * 行为约束之四：**接不住就说不接**（V3：程序绝不补内容，见 `./engine.mjs` / `./flow.mjs`）。
+ *
+ * w3 口径（与 `READ_RULE_PICK_FEW` 的诚实空道配套，两条不再互相打架）：**不接**是"整个请求
+ * 没法帮"时的答案（如中文本身含糊到台阶也给不出）；**"草稿还谈不上是英文"不是不接**——
+ * 那走"台阶照给（锚中文原话）+ 空教点 + reason 说明"那条道。旧例子里那句 "it is empty"
+ * 已删：空白草稿走台阶不走不接（D1 修复已定）。
+ */
 export const READ_RULE_REFUSE = [
-  'Be honest about what you can do with THIS draft.',
-  'If you cannot help with this draft (for example it is empty, it is not English, it is off the',
-  'topic, or it is already good enough that any edit would be noise), set "canHelp" to false,',
-  'give a short "reason" in Chinese, and leave "hint" and "teachPoints" empty.',
+  'Be honest about what you can do with THIS request.',
+  'If you cannot help with the request as a whole — for example the Chinese itself is too vague',
+  'to anchor even a single hint on — set "canHelp" to false, give a short "reason" in Chinese,',
+  'and leave "hint" and "teachPoints" empty.',
+  'A draft that is not really English yet (random letters, a single letter, digits only, or Chinese',
+  'typed into the English box) is NOT a refusal: keep "canHelp" true, still give the three hint',
+  'categories anchored on what they said in Chinese, output an empty "teachPoints" array, and write',
+  'one short Chinese sentence in "reason" saying this draft has nothing to point at yet.',
   'Refusing is a correct answer. Never invent a problem just to have something to say.',
 ].join('\n');
 
@@ -114,9 +141,10 @@ export const READ_RULE_HINT_TIERS = [
   'X", "it starts like Y"). Naming the target, or pointing at the word they should have used,',
   'is the step-3 answer — it is not a nudge.',
   'The learner may ask for these BEFORE writing anything (they got stuck at the first word).',
-  'So never anchor a hint on their English when they have written nothing yet:',
-  'anchor it on what they already said in Chinese (and on the material), and aim it at the',
-  'English they are reaching for. A hint for an empty draft is still a hint, not a refusal.',
+  'So never anchor a hint on their English when there is no usable English in the draft yet —',
+  'whether the draft is empty or simply not really English (random letters, digits, Chinese in the',
+  'English box): anchor it on what they already said in Chinese (and on the material), and aim it',
+  'at the English they are reaching for. A hint for such a draft is still a hint, not a refusal.',
 ].join('\n');
 
 /**
@@ -129,9 +157,13 @@ export const READ_OUTPUT_SHAPE = [
   ' "teachPoints":[{"key":"tp1","label":"短中文标签","quote":"从他这一版里逐字复制的一段","kind":"grammar"}]}',
   'Rules for the fields:',
   '- "canHelp": boolean. When false, "reason" MUST be a short Chinese sentence and the other two fields stay empty.',
-  '- "reason": null when "canHelp" is true.',
+  '- "reason": null when "canHelp" is true and you output teach points. When "canHelp" is true but',
+  '  "teachPoints" is empty (nothing in the draft to anchor a quote on), "reason" MUST be one short',
+  '  Chinese sentence telling the learner why there is nothing to pick yet. Otherwise null.',
   '- "hint": the three categories described above; each is {"1":…,"2":…,"3":…}.',
-  '- "teachPoints": 2 or 3 items — or an EMPTY array when the learner has written nothing yet.',
+  '- "teachPoints": 2 or 3 items — or an EMPTY array when there is nothing in the draft you can',
+  '  anchor a quote on (a blank draft, or a draft with no real English in it); that empty array',
+  '  must come with the "reason" sentence described above.',
   '  · "key": a short stable id (tp1, tp2, tp3).',
   '  · "label": a SHORT Chinese phrase naming what to work on (this is what the learner picks from).',
   '  · "quote": copied character-for-character from the learner\'s draft.',
@@ -150,6 +182,8 @@ export const READ_OUTPUT_SHAPE = [
  *     **可以是空的**：他从零写、卡在第一个词上就点提示，是很正常的一步（那是本形态最要紧的一格）。
  *     空白草稿时唯一的分岔是"教点一栏留空"（`readRulePickFew`），提示那一栏照给——
  *     而且锚在**中文原话/素材**上，不是锚在他的英文上（他还没有英文可锚）。
+ *     w3 起**非空白但无可锚英文**的草稿（`q` / 纯数字 / 中文写进英文框）走同一条分岔：
+ *     教点留空 + `reason` 一句短中文（见 `READ_RULE_PICK_FEW` 的诚实空道）。
  * @returns {Array<{role: string, content: string}>} OpenAI 形状的两条消息
  */
 export function buildReadMessages({ chinese, material = null, draft = '' } = {}) {

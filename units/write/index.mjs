@@ -51,6 +51,12 @@ export const APP_FAIL_REASONS = Object.freeze({
    * 为什么不是 `cannot_help`：模型**接得住**（`canHelp === true`，提示那一栏照给），
    * 只是"教点该锚在哪几个字上"这件事随着他改了字而失效了。这两件事在界面上要分开说。
    * 处置：跳过挑教点这一步（`pickTeachPoint(null)`），② 以 `pickedTeachPoint = null` 跑。
+   *
+   * w3 第三条道之后这里有**两种零候选**，detail 必须分开说（都如实、都不编）：
+   *   · 模型自己就没给教点（草稿里没有能逐字锚住的英文——`q`/纯数字/中文写进英文框）；
+   *   · 模型给过教点、但他改了字之后旧 `quote` 一个都对不上（上面那种）。
+   * 前者把模型那句中文 reason **原样透出**（新 V3 钉着它必须给）：学习者要能看到
+   * 「为什么没有教点可挑」，而不是一句程序腔的"没有东西可挑"。
    */
   NO_TRACEABLE_TEACH_POINT: 'no_traceable_teach_point',
 });
@@ -364,17 +370,26 @@ export function createWriteApp({ callModel = defaultCallModel, storage = null, n
       }
       // 候选是空的时候**如实报"这一步要跳过"**，不报 ok:true ——
       // 报成功的话界面会画一张空候选表，而他看到的是"没有东西可挑"却说不出为什么。
-      // （空候选只有两种来源：草稿是空的、或过滤之后一个不剩，两者都不是"接得住"。）
+      // （零候选的来源有三种：草稿是空的、**模型说这一版没有可锚的英文（w3 第三条道）**、
+      // 或过滤之后一个不剩——都不是"接得住却没有下文"。）
       if (flow.candidates().length === 0) {
+        // 模型自己就没给教点吗？（`got.read` 是**过滤前**的那一份——过滤只会减不会增。）
+        const modelGaveNone = Array.isArray(got.read?.teachPoints)
+          ? got.read.teachPoints.length === 0
+          : true;
+        const modelReason = str(read.reason);
         return {
           ok: false,
           candidates: [],
           reason: APP_FAIL_REASONS.NO_TRACEABLE_TEACH_POINT,
-          detail: changed
-            ? '系统读的是你先前那一版，那一版里标出的几个教点在你现在这一版里一个都对不上了，'
+          detail: modelGaveNone
+            ? (modelReason === null
+              // 这一支按新 V3 不该出现（零教点必须带 reason）——留着兜底，如实说、不编。
+              ? '这一次系统没有给出可以挑的教点，直接标出最值得改的一处。'
+              : `${modelReason}——这一步没有教点可挑，直接标出最值得改的一处。`)
+            : '系统读的是你先前那一版，那一版里标出的几个教点在你现在这一版里一个都对不上了，'
               + '所以这一次没有东西可挑——本回合不会再读一遍（读一遍就是多花一次钱），'
-              + '直接标出最值得改的一处。'
-            : '这一次系统没有给出可以挑的教点，直接标出最值得改的一处。',
+              + '直接标出最值得改的一处。',
         };
       }
       return { ok: true, candidates: flow.candidates(), reason: null };

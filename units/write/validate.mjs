@@ -10,8 +10,10 @@
 //   V2 输出里不得出现原句没有的**大写词/数字**（句外的人事词）
 //   V3 `canHelp` / `canTeach === false` 时**原样透出 reason、程序绝不补内容**；
 //      反过来 `canHelp === true` 时必须**真的给出东西**（提示那一栏非空）——
-//      ⚠️ 唯一的例外：**草稿归一空白时允许 `teachPoints` 为空**（一个字都没写 ⇒ 无处可锚，
-//      见 `validateRead` 里那条）。"他还没写"不是"接不住"，也不是"模型可以编一个教点"。
+//      ⚠️ 例外有两种（都落在"教点为空合法"上）：**草稿归一空白**（一个字都没写 ⇒ 无处可锚），
+//      与 w3 第三条道——**草稿非空白但无可锚英文**（`q`/纯数字/中文写进英文框 ⇒ 同样无处可锚）。
+//      后者必须带一句短中文 reason（`isShortChineseReason`）。"还没写出能锚的英文"不是"接不住"，
+//      也不是"模型可以编一个教点"。
 //   V4 `issue` **恰好一处**
 //   V5 `glosses` 的 `word` 必须**逐字出现在 `system` 里**
 //
@@ -405,6 +407,26 @@ function checkRefusalRead(read, violations) {
 }
 
 /**
+ * 「一句短中文」的**机械代理**：归一后至少一个 CJK 字符、且长度 ≤ `REASON_MAX_CHARS`。
+ *
+ * 这是 w3 第三条道的判据（零教点必须带说明），代理口径如实登记：
+ *   · **至少一个 CJK 字符**——那句说明是给中文母语的学习者看的，纯英文说明等于没说；
+ *   · **≤ 60 字**——提示词给的例句约 40 字，60 留了余量；超过它的是段落不是句子，
+ *     会把"没有教点可挑"变成一篇阅读理解。上限是我们定的（不是量出来的），写在常量上。
+ *   · **判不了内容对不对**（机械判据不判语义）：一句不相关的中文也过——那是提示词
+ *     与实弹复核的事，不是这一层的事。
+ */
+const REASON_MAX_CHARS = 60;
+const CJK_RE = /[\u3400-\u9fff\uf900-\ufaff]/;
+
+/** @param {unknown} reason */
+export function isShortChineseReason(reason) {
+  if (typeof reason !== 'string') return false;
+  const t = collapseWhitespace(reason);
+  return t !== '' && t.length <= REASON_MAX_CHARS && CJK_RE.test(t);
+}
+
+/**
  * V1–V3：判「读这一版」。
  *
  * @param {unknown} read `normalizeRead` 的产物
@@ -433,11 +455,18 @@ export function validateRead(read, source) {
   // 教点必须锚在他写过的字上（V1）——草稿归一空白时**无处可锚**，逼模型给出教点只会得到
   // 编造的 quote（然后被 V1 拦下），于是"他还没写就点提示"这条路永远走不通。
   // 空白草稿的 `hint` 锚在**他的中文原话/素材**上（提示词里写死了，见 `./prompt.mjs`），
-  // 那一栏仍然必须非空（上面那条管着）。草稿非空时**旧规则一字不变**：给了 canHelp:true
-  // 就必须给出教点。
+  // 那一栏仍然必须非空（上面那条管着）。
+  //
+  // w3 第三条道（实弹 refuse-2 落地）：草稿**非空白但无可锚英文**（`q` / `ok` / 纯数字 /
+  // 中文写进英文框 / 乱码）与空白草稿同理——台阶照给（锚中文）、教点为空是**合法**形状，
+  // 但必须带**一句短中文 reason**（`isShortChineseReason`）：学习者要能看到"为什么没有教点可挑"。
+  // 修这条之前的死路：这类输入被"canHelp===true 却一个教点都没有"整份拦下 ⇒ 学习者只看到
+  // validation_failed——既不是"不接"也不是帮助。旧文案已被本条**取代**（不再存在"非空草稿
+  // 必须有教点"这条判据）；新文案是一句**新的话**，不得与任何既有 V3 文案印同一句
+  // （红线 16：两类坏法印同一句 ⇒ 删掉这条分支后没有任何测试能变红）。
   const draftEmpty = collapseWhitespace(source) === '';
-  if (read.teachPoints.length === 0 && !draftEmpty) {
-    violations.push('V3: canHelp===true 却一个教点都没有（他无从挑起）');
+  if (read.teachPoints.length === 0 && !draftEmpty && !isShortChineseReason(read.reason)) {
+    violations.push('V3: 零教点必须带一句中文说明（他需要知道为什么没有可挑的教点）');
   }
 
   // HINT_LEAK（D4）：1 级是最小提示，**不许把答案里的词说出来**。
