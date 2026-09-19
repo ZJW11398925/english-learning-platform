@@ -1,0 +1,271 @@
+/* web/chat.css
+ *
+ * 对话客厅（VS1）——视觉基准 = 打样 V2「往来信笺」（web/proto/chat-v2.html，
+ * 线上 /proto/chat-v2.html；人裁决的基准）。纸感令牌取自 web/write.css 同源一版：
+ * 纸 #fbf9f4 / 墨 #1b1a17 / 红铅笔 #a8562f / 系统衬线栈。零外部资源（无字体、
+ * 无图标库、无 CDN——favicon 是 chat.html 里那条 data: URI）。
+ *
+ * 形态（与 V2 打样逐条对得上）：
+ *   · 人设消息  = 素纸靠左（.letter.may），常规字重；
+ *   · 用户消息  = 撕边信纸卡（.letter.me .paper：--touch 衬底 + clip-path 顶部撕口），
+ *                 右置、字重 600；
+ *   · 引子      = 开场消息末尾的附笔（.ps，P.S. 今日活动）；
+ *   · 换个挑战  = 从机顶垂挂的小签（.hang，一根线吊着）；
+ *   · 输入区    = 两行半高的框稿纸（.pen 横线）+ 框下逐级右移的楼梯台阶（.stairs，
+ *                 本单仅占位按钮，无模型调用）；
+ *   · 教学时刻/抽屉不在本单（VS2/VS3 的切片），相关的样式一律不进这个文件。
+ */
+
+:root {
+  --bg: #fbf9f4;
+  --ink: #1b1a17;
+  --ink-soft: #5c574e;
+  --ink-faint: #726a5e;
+  --rule: #ded7c9;
+  --rule-soft: #ebe5d8;
+  --pencil: #a8562f;
+  --touch: #f0e9dc;
+  --f-serif: Georgia, 'Times New Roman', 'Songti SC', 'SimSun', 'Noto Serif CJK SC', serif;
+  --f-sans: system-ui, -apple-system, 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', sans-serif;
+  --f-mono: ui-monospace, 'Cascadia Mono', Consolas, monospace;
+  --read-pad: 18px;
+  --safe-bottom: env(safe-area-inset-bottom, 0px);
+}
+* { box-sizing: border-box; }
+html, body { margin: 0; padding: 0; background: var(--bg); }
+body {
+  color: var(--ink); font-family: var(--f-serif); font-size: 16px; line-height: 1.55;
+  -webkit-text-size-adjust: 100%; -webkit-tap-highlight-color: transparent;
+}
+#stage { max-width: 430px; margin: 0 auto; min-height: 100vh; position: relative; }
+.screen { display: none; }
+.screen.on { display: block; }
+
+/* ── 客厅 · 头部 ─────────────────────────────────────────────────────── */
+.top {
+  position: sticky; top: 0; z-index: 5; background: var(--bg);
+  border-bottom: 1px solid var(--rule); padding: 10px var(--read-pad) 8px;
+  display: flex; align-items: baseline; gap: 10px;
+}
+.who { font-size: 13px; font-weight: 500; letter-spacing: 0.18em; }
+.who-sub { font-size: 11px; color: var(--ink-faint); font-family: var(--f-sans); cursor: pointer; }
+.meter {
+  margin-left: auto; border: 0; background: none; padding: 0; cursor: pointer;
+  font-family: var(--f-mono); font-size: 11px; color: var(--ink-soft);
+  text-decoration: underline dotted; text-underline-offset: 0.28em; text-decoration-color: var(--rule);
+}
+.menu { border: 0; background: none; padding: 2px 6px; font-family: var(--f-sans); font-size: 15px; color: var(--ink-soft); cursor: pointer; }
+.meter-detail {
+  display: none; position: absolute; left: var(--read-pad); right: var(--read-pad); top: 44px;
+  background: var(--bg); border: 1px solid var(--rule); padding: 10px 12px;
+  font-family: var(--f-sans); font-size: 11px; color: var(--ink-faint); line-height: 1.8; z-index: 6;
+}
+.meter-detail.on { display: block; }
+.meter-detail b { color: var(--ink-soft); font-weight: 500; }
+
+/* ── 对话流：左右信笺 ────────────────────────────────────────────────── */
+.flow { padding: 18px var(--read-pad) 250px; }
+.letter { margin: 0 0 18px; max-width: 84%; }
+.letter.may { margin-right: auto; }
+.letter.me { margin-left: auto; }
+.letter .say { margin: 0; font-size: 16px; white-space: pre-wrap; overflow-wrap: anywhere; }
+/* 我 = 撕边信纸卡：顶部撕口 + 暖衬底 + 字重 600 */
+.letter.me .paper {
+  background: var(--touch); padding: 10px 14px 12px; font-weight: 600;
+  clip-path: polygon(0 6px, 4% 2px, 11% 7px, 19% 1px, 27% 6px, 36% 2px, 46% 7px, 55% 2px, 64% 6px, 74% 1px, 83% 7px, 92% 2px, 100% 6px, 100% 100%, 0 100%);
+}
+.postmark {
+  margin-top: 5px; font-family: var(--f-sans); font-size: 9px; letter-spacing: 0.1em;
+  color: var(--ink-faint); display: flex; gap: 8px; align-items: baseline;
+}
+.letter.me .postmark { justify-content: flex-end; }
+.meterline {
+  margin: 5px 0 0; font-family: var(--f-sans); font-size: 10px; color: var(--ink-faint);
+  letter-spacing: 0.03em; display: flex; gap: 10px; align-items: baseline; flex-wrap: wrap;
+}
+.meterline .speak {
+  border: 0; background: none; padding: 0; cursor: pointer; font: inherit; color: var(--ink-soft);
+  text-decoration: underline dotted; text-underline-offset: 0.24em; text-decoration-color: var(--rule);
+}
+.meterline .speak:active { opacity: 0.55; }
+
+/* 引子：开场信末尾的附笔（V2 独有位置） */
+.ps { margin: 8px 0 0; padding-top: 6px; border-top: 1px dashed var(--rule); font-size: 13px; color: var(--ink-soft); }
+.ps b { font-family: var(--f-sans); font-size: 10px; letter-spacing: 0.16em; color: var(--pencil); font-weight: 500; margin-right: 6px; }
+
+/* 正在写（她那一叠信纸里冒出来的一行小字，不是转圈） */
+.typing { margin: 0 0 18px; font-family: var(--f-sans); font-size: 12px; color: var(--ink-faint); }
+
+/* 失败条：如实转述档位与 detail，绝不静默重发（上一形态 D2 的教训） */
+.errline {
+  margin: 0 0 14px; padding: 8px 10px; border-left: 1px solid var(--pencil);
+  font-family: var(--f-sans); font-size: 12px; color: var(--pencil); line-height: 1.7;
+}
+.errline .retry {
+  border: 0; background: none; padding: 0 0 0 6px; cursor: pointer; font: inherit;
+  text-decoration: underline; text-underline-offset: 0.24em;
+}
+
+/* 逐词可点的英文（对话流两侧都点得动；中文整段没有空格，自然整块不可点） */
+.w {
+  display: inline; margin: 0; padding: 0; border: 0; background: none; color: inherit;
+  font: inherit; letter-spacing: inherit; line-height: inherit; cursor: pointer;
+  text-decoration: underline dotted; text-decoration-thickness: 1px; text-underline-offset: 0.24em;
+  text-decoration-color: rgba(27,26,23,0.22);
+}
+.w:active { background: var(--bg); }
+.w.open { text-decoration-color: var(--pencil); }
+
+/* ── 垂挂小签：从机顶吊下来（V2 独有位置） ───────────────────────────── */
+.hang { position: absolute; top: 42px; right: 20px; z-index: 7; }
+.hang .string { display: block; width: 1px; height: 16px; background: var(--ink-soft); margin: 0 auto; }
+.hang .tagbtn {
+  display: block; border: 1px solid var(--rule); border-top: 0; background: var(--bg); cursor: pointer;
+  font-family: var(--f-sans); font-size: 11px; color: var(--pencil); padding: 4px 12px;
+  transform-origin: top center; transform: rotate(2deg);
+}
+.challenge {
+  display: none; position: absolute; top: calc(100% + 8px); right: 0; width: 236px;
+  background: var(--bg); border: 1px solid var(--rule); padding: 10px 12px;
+  font-family: var(--f-sans); font-size: 12px; color: var(--ink-soft); line-height: 1.8; z-index: 8;
+}
+.challenge.on { display: block; }
+.challenge b { font-weight: 600; color: var(--ink); }
+
+/* ── 输入区：高框 + 楼梯台阶（本单台阶仅占位，无模型调用）───────────── */
+.dock {
+  position: fixed; left: 0; right: 0; bottom: 0; z-index: 8;
+  background: var(--bg); border-top: 1px solid var(--rule);
+  padding: 10px var(--read-pad) calc(14px + var(--safe-bottom));
+  max-width: 430px; margin: 0 auto;
+}
+.dock-row { display: flex; align-items: stretch; gap: 12px; }
+.pen {
+  width: 100%; border: 0; background: none; outline: none; resize: none;
+  font-family: var(--f-serif); font-size: 16px; color: var(--ink); line-height: 1.6;
+  padding: 10px 2px; min-height: 64px; max-height: 160px; overflow-y: auto;
+  background-image: repeating-linear-gradient(to bottom, transparent 0 25px, var(--rule-soft) 25px 26px);
+  background-attachment: local;
+}
+.pen::placeholder { color: var(--ink-faint); font-size: 13px; font-family: var(--f-sans); }
+.send {
+  border: 0; background: none; padding: 6px 2px; cursor: pointer; flex: none; align-self: flex-end;
+  font-family: var(--f-serif); font-size: 15px; font-weight: 700; color: var(--ink);
+  text-decoration: underline; text-decoration-thickness: 1px; text-underline-offset: 0.3em;
+}
+.send:active { opacity: 0.55; }
+.send[disabled] { color: var(--ink-faint); cursor: default; text-decoration-color: var(--rule-soft); }
+/* 台阶 = 楼梯：框下三档，逐级右移（VS2 才接模型，本单点击只说明占位） */
+.stairs { display: flex; flex-direction: column; gap: 4px; margin-top: 8px; }
+.stair {
+  border: 0; background: none; cursor: pointer; align-self: flex-start; text-align: left;
+  font-family: var(--f-sans); font-size: 11px; color: var(--ink-soft); padding: 3px 8px;
+  border-bottom: 1px solid var(--rule); border-left: 1px solid var(--rule);
+}
+.stair:active { background: var(--touch); }
+.stair.s2 { margin-left: 26px; }
+.stair.s3 { margin-left: 52px; }
+.stairs-note { display: none; margin: 6px 0 0; font-family: var(--f-sans); font-size: 10px; color: var(--ink-faint); }
+.stairs-note.on { display: block; }
+
+/* ── 词卡（复用 web/data/lexicon 点词链路；版式沿 write.css 的脚注卡）── */
+.cardwrap {
+  margin: 10px 0 0; padding-left: 10px; border-left: 1px solid var(--rule);
+  font-family: var(--f-sans); font-size: 13px; color: var(--ink-soft); font-weight: 400;
+  max-width: 300px;
+}
+.cardwrap .hw { font-family: var(--f-serif); font-size: 16px; font-weight: 700; color: var(--pencil); }
+.cardwrap .wc-meta { display: block; margin-top: 2px; font-size: 13px; color: var(--ink-faint); }
+.cardwrap .wc-zh { display: block; margin-top: 4px; font-family: var(--f-serif); font-size: 16px; color: var(--ink); }
+.cardwrap .wc-none { display: block; margin-top: 4px; font-size: 13px; color: var(--ink-faint); }
+.cardwrap .wc-miss { display: block; margin-top: 4px; font-size: 13px; color: var(--ink-faint); font-style: italic; }
+.cardwrap .wc-acts { margin-top: 6px; }
+.cardwrap .wc-do {
+  border: 0; background: none; padding: 0; cursor: pointer; font-family: var(--f-sans);
+  font-size: 12px; color: var(--ink-soft);
+  text-decoration: underline dotted; text-underline-offset: 0.24em; text-decoration-color: var(--rule);
+}
+.cardwrap .wc-do:active { opacity: 0.55; }
+
+/* ── 首启：一张邮寄单（V2 形态）──────────────────────────────────────── */
+.ob { padding: 54px var(--read-pad) 60px; min-height: 100vh; }
+.ob .formhead { text-align: center; font-family: var(--f-sans); font-size: 11px; letter-spacing: 0.3em; color: var(--ink-faint); margin: 0 0 26px; }
+.ob h1 { text-align: center; margin: 0 0 6px; font-size: 27px; font-weight: 500; letter-spacing: 0.14em; }
+.ob .sub { text-align: center; margin: 0 0 34px; font-size: 13px; color: var(--ink-soft); }
+.ob .desc {
+  display: block; width: 100%; border: 0; border-bottom: 1px solid var(--rule); background: none; outline: none;
+  font-family: var(--f-serif); font-size: 16px; color: var(--ink); line-height: 1.6;
+  padding: 8px 2px; min-height: 72px; resize: none;
+}
+.ob .desc::placeholder { color: var(--ink-faint); font-size: 13px; font-family: var(--f-sans); }
+.ob .go {
+  display: block; margin: 26px auto 0; border: 0; background: none; cursor: pointer;
+  font-family: var(--f-serif); font-size: 17px; font-weight: 700; color: var(--ink);
+  text-decoration: underline; text-decoration-thickness: 1px; text-underline-offset: 0.32em;
+}
+.ob .go:active { opacity: 0.55; }
+.ob .go[disabled] { color: var(--ink-faint); cursor: default; text-decoration-color: var(--rule-soft); }
+.ob .hint { margin: 14px 0 0; text-align: center; font-family: var(--f-sans); font-size: 11px; color: var(--ink-faint); }
+.ob .hint a { color: var(--pencil); text-decoration: underline dotted; text-underline-offset: 0.24em; cursor: pointer; }
+/* 卡片态：信封翻盖下的信纸（四个字段都可直接改） */
+.persona { position: relative; margin: 30px 0 0; border: 1px solid var(--rule); background: var(--bg); padding: 26px 18px 20px; }
+.ob.done .persona { display: block; animation: slide-up 420ms ease-out both; }
+.ob.done .ob-form { display: none; }
+.persona .flap {
+  position: absolute; left: -1px; right: -1px; top: -22px; height: 22px;
+  border: 1px solid var(--rule); border-bottom: 0;
+  background: var(--touch);
+  clip-path: polygon(0 100%, 50% 0, 100% 100%);
+}
+.persona .nm { margin: 0; font-size: 26px; font-weight: 600; letter-spacing: 0.06em; border: 0; background: none; outline: none; width: 100%; font-family: var(--f-serif); color: var(--ink); }
+.persona .rowline { display: flex; align-items: baseline; gap: 8px; border-bottom: 1px solid var(--rule-soft); padding: 7px 2px; margin-top: 8px; }
+.persona .k { font-family: var(--f-sans); font-size: 12px; color: var(--ink-faint); letter-spacing: 0.1em; flex: none; }
+.persona .in { flex: 1; border: 0; background: none; outline: none; font-family: var(--f-serif); font-size: 15px; color: var(--ink); }
+.persona .again {
+  display: block; margin: 18px 0 0; border: 0; background: none; cursor: pointer;
+  font-family: var(--f-sans); font-size: 12px; color: var(--ink-soft);
+  text-decoration: underline dotted; text-underline-offset: 0.28em;
+}
+.persona .again:active { opacity: 0.55; }
+@keyframes slide-up { from { transform: translateY(18px); opacity: 0; } to { transform: none; opacity: 1; } }
+
+/* ── 设置（provider 三件套 + 回复语言 + 总量 + 数据清除）────────────── */
+.set { padding: 30px var(--read-pad) 60px; min-height: 100vh; }
+.set h2 { margin: 0 0 4px; font-size: 24px; font-weight: 500; letter-spacing: 0.12em; }
+.set .sub { margin: 0 0 22px; font-family: var(--f-sans); font-size: 12px; color: var(--ink-faint); }
+.set .rowline { display: flex; align-items: baseline; gap: 8px; border-bottom: 1px solid var(--rule); padding: 8px 2px; margin-bottom: 14px; }
+.set .k { font-family: var(--f-sans); font-size: 12px; color: var(--ink-faint); letter-spacing: 0.1em; flex: none; min-width: 64px; }
+.set .in { flex: 1; border: 0; background: none; outline: none; font-family: var(--f-serif); font-size: 16px; color: var(--ink); }
+.set .in::placeholder { color: var(--ink-faint); font-size: 13px; font-family: var(--f-sans); }
+.set .go {
+  display: block; margin: 20px auto 0; border: 0; background: none; cursor: pointer;
+  font-family: var(--f-serif); font-size: 16px; font-weight: 700; color: var(--ink);
+  text-decoration: underline; text-decoration-thickness: 1px; text-underline-offset: 0.32em;
+}
+.set .go:active { opacity: 0.55; }
+.set .msg { margin: 12px 0 0; font-family: var(--f-sans); font-size: 12px; line-height: 1.7; color: var(--ink-soft); }
+.set .msg.bad { color: var(--pencil); }
+.set .sec { margin-top: 26px; border-top: 1px solid var(--rule); padding-top: 14px; }
+.set .sec h3 { margin: 0 0 8px; font-family: var(--f-sans); font-size: 11px; letter-spacing: 0.18em; color: var(--ink-faint); font-weight: 500; }
+.set .langs { display: flex; gap: 10px; }
+.set .langbtn {
+  border: 1px solid var(--rule); border-top: 0; border-left: 0; background: none; cursor: pointer;
+  font-family: var(--f-sans); font-size: 12px; color: var(--ink-soft); padding: 6px 14px;
+}
+.set .langbtn.on { color: var(--ink); font-weight: 600; border-color: var(--ink-soft); }
+.set .totals { font-family: var(--f-mono); font-size: 12px; color: var(--ink-soft); line-height: 2; }
+.set .danger { display: flex; flex-direction: column; gap: 8px; align-items: flex-start; }
+.set .wipe {
+  border: 0; background: none; cursor: pointer; font-family: var(--f-sans); font-size: 12px;
+  color: var(--pencil); padding: 0; text-decoration: underline dotted; text-underline-offset: 0.28em;
+}
+.set .wipe:active { opacity: 0.55; }
+.set .back {
+  display: block; margin-top: 30px; border: 0; background: none; cursor: pointer;
+  font-family: var(--f-sans); font-size: 12px; color: var(--ink-soft);
+  text-decoration: underline dotted; text-underline-offset: 0.3em;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after { animation: none !important; transition: none !important; }
+}

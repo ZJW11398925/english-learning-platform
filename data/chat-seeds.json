@@ -1,0 +1,24 @@
+{
+  "version": 1,
+  "meta": {
+    "note": "内置精品种子（VS1 双层供给的零模型层）。内容由执行者撰写，属演示资产、无审校；「用户模型生成更多」随 VS3。",
+    "writtenBy": "TASK 执行者（2026-09-19）",
+    "pools": { "activities": "今日活动：按日期轮换，占开场信末尾的 P.S. 附笔位", "challenges": "挑战：「换个挑战」小签随机抽一条" }
+  },
+  "activities": [
+    { "id": "act-yesterday-small", "title": "昨日小事", "text": "讲一件你昨天做的小事，越具体越好——散步、吃饭、路过的店，都行。" },
+    { "id": "act-eight-words", "title": "八个词的一天", "text": "用 8 个英文词说清今天：八个词，不加解释，看看今天在你眼里长什么样。" },
+    { "id": "act-nearest-thing", "title": "手边最近的东西", "text": "描述你手边最近的一件东西：它是什么、哪儿来的、为什么在这儿。" },
+    { "id": "act-small-skill", "title": "教我一招", "text": "说一个你最近学会的小技能或小窍门，试着教会我。" },
+    { "id": "act-photo", "title": "一张照片", "text": "挑一张你最近拍的照片（不用发我），用英文说说拍的是什么、当时在干嘛。" },
+    { "id": "act-stranger", "title": "路过的陌生人", "text": "今天路上或窗外看到的一个陌生人，猜猜他要去干什么。" }
+  ],
+  "challenges": [
+    { "id": "ch-no-i", "text": "这句不许用 I 开头。" },
+    { "id": "ch-because", "text": "这一句里必须有一个 because。" },
+    { "id": "ch-no-goodbad", "text": "说说今天的心情，但不许用 good / bad / tired 这三个词。" },
+    { "id": "ch-answer-question", "text": "用一个问句回答我上一句话。" },
+    { "id": "ch-six-words", "text": "这句只许用 6 个词。" },
+    { "id": "ch-if-i-were", "text": "用 If I were… 开头，说一个你不会真去做的事。" }
+  ]
+}

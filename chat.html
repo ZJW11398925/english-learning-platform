@@ -1,0 +1,54 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <title>对话客厅 · 跟你自己设计的伙伴聊英语</title>
+  <meta name="description" content="自设 AI 人设，在流畅对话里学英语；学习的重心是你自己的表达。VS1：客厅能聊起来。">
+  <meta name="theme-color" content="#fbf9f4">
+  <meta name="mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <!--
+    内联 data URI 图标：只为消掉浏览器那次 favicon 请求（与 write.html 同一条纪律：
+    零外部资源；data: 不是外部资源，连一次网络请求都不产生）。
+  -->
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 20 20'%3E%3Crect width='20' height='20' rx='4' fill='%231b1a17'/%3E%3Cpath d='M4 8 L10 12 L16 8' fill='none' stroke='%23fbf9f4' stroke-width='1.9' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E">
+  <link rel="stylesheet" href="./chat.css">
+</head>
+<body>
+  <!--
+    对话客厅 · VS1「客厅能聊起来」。视觉基准 = 打样 V2「往来信笺」
+    （web/proto/chat-v2.html，人裁定的基准）：纸感令牌（纸 #fbf9f4 / 墨 #1b1a17 /
+    红铅笔 #a8562f / 系统衬线栈）取自 web/write.css 同源一版。
+
+    ⚠️ 这一页是子路径新页：web/index.html 与 web/write.html 一行不动，本页也刻意
+       不被任何既有页面引用（怎么进首页是总控/人的决定）。
+
+    ── STUB 边界（本切片如实登记，细节在 chat.mjs 文件头与 units/chat/ 各文件头）──
+      · 无长期记忆：人设卡与设置持久化 localStorage（elp.chat.*）；
+        对话历史单会话级（刷新还在，换人设/清数据即没）——三层外置记忆是 VS3。
+      · 无教学时刻：纯聊（模型提示词明确「不纠正、不上课、不主动翻译」）。
+      · 不设调用数量上限：成本用户自控 + token 透明仪表（微标 / 会话头 / 设置页三层）。
+      · 输入区三级台阶仅占位按钮（无模型调用）；抽屉（我的本子）本单不做。
+      · BYOK 零预置：设置页三件套（baseURL / API Key / 模型名）全自填，不预置任何
+        厂商（含 DeepSeek，占位只给格式示例）；localhost 端点是合法特性（本地模型）。
+      · 内置挑战/今日活动 = 静态 JSON 精品种子（web/data/chat-seeds.json，
+        零模型；内容由执行者撰写，属演示资产、无审校）。
+
+    ── 引擎装载失败会怎样 ─────────────────────────────────────────────────
+    chat.mjs 动态 import ./units/chat/*，失败就**如实说「引擎还没接上」**并写明原因，
+    绝不用演示数据顶上（沿 write.html 同一条纪律）。
+  -->
+  <main id="app"></main>
+  <script type="module">
+    import { mountChat } from './chat.mjs';
+    // 生产缺省：存储/取数/TTS 都用真浏览器环境；模型出口 = units/chat/client.mjs（读设置）。
+    try {
+      await mountChat(document.getElementById('app'));
+    } catch (err) {
+      document.getElementById('app').textContent
+        = `对话客厅没挂上：${String(err?.message ?? err)}（如实报错，不用演示数据顶上）`;
+    }
+  </script>
+</body>
+</html>
