@@ -17,6 +17,7 @@
 {"w":"Amman","phonetic":"æ'mɑ:n","pos":"n.","zh":"n. 安曼(约旦首都)","en":"n.","bnc":27599},
 {"w":"Amos","phonetic":"'eimәs","pos":"n.","zh":"n. 阿摩司(<<圣经>>人物)","en":"n.","bnc":20238,"exchange":"0:amo/1:s"},
 {"w":"Amsterdam","phonetic":".æmstә'dæm","pos":"n.","zh":"n. 阿姆斯特丹(荷兰首都)","en":"n.","bnc":6125},
+{"w":"a.m.","zh":"上午, 午前","en":"s before noon r before noon","collins":2},
 {"w":"amalgam","phonetic":"ә'mælgәm","pos":"n.","zh":"n. 汞合金, 汞齐\n[化] 汞齐; 汞合金","en":"n.","collins":1,"tag":"gre","bnc":18782,"frq":17090,"exchange":"s:amalgams"},
 {"w":"amalgamate","phonetic":"ә'mælgәmeit","pos":"v.","zh":"v. 使汞齐化, 合并","en":"s.","collins":1,"tag":"toefl gre","bnc":11735,"frq":30000,"exchange":"d:amalgamated/p:amalgamated/i:amalgamating/3:amalgamates"},
 {"w":"amalgamation","phonetic":"ә.mælgә'meiʃәn","pos":"n.","zh":"n. 汞齐化, 合并\n[化] 汞齐化; 汞齐化作用; 混汞法","en":"n.","bnc":12128,"frq":24086,"exchange":"s:amalgamations"},

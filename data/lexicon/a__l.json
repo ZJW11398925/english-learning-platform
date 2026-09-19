@@ -1,4 +1,5 @@
 [
+{"w":"A level","pos":"n.","zh":"n. 英国GCE考试甲级标准","collins":2},
 {"w":"AL","zh":"[计] 算法语言, 字母, 汇编语言\n[医] 铝(13号元素)","en":"n a silvery ductile metallic element found primarily in bauxite n a state in the southeastern United States on the Gulf of Mexico;","bnc":5629},
 {"w":"ALF","phonetic":"ælf","pos":"n.","zh":"n. 阿尔夫(Alfred的昵称)(m.)","bnc":12463},
 {"w":"ALGERNON","phonetic":"'ældʒәnәn","pos":"n.","zh":"n. 阿尔杰农(m.)","bnc":29288},
@@ -55,6 +56,8 @@
 {"w":"Alwyn","phonetic":"'ælwin","pos":"n.","zh":"n. 阿尔文（英国的作曲家）","bnc":27188},
 {"w":"Alzheimer","phonetic":"'ælz'ɛmɚ","pos":"n.","zh":"n. 阿尔茨海默病（等于Alzheimer’s disease）","bnc":16193,"exchange":"s:alzheimers"},
 {"w":"Alzheimer's Disease","phonetic":"'æltshaiməz","zh":"早老性痴呆；阿耳滋海默氏病","collins":1},
+{"w":"a little","zh":"一些, 一点点, 一点儿, 稍微, 些许","oxford":1},
+{"w":"a lot","zh":"大量, 很, 非常","oxford":1},
 {"w":"alabaster","phonetic":"'ælәbɑ:stә","pos":"n.","zh":"n. 雪花石膏\na. 雪花石膏制的","en":"n.","tag":"gre","bnc":24934,"frq":22647,"exchange":"s:alabasters"},
 {"w":"alacrity","phonetic":"ә'lækrәti","pos":"n.","zh":"n. 敏捷, 轻快, 乐意","en":"n.","tag":"gre","bnc":19836,"frq":27693},
 {"w":"alamo","phonetic":"'ælәmәu","pos":"n.","zh":"n. [植]白杨","en":"n.","bnc":43796,"frq":15914},

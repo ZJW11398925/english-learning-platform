@@ -14,9 +14,15 @@
 // ═══════════════════════════════════════════════════════════════════════════════
 // 三条硬约束（每一条都有单测钉着）
 // ═══════════════════════════════════════════════════════════════════════════════
-//   ① **只拉该词那一片**。查一个词最多两次请求：它自己那片（同首字母的片全算"它那片"，
-//      因为首字母桶被切成多片，词落在哪一片只有打开才知道），以及——**只在它确实是变形时**——
-//      原形所在的那一片。`inflect.json` 是**路由表不是片**，且只在需要还原时才拉。
+//   ① **只拉该取的那一片**。查一个词最多三次请求：`index.json`（路由表）、它自己那一片
+//      （同首字母桶被切细了，词落在哪一片由 `prefixes` 一次查表定），以及——**只在它确实
+//      不是词头时**——它那个前缀的**变形路由那一片**（`inflect_*.json`，按前缀切开的）。
+//      ⚠️ **桶内逐片扫已经不在主路上了**（2026-09-20 改）：旧顺序把"那一片没中 ⇒ 把整桶
+//      逐片扫一遍"排在"拉变形路由表"**之前**，于是每个"不是词头"的词（变形词、拼错的词、
+//      生僻词）都要先付一次整桶 —— 线上逐词实测 `classes` 11 次/1174KB、`sabahs`
+//      18 次/1286KB、**连查不到的词也付 961KB 换一句"词典里没查到"**。
+//      现在：前缀表给不出片名的键 ⇒ 只多取**一张零头片**（`<桶>__0`，实测 ≤75KB），
+//      其余一律**只取一片**；**任何情况下都不再整桶扫**。
 //   ② **运行时零外部请求**：本模块只从 `dataDir`（同源）取片。数据目录由
 //      `import.meta.url` 推出来（`web/units/lexicon.mjs` → `web/data/lexicon/`），
 //      没有硬编码域名，也没有 CDN。
@@ -25,9 +31,13 @@
 // ═══════════════════════════════════════════════════════════════════════════════
 // 变形 → 原形 的两条路（`gave` → `give`）
 // ═══════════════════════════════════════════════════════════════════════════════
-//   ① **权威那一份**：构建期从 ECDICT 的 `exchange` 列生成的路由表 `inflect.json`
-//      （变形 → 原形）。实测 28,774 键。命中时把"他是从哪个变形还原过来的"如实写进
+//   ① **权威那一份**：构建期从 ECDICT 的 `exchange` 列生成的路由表
+//      （变形 → 原形）。实测 28,746 键。命中时把"他是从哪个变形还原过来的"如实写进
 //      `lemmaForm`，界面据此说「give 的过去式」。
+//      ⚠️ 它**按前缀切成了 `inflect_*.json` 若干片**（旧产物是一整份 604KB 的
+//      `inflect.json`）：一次还原只取**它那个前缀**的那一片（实测单片 ≤32KB）。
+//      路由表 = `index.json` 的 `inflectPrefixes`（前缀 → 片名），与片名同一条规则：
+//      取"是这个词前缀、且最长"的那一条。
 //   ② **保守的构词法回退**：实测 `had` / `thought` / `studies` 这类在 ECDICT 的 exchange
 //      里**没有 `0:` 也没有对应的键**，光靠路由表查不到。所以再试几条**只减不增**的规则
 //      （`-s` / `-ies` / `-es` / `-ed` / `-ing` / `-ly`，含辅音双写回退），
@@ -236,7 +246,7 @@ export function shapeEntry(entry, { lemma = null, lemmaForm = null, lemmaVia = n
  *   - `storage` 可选的本机存储（`getItem`/`setItem`/`removeItem`）——只做"片已取过"的缓存，
  *               写不进去（隐私模式 / 配额满）**不拦流程**，只是下次还得再取一遍。
  *   - `dataDir` 词库目录（缺省 `DATA_DIR`）；测试可指向别处。
- *   - `cacheKey` 存储键前缀（缺省 `'elp.lexicon.v1.'`）。
+ *   - `cacheKey` 存储键前缀（缺省 `'elp.lexicon.v2.'`）。
  * @returns {{lookup: (word: string) => Promise<object|null>, stats: () => object, clear: () => void}}
  */
 export function createLexicon(deps = {}) {
@@ -248,12 +258,15 @@ export function createLexicon(deps = {}) {
   }
   const dataDir = deps.dataDir ?? DATA_DIR;
   const storage = deps.storage ?? null;
-  const cacheKey = deps.cacheKey ?? 'elp.lexicon.v1.';
+  const cacheKey = deps.cacheKey ?? 'elp.lexicon.v2.';
+
+  // ⚠️ **存储缓存键 v1 → v2**（2026-09-20）：分片方式、片名与变形路由的切法都变了，
+  //    而这份存储缓存**除了键名之外没有任何失效机制** ⇒ 老访客手里的 v1 缓存会让他一直
+  //    按旧片名去取（那些文件已经不在线上了）⇒ 每个词都查不到，而且是静默的。
+  //    换键 = 老缓存自然作废，只多付一次回源。
 
   /** 进程内缓存：URL → 已解析的 JSON（或 `null` = 取过但取不到）。 */
   const mem = new Map();
-  /** 路由表（变形 → 原形）。**只在需要还原时才拉**，拉到就一直留着。 */
-  let inflect = null;
   const stats = { requests: [], inflectLoaded: false, hits: 0, misses: 0, lemmas: 0 };
 
   const urlOf = (name) => new URL(`${name}.json`, dataDir).href;
@@ -310,23 +323,43 @@ export function createLexicon(deps = {}) {
     return [letter];
   }
 
-  /** `route` 与 `prefixes` 的本地缓存：拉一次 `index.json`，之后零 IO（**首屏不拉**：只在真要查词时才走这里）。 */
+  /**
+   * 这个桶里的**零头汇总片**（片名以 `__0` 结尾）—— 桶内"小于 64 条的小分组"并成的那一张。
+   *
+   * ⚠️ 它们**也进 `prefixes`**（构建期已保证前缀不相交），所以正常路径下这里用不到它；
+   *    留这个读数是为了诊断与门里的自检（"这个桶有几张零头片"）。
+   */
+  async function leftoverShardsOf(letter) {
+    const list = await shardsFor(letter);
+    return list.filter((n) => typeof n === 'string' && n.endsWith('__0'));
+  }
+
+  /** `route` / `prefixes` / `inflectPrefixes` / `inflectCross` 的本地缓存：拉一次 `index.json`。 */
   let routeCache = null;
   let prefixCache = null;
+  /** 变形路由的前缀表；`null` = 老数据（没有这张表）⇒ 退回"一整份 `inflect.json`"。 */
+  let inflectPrefixCache = null;
+  /** `index.json` 里到底有没有 `inflectPrefixes`（有表但为空 vs 根本没这张表，是两件事）。 */
+  let hasInflectTable = false;
+  /** 原形落在**别的片**的那些变形：`{ 变形: [原形, 原形所在片名] }`（构建期算好的）。 */
+  let crossCache = {};
   async function routeIndex() {
     if (routeCache === null || prefixCache === null) {
       const idx = (await load('index')) ?? {};
       routeCache = idx.route ?? {};
       prefixCache = idx.prefixes ?? {};
+      hasInflectTable = idx.inflectPrefixes !== null && typeof idx.inflectPrefixes === 'object';
+      inflectPrefixCache = hasInflectTable ? idx.inflectPrefixes : null;
+      crossCache = idx.inflectCross !== null && typeof idx.inflectCross === 'object' ? idx.inflectCross : {};
     }
     return routeCache;
   }
 
   /**
-   * **这个词该取哪一片**。
+   * 「这段键该取哪一片」—— 在**一张前缀表**上取"是它的前缀、且最长"的那一条。
    *
-   * `index.json` 的 `prefixes` 是**前缀 → 片名**的表（构建期算好的），所以这里只做
-   * 「取一个**是这个词前缀**、且**最长**的前缀」——纯字符串比较，零 IO，零推断。
+   * 纯字符串比较，零 IO，零推断。同一套规则用在两张表上：`prefixes`（词条片）与
+   * `inflectPrefixes`（变形路由片）。
    *
    * ⚠️ 为什么不能按片名反推（本文件踩过两次，两次都是"看起来对"）：
    *   ① 片名不是词头的前缀 —— `c__l` 这一片覆盖的前缀是 `cl`（词头里 `c`、`l` 是紧挨着的，
@@ -337,70 +370,85 @@ export function createLexicon(deps = {}) {
    *
    * @returns {string|null} 片名；`null` = 表里没有能覆盖这个键的片
    */
-  function shardFor(letter, key) {
-    const table = prefixCache ?? {};
+  function routedShard(table, key) {
+    if (table === null) return null;
     let best = null;
     let bestLen = -1;
     for (let i = 1; i <= key.length; i += 1) {
-      const p = key.slice(0, i);
-      const name = table[p];
+      const name = table[key.slice(0, i)];
       if (typeof name === 'string' && i > bestLen) { bestLen = i; best = name; }
     }
-    // 表里连一条能覆盖这个键的前缀都没有（老数据 / 表缺 / 短词只落在"杂项片"里）
-    // ⇒ 回 `null`，让调用方走兜底逐片扫 —— **不要**在这里猜一个片名。
     return best;
   }
 
+  /** 兼容旧签名（测试与探针读它）：`prefixes` 表上的路由。 */
+  function shardFor(letter, key) {
+    return routedShard(prefixCache ?? {}, key);
+  }
+
+  /** 取一片并找词头（**大小写不敏感**：片里的词头过 `normalizeWord` 再比）。 */
+  async function findInShard(name, key) {
+    const arr = await load(name);
+    if (!Array.isArray(arr)) return null;
+    return arr.find((e) => normalizeWord(e?.w) === key) ?? null;
+  }
+
   /**
-   * 在一个桶里找一个词头（**大小写不敏感**）。
+   * **它自己那一片**（不含任何"扫全桶"的动作）。
    *
-   * **先取"该取的那一片"**（`shardFor`，一次请求）；只有在那一轮没中、或者要**还原变形**
-   * （原形的前缀可能与变形不同，如 `went` → `go`）时，才退到逐片扫。
-   * 这个顺序是"只拉该词那一片"这条硬约束的落点。
+   * 三步，每一步最多一次请求，且**只可能命中一片**：
+   *   ① `prefixes` 表定出的那一片（构建期算好的前缀 → 片名；**零头片也在表里**）；
+   *   ② 表里给不出片名、而**这个桶只有一片** ⇒ 就是它（老数据 / 表缺时的兜底）；
+   *   ③ 其余情况一律 `null` —— **不猜片名**（猜错 = 拿到别人的词条，比查不到更坏）。
+   *
+   * ⚠️ **这里没有"逐片扫"那条退路**，这是本文件最重要的一处修改（2026-09-20）：
+   *    旧代码在 ① 没中之后会把**整桶**逐片拉一遍（实测 c 桶 9 片 645KB / s 桶 16 片 780KB），
+   *    而它发生在"拉变形路由表"之前 ⇒ 每个变形词、每个拼错的词都先付一次整桶。
    */
-  async function findInBucket(letter, key, { routedOnly = true } = {}) {
+  async function findOwnShard(letter, key) {
     await routeIndex();
     const routed = shardFor(letter, key);
-    if (routed !== null) {
-      const arr = await load(routed);
-      if (Array.isArray(arr)) {
-        const hit = arr.find((e) => normalizeWord(e?.w) === key);
-        if (hit !== undefined) return hit;
-      }
-      if (routedOnly) return null;
-    } else if (routedOnly) {
-      return null;
-    }
-    // 退路：逐片扫（只在没有该取的片、或调用方明确要扫全桶时走）。
-    for (const n of await shardsFor(letter)) {
-      if (n === routed) continue;
-      const arr = await load(n);
-      if (!Array.isArray(arr)) continue;
-      const hit = arr.find((e) => normalizeWord(e?.w) === key);
-      if (hit !== undefined) return hit;
-    }
+    if (routed !== null) return findInShard(routed, key);
+    const list = routeCache[letter];
+    if (!Array.isArray(list) || list.length === 0) return findInShard(letter, key);
+    if (list.length === 1) return findInShard(list[0], key);
     return null;
   }
 
-  /** 取路由表（懒加载，只拉一次）。 */
-  async function loadInflect() {
-    if (inflect !== null) return inflect;
-    const data = await load('inflect');
-    inflect = data?.map !== null && typeof data?.map === 'object' ? data.map : {};
+  /**
+   * 取**这个词前缀**的那一片变形路由表（懒加载；拉过就一直留着）。
+   *
+   * @returns {Promise<Record<string,string>|null>} `null` = 这个前缀没有任何变形映射 ⇒
+   *          **一次请求都不发**（旧产物是一整份 604KB，任何"不是词头"的词都得付它）。
+   */
+  async function loadInflect(key) {
+    await routeIndex();
+    const name = hasInflectTable ? routedShard(inflectPrefixCache, key) : 'inflect';
+    if (name === null) return null;
+    const data = await load(name);
     stats.inflectLoaded = true;
-    return inflect;
+    return data?.map !== null && typeof data?.map === 'object' ? data.map : {};
   }
 
   /**
    * 查一个词。
    *
    * 顺序（每一步都只在**前一步没中**时才多花一次请求或一次规则试探）：
-   *   ① 归一 → **该取的那一片**（`shardFor` 按最长前缀定）精确查（大小写不敏感）；
-   *   ② 那一片没中、而这一桶**还有别的片** ⇒ 退到桶内逐片扫一次
-   *      （给"没 `route` 的老数据"与"词头写法与片名覆盖范围不一致"兜底）；
-   *   ③ 还没中 ⇒ 拉变形路由表，拿"权威的变形 → 原形"，去**原形该取的那一片**查；
-   *   ④ 还没中 ⇒ 试构词法回退的候选，**同样只认在真查得到的**；
-   *   ⑤ 都没有 ⇒ **`null`**（不编）。
+   *   ⓪ 构建期标出的"**原形落在别的片**"的那些变形（实测 43 个：`ate` `came` `did` `gave`
+   *      `bought` `geese` …）：直接去原形那一片把它取回来。**两次请求**，而且不必先在自己
+   *      那一片里空找一次。（为什么这样是安全的：构建期只收「变形自己**不是**词头」的映射
+   *      ⇒ 键出现在 `inflectCross` 里 ⇒ 它一定不是词头。）
+   *   ① 归一 → **它自己那一片**（`prefixes` 表按最长前缀定，零头片也在表里）精确查
+   *      （大小写不敏感）。**命中就结束 —— 这是绝大多数情况，两次请求。**
+   *   ② ① 没中 ⇒ **变形还原**（2026-09-20 起排在"桶内逐片扫"之前）：
+   *      先问权威路由表（`inflectPrefixes` → 它那个前缀的那一片）"它是不是谁的变形"，
+   *      再把"原形该取的那一片"查一遍（通常已经在缓存里，不额外发请求）；
+   *      路由表没有 ⇒ 试构词法回退的候选，**同样只认在真查得到的**。
+   *   ③ 都没有 ⇒ **`null`**（不编）。
+   *
+   * ⚠️ **① 与 ② 之间没有"把整桶逐片扫一遍"了**（那是本文件历史上最贵的一步：线上实测
+   *    `classes` 11 次/1174KB、`sabahs` 18 次/1286KB、查不到的词 961KB）。
+   *    整桶扫能查到的词只剩"零头片里的那些"，而零头片现在**也在前缀表里** ⇒ 一次请求精确取到。
    *
    * @returns {Promise<object|null>} 规范词条；缺词 = `null`。
    */
@@ -408,25 +456,34 @@ export function createLexicon(deps = {}) {
     const key = normalizeWord(word);
     if (key === '') return null;
 
-    const ownBucket = bucketOf(key);
-    // ① 该取的那一片（一次请求，命中即返回 —— 这是绝大多数情况）
-    let direct = await findInBucket(ownBucket, key);
-    // ② 兜底：桶内逐片扫（只在"该取的那一片"没中时才发生）
-    if (direct === null) direct = await findInBucket(ownBucket, key, { routedOnly: false });
+    // ⓪ 原形落在别的片：构建期已经写明"原形是谁、在哪一片" ⇒ 直接去那一片
+    await routeIndex();
+    const cross = crossCache[key];
+    if (Array.isArray(cross) && typeof cross[0] === 'string' && typeof cross[1] === 'string') {
+      const found = await findInShard(cross[1], cross[0]);
+      if (found !== null) {
+        stats.hits += 1;
+        stats.lemmas += 1;
+        return shapeEntry(found, { lemma: cross[0], lemmaForm: key, lemmaVia: 'exchange' });
+      }
+      // 表说在那儿、实际没找到（数据漂移）⇒ 不当成"没这个词"，继续走正常路径。
+    }
+
+    // ① 它自己那一片（**只取一片**，前缀表一次查表定位）
+    const direct = await findOwnShard(bucketOf(key), key);
     if (direct !== null) { stats.hits += 1; return shapeEntry(direct); }
 
-    // ③ 权威路由表
-    const map = await loadInflect();
-    const lemma = typeof map[key] === 'string' ? map[key] : null;
+    // ② 变形还原（权威路由表 → 构词法回退）
+    const map = await loadInflect(key);
+    const lemma = map !== null && typeof map[key] === 'string' ? map[key] : null;
     const tries = [];
     if (lemma !== null) tries.push({ lemma, via: 'exchange' });
-    // ④ 构词法回退
     for (const cand of stripCandidates(key)) {
       if (cand !== lemma) tries.push({ lemma: cand, via: 'rule' });
     }
 
     for (const t of tries) {
-      const found = await findInBucket(bucketOf(t.lemma), t.lemma);
+      const found = await findOwnShard(bucketOf(t.lemma), t.lemma);
       if (found !== null) {
         stats.hits += 1;
         stats.lemmas += 1;
@@ -443,7 +500,7 @@ export function createLexicon(deps = {}) {
     /** 机械读数（门 G8 用）：取过哪些 URL、路由表拉没拉、命中与缺词各几次。 */
     stats: () => ({ requests: [...stats.requests], inflectLoaded: stats.inflectLoaded, hits: stats.hits, misses: stats.misses, lemmas: stats.lemmas, cached: mem.size }),
     /** 清进程内缓存（**清存储不在这里**：存储是注入进来的，谁的存储谁清）。 */
-    clear: () => { mem.clear(); inflect = null; routeCache = null; prefixCache = null; stats.inflectLoaded = false; },
+    clear: () => { mem.clear(); routeCache = null; prefixCache = null; inflectPrefixCache = null; hasInflectTable = false; crossCache = {}; stats.inflectLoaded = false; },
     /** 路由表（测试用）。 */
     route: async () => (await load('index'))?.route ?? null,
     /**
@@ -454,6 +511,27 @@ export function createLexicon(deps = {}) {
       await routeIndex();
       const k = normalizeWord(word);
       return shardFor(bucketOf(k), k);
+    },
+    /**
+     * 「这个词的变形路由该取哪一片」的对外读数（同上）。`null` = 这个前缀没有变形映射。
+     * 老数据（`index.json` 里没有 `inflectPrefixes`）回 `'inflect'`（一整份）。
+     */
+    inflectShardFor: async (word) => {
+      await routeIndex();
+      const k = normalizeWord(word);
+      if (!hasInflectTable) return 'inflect';
+      return routedShard(inflectPrefixCache, k);
+    },
+    /** 这个桶的零头汇总片（诊断用；正常路径不依赖它 —— 它们也在 `prefixes` 里）。 */
+    leftoverShardsOf: async (word) => {
+      await routeIndex();
+      const k = normalizeWord(word);
+      return leftoverShardsOf(bucketOf(k));
+    },
+    /** 构建期写明的"原形落在别的片"的那些变形（诊断用）：`[原形, 片名]` 或 `null`。 */
+    crossRoute: async (word) => {
+      await routeIndex();
+      return crossCache[normalizeWord(word)] ?? null;
     },
   };
 }

@@ -1,0 +1,18 @@
+[
+{"w":"F","phonetic":"ef","zh":"[计] 故障, 假, 法拉, 字段, 标记, 特征, 分数, 频率, 函数, 功能","en":"n.","tag":"gk","bnc":4238},
+{"w":"FBI","zh":"美国联邦调查局\n[经] 美国联邦调查局","en":"n a federal law enforcement agency that is the principal investigative arm of the Department of Justice","collins":2,"bnc":12777},
+{"w":"FC","zh":"消防, 火力控制, 足球俱乐部\n[计] 信息流控制, 字形改变, 操作码, 功能码\nDOS外部命令:比较两个文件的内容","bnc":12982},
+{"w":"FDP","pos":"abbr.","zh":"abbr. 光纤分布点（Fiber Distribution Point）；飞行数据处理器（Flight Data Processor）","bnc":18220},
+{"w":"FF","zh":"[计] 快进, 触发器, 换页","bnc":28312,"exchange":"s:ffs/0:ff/1:s"},
+{"w":"FM","zh":"(英)陆军元帅, 外国使团, 调频, 频率调制\n[计] 设备管理, 快速存储器, 文件管理, 调频","en":"n modulation of the frequency of the (radio) carrier wave n a radioactive transuranic metallic element produced by bombarding plutonium with neutrons","collins":2,"bnc":12814,"exchange":"s:fms"},
+{"w":"FP","zh":"总保单, 总保险单, 全部付讫, 冰点, 凝固点\n[计] 浮点, 函数处理器","bnc":27014},
+{"w":"FSA","zh":"[医] 甲醛磺胺醋胺","bnc":18018},
+{"w":"Fyfe","pos":"n.","zh":"n. (Fyfe)人名；(英)法伊夫","bnc":27546},
+{"w":"fg","pos":"abbr.","zh":"abbr. 悬浮式陀螺（Floated Gyro）；细粒（Fine-Grain）","bnc":29382},
+{"w":"fjord","phonetic":"fjɔ:d","pos":"n.","zh":"n. 峡湾","en":"n.","bnc":24457,"frq":21776,"exchange":"s:fjords"},
+{"w":"fn","pos":"n.","zh":"n. 功能, 函数","bnc":18186},
+{"w":"ft","pos":"n.","zh":"n. 英尺","en":"n a linear unit of length equal to 12 inches or a third of a yard","collins":2,"bnc":4907,"exchange":"s:fts"},
+{"w":"ftse","pos":"abbr.","zh":"abbr. failed to sustain engraftment 支撑移植物植入失败","bnc":9424},
+{"w":"fw","pos":"abbr.","zh":"abbr. 给水（Feed Water）；磁场减弱；淡水；隔火墙","bnc":25680},
+{"w":"fx","pos":"abbr.","zh":"abbr. 外汇（Foreign Exchange）；固定电台（Fixed Station）","bnc":28272}
+]
